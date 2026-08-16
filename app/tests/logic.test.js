@@ -212,3 +212,44 @@ test("sorting does not mutate the array it was given", () => {
   L.sortByTime(items);
   assert.deepEqual(items.map((i) => i.slug), ["b", "a"]);
 });
+
+// --- slug_marker: composed at output only, never fused into the slug ---
+
+test("the 編輯備註 marker is prefixed onto the slug line in the output", () => {
+  const out = L.buildOutputText([
+    {
+      bucket: "passed", included: true,
+      slug: "合成焦點報導1800", slug_marker: "【勿上網】",
+      style: "SOT", time: "07:49:58", group: "政",
+      title: "合成標題範例", body: "內文", keywords: "#關鍵字",
+    },
+  ]);
+  assert.equal(out.split("\n")[0], "【勿上網】合成焦點報導1800 SOT 07:49:58 政");
+});
+
+test("an entry with no marker renders exactly as before", () => {
+  const out = L.buildOutputText([
+    {
+      bucket: "passed", included: true,
+      slug: "合成焦點報導1800", slug_marker: "",
+      style: "SOT", time: "07:49:58", group: "政",
+      title: "t", body: "b", keywords: "k",
+    },
+  ]);
+  assert.equal(out.split("\n")[0], "合成焦點報導1800 SOT 07:49:58 政");
+});
+
+test("a missing slug_marker field does not print 'undefined'", () => {
+  // Older cached entries, or any bucket that never carried the field.
+  const out = L.buildOutputText([
+    { bucket: "passed", included: true, slug: "s", style: "SOT", time: "01:00:00", group: "", title: "t", body: "b", keywords: "k" },
+  ]);
+  assert.equal(out.split("\n")[0], "s SOT 01:00:00");
+});
+
+test("the marker never becomes part of the slug used for doc matching", () => {
+  // Compare sends `slug` to the shared doc; if the marker were fused in, every
+  // comparison would miss and the tool would re-write entries already in the doc.
+  const item = { slug: "合成焦點報導1800", slug_marker: "【勿上網】" };
+  assert.equal(item.slug, "合成焦點報導1800");
+});

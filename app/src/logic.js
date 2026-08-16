@@ -93,7 +93,10 @@
     return items
       .filter((i) => isOutputBucket(i.bucket) && i.included)
       .map((i) => {
-        const head = [i.slug, i.style, i.time];
+        // The 編輯備註 marker is prefixed here, at output time only. It is never part
+        // of `slug` itself, because `slug` is what gets matched against the shared
+        // doc -- a prefixed slug would fail every comparison.
+        const head = [`${i.slug_marker ?? ""}${i.slug}`, i.style, i.time];
         if ((i.group ?? "").trim() !== "") head.push(i.group);
         return [head.join(" "), i.title, i.body, i.keywords].join("\n");
       })

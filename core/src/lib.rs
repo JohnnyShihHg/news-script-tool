@@ -25,6 +25,9 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     let style = header_value(&header, "樣式");
     let time = header_value(&header, "累積時間");
     let group = header_value(&header, "組");
+    // 註記 is deliberately not read: in practice it holds a camera operator's name,
+    // not a publishing instruction.
+    let editor_note = header_value(&header, "編輯備註");
 
     if clean::is_excluded_slug(&slug, &cfg.filter) {
         return Outcome::Skipped;
@@ -50,6 +53,7 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                     time,
                     group,
                     title: String::new(),
+                    slug_marker: clean::slug_marker(&editor_note, &cfg.annotations),
                     body: String::new(),
                     raw_title: String::new(),
                     raw_body: String::new(),
@@ -110,7 +114,12 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 style: style.clone(),
                 time,
                 group,
-                title: title_norm,
+                title: format!(
+                    "{}{}",
+                    clean::title_prefix(&editor_note, &style, &title_norm, &cfg.annotations),
+                    title_norm
+                ),
+                slug_marker: clean::slug_marker(&editor_note, &cfg.annotations),
                 body: body_norm,
                 raw_title: title,
                 raw_body: body_raw,

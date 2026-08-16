@@ -299,7 +299,7 @@ function cardHtml(item) {
     return `
       <div class="card filtered" data-bucket="${bucket}">
         <div class="card-head">
-          <span class="slug">${escapeHtml(fields.slug)}</span>
+          <span class="slug">${fields.slug_marker ? `<span class="badge removed">${escapeHtml(fields.slug_marker)}</span> ` : ""}${escapeHtml(fields.slug)}</span>
           <span class="badge filtered">已濾除・樣式 ${escapeHtml(fields.style)}</span>
           <span class="file-name">${escapeHtml(fields.file_name)}</span>
         </div>
@@ -503,6 +503,7 @@ function buildOutput() {
         bucket: i.bucket,
         included: i.included,
         slug: fields.slug,
+        slug_marker: fields.slug_marker ?? "",
         style: fields.style,
         time: fields.time,
         group: fields.group,
@@ -912,6 +913,26 @@ function settingsModalHtml(config, apiStatus) {
           </section>
 
           <section class="settings-section">
+            <h3>備註標記（編輯備註 → slug 前綴）</h3>
+            ${styleField("勿上網 同義詞", "annotations.no_upload_terms", config.annotations.no_upload_terms)}
+            <div class="field"><label>顯示標籤</label><input type="text" data-cfg="annotations.no_upload_label" value="${escapeHtml(config.annotations.no_upload_label)}" /></div>
+            ${styleField("版權問題 同義詞", "annotations.copyright_terms", config.annotations.copyright_terms)}
+            <div class="field"><label>顯示標籤</label><input type="text" data-cfg="annotations.copyright_label" value="${escapeHtml(config.annotations.copyright_label)}" /></div>
+            ${styleField("可上網 同義詞", "annotations.allowed_upload_terms", config.annotations.allowed_upload_terms)}
+            <div class="field"><label>顯示標籤</label><input type="text" data-cfg="annotations.allowed_upload_label" value="${escapeHtml(config.annotations.allowed_upload_label)}" /></div>
+            <div class="muted">只比對完整詞、不看單一個字 —— 真實稿件有「切勿黑畫面」這種備註，用「勿」單字比對會誤判成不可上網。「註記」欄位不看（通常是攝影姓名）。</div>
+          </section>
+
+          <section class="settings-section">
+            <h3>標題前綴</h3>
+            ${styleField("判定獨家的備註關鍵字", "annotations.exclusive_terms", config.annotations.exclusive_terms)}
+            <div class="field"><label>獨家前綴</label><input type="text" data-cfg="annotations.exclusive_prefix" value="${escapeHtml(config.annotations.exclusive_prefix)}" /></div>
+            ${styleField("判定最新的樣式", "annotations.latest_styles", config.annotations.latest_styles)}
+            <div class="field"><label>最新前綴</label><input type="text" data-cfg="annotations.latest_prefix" value="${escapeHtml(config.annotations.latest_prefix)}" /></div>
+            <div class="muted">兩者同時成立時只加獨家。標題若已經有前綴就不會重複加。</div>
+          </section>
+
+          <section class="settings-section">
             <h3>內文雜訊清除</h3>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="clean.strip_marker_symbols" ${config.clean.strip_marker_symbols ? "checked" : ""} /> 移除每行開頭的雜訊符號（例如 <code>..早安你好</code> → <code>早安你好</code>）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="clean.drop_non_cjk_lines" ${config.clean.drop_non_cjk_lines ? "checked" : ""} /> 刪除整行沒有中文的備註行（例如單獨一行的 <code>##</code>、<code>OK</code>）</label>
@@ -959,6 +980,11 @@ const LIST_FIELDS = new Set([
   "filter.excluded_slug_suffixes",
   "filter.flag_styles",
   "markers.refresh_keywords",
+  "annotations.no_upload_terms",
+  "annotations.copyright_terms",
+  "annotations.allowed_upload_terms",
+  "annotations.exclusive_terms",
+  "annotations.latest_styles",
 ]);
 
 function readConfigFromForm(base) {

@@ -27,13 +27,24 @@ fn config_path() -> Option<std::path::PathBuf> {
 }
 
 fn load_config_from_disk_or_default() -> Config {
-    match config_path() {
+    let mut cfg = match config_path() {
         Some(path) if path.exists() => match news_script_core::config::load_from_path(&path) {
             Ok(cfg) => cfg,
             Err(_) => Config::default(),
         },
         _ => Config::default(),
+    };
+
+    // A saved list shadows its default entirely, so without this any newly shipped
+    // default (a new style, a new refresh keyword) would never reach a machine that
+    // already has a config file -- which is every machine that has opened settings.
+    // Persist immediately so the merge happens once rather than on every launch.
+    if news_script_core::config::migrate(&mut cfg) {
+        if let Some(path) = config_path() {
+            let _ = news_script_core::config::save_to_path(&cfg, &path);
+        }
     }
+    cfg
 }
 
 #[derive(Serialize, Clone)]
@@ -54,6 +65,9 @@ struct EntryFields {
     time: String,
     group: String,
     title: String,
+    /// Label for the slug line; composed at output time so `slug` itself stays
+    /// exactly as iNews wrote it and keeps matching against the shared doc.
+    slug_marker: String,
     body: String,
     raw_title: String,
     raw_body: String,
@@ -69,6 +83,7 @@ impl From<&NewsEntry> for EntryFields {
             time: e.time.clone(),
             group: e.group.clone(),
             title: e.title.clone(),
+            slug_marker: e.slug_marker.clone(),
             body: e.body.clone(),
             raw_title: e.raw_title.clone(),
             raw_body: e.raw_body.clone(),

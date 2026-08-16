@@ -1,4 +1,4 @@
-use crate::config::{CleanConfig, FilterConfig};
+use crate::config::{AnnotationsConfig, CleanConfig, FilterConfig};
 use crate::model::StyleClass;
 
 /// Symbols producers leave at the start of a line as iNews control runs (`.^_^`).
@@ -89,6 +89,63 @@ fn strip_line_markers(line: &str) -> String {
     // exactly as typed: there is no reliable way to tell a stray dot from a real one
     // mid-sentence, and guessing wrong rewrites a script that goes to air.
     line[start..].to_string()
+}
+
+/// Marker for the slug line, derived from the 編輯備註 note.
+///
+/// Returns the label only — the slug string itself is never modified, because the
+/// slug is what gets matched against the shared doc. Prefixing it would make every
+/// comparison miss.
+///
+/// Most restrictive wins when a note somehow hits more than one group: a story that
+/// reads as both blocked and cleared must be treated as blocked.
+pub fn slug_marker(editor_note: &str, cfg: &AnnotationsConfig) -> String {
+    let note = editor_note.trim();
+    if note.is_empty() {
+        return String::new();
+    }
+    let hits = |terms: &[String]| terms.iter().any(|t| !t.is_empty() && note.contains(t.as_str()));
+
+    if hits(&cfg.no_upload_terms) {
+        cfg.no_upload_label.clone()
+    } else if hits(&cfg.copyright_terms) {
+        cfg.copyright_label.clone()
+    } else if hits(&cfg.allowed_upload_terms) {
+        cfg.allowed_upload_label.clone()
+    } else {
+        String::new()
+    }
+}
+
+/// Prefix for the on-screen title: 獨家 when the note marks an exclusive, otherwise
+/// 最新 when the style is a breaking-news format. Exclusive wins — it is the stronger
+/// claim, and per the user only one prefix should appear.
+///
+/// Returns an empty string when the title already carries the prefix, so a headline a
+/// producer prefixed by hand never ends up as 「最新》最新》…」.
+pub fn title_prefix(editor_note: &str, style: &str, title: &str, cfg: &AnnotationsConfig) -> String {
+    let note = editor_note.trim();
+    let is_exclusive = cfg
+        .exclusive_terms
+        .iter()
+        .any(|t| !t.is_empty() && note.contains(t.as_str()));
+
+    let chosen = if is_exclusive {
+        &cfg.exclusive_prefix
+    } else if cfg.latest_styles.iter().any(|s| eq_ci(s, style)) {
+        &cfg.latest_prefix
+    } else {
+        return String::new();
+    };
+
+    let trimmed = title.trim_start();
+    if trimmed.starts_with(chosen.as_str())
+        || trimmed.starts_with(cfg.exclusive_prefix.as_str())
+        || trimmed.starts_with(cfg.latest_prefix.as_str())
+    {
+        return String::new();
+    }
+    chosen.clone()
 }
 
 fn eq_ci(a: &str, b: &str) -> bool {
@@ -189,5 +246,87 @@ mod marker_tests {
         };
         let input = ".^_^內文。\n##\n結尾。##";
         assert_eq!(strip_body_markers(input, &off), input);
+    }
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use super::*;
+    use crate::config::AnnotationsConfig;
+
+    fn ann() -> AnnotationsConfig {
+        AnnotationsConfig::default()
+    }
+
+    #[test]
+    fn every_listed_do_not_publish_wording_collapses_to_one_label() {
+        for note in [
+            "勿上網", "勿上YT", "勿YT", "不上YT", "不上網", "不po網", "版權勿上",
+            "不要上網", "勿網", "網勿",
+        ] {
+            assert_eq!(slug_marker(note, &ann()), "【勿上網】", "note was {note}");
+        }
+    }
+
+    #[test]
+    fn copyright_and_cleared_wordings_collapse_to_their_own_labels() {
+        for note in ["未授權", "不授權", "版權問題"] {
+            assert_eq!(slug_marker(note, &ann()), "【版權問題】", "note was {note}");
+        }
+        for note in ["已授權", "授權可上", "可上YT", "可上網"] {
+            assert_eq!(slug_marker(note, &ann()), "【可上網】", "note was {note}");
+        }
+    }
+
+    #[test]
+    fn a_note_about_a_black_screen_is_not_mistaken_for_do_not_publish() {
+        // 「切勿黑畫面」 appears in real scripts. Matching on the bare character 勿
+        // would wrongly block it, so only the listed full terms count.
+        assert_eq!(slug_marker("切勿黑畫面", &ann()), "");
+    }
+
+    #[test]
+    fn notes_with_no_publishing_instruction_produce_no_marker() {
+        for note in ["", "即時訊10", "柯鳳儀 +說明框", "交12前"] {
+            assert_eq!(slug_marker(note, &ann()), "", "note was {note:?}");
+        }
+    }
+
+    #[test]
+    fn a_marker_is_found_inside_a_longer_note() {
+        assert_eq!(slug_marker("版權問題 待確認", &ann()), "【版權問題】");
+    }
+
+    #[test]
+    fn exclusive_notes_seen_in_real_scripts_all_produce_the_exclusive_prefix() {
+        for note in ["獨", "C獨主", "獨家 修標7千人"] {
+            assert_eq!(title_prefix(note, "SOT", "標題", &ann()), "獨家》", "note was {note}");
+        }
+    }
+
+    #[test]
+    fn breaking_styles_produce_the_latest_prefix_case_insensitively() {
+        for style in ["live", "LIVE", "slive", "SLIVE", "sl", "SL", "4G", "SNG", "推播", "連線", "旋風", "閃電", "海神"] {
+            assert_eq!(title_prefix("", style, "標題", &ann()), "最新》", "style was {style}");
+        }
+    }
+
+    #[test]
+    fn exclusive_wins_when_a_breaking_style_is_also_exclusive() {
+        assert_eq!(title_prefix("獨", "LIVE", "標題", &ann()), "獨家》");
+    }
+
+    #[test]
+    fn an_ordinary_style_with_an_ordinary_note_gets_no_prefix() {
+        assert_eq!(title_prefix("即時訊10", "SOT", "標題", &ann()), "");
+    }
+
+    #[test]
+    fn a_title_a_producer_already_prefixed_is_left_alone() {
+        // Otherwise the headline reads 「最新》最新》…」.
+        assert_eq!(title_prefix("", "LIVE", "最新》已經加過了", &ann()), "");
+        assert_eq!(title_prefix("獨", "SOT", "獨家》已經加過了", &ann()), "");
+        // Cross-case too: an exclusive whose title already says 最新》 gains nothing.
+        assert_eq!(title_prefix("獨", "SOT", "最新》人工加的", &ann()), "");
     }
 }
