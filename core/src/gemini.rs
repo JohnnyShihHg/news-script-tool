@@ -66,9 +66,18 @@ impl GeminiResponse {
 
 fn keyword_prompt(title: &str, body: &str, count: usize) -> String {
     format!(
-        "你是新聞編輯，請根據以下新聞標題與內文，產生正好 {count} 個繁體中文關鍵字。\n\
-         規則：只能使用稿件中明確提到的人事時地物，不可杜撰、不可超譯、不可加入稿件未提及的資訊；\n\
-         可包含英文或數字；每個關鍵字精簡（通常 2-6 字）；直接輸出 JSON 字串陣列，不要加任何說明文字或 markdown 標記。\n\n\
+        "你是新聞編輯，請根據以下新聞標題與內文，產生正好 {count} 個繁體中文關鍵字，\n\
+         用途是給讀者搜尋、歸類這則新聞用的標籤。\n\n\
+         規則：\n\
+         1. 只能使用稿件中明確提到的人事時地物，不可杜撰、不可超譯、不可加入稿件未提及的資訊。\n\
+         2. 優先選：人名、地名（縣市/行政區/路名）、機構或店家名稱、案件或事件類型（例如竊盜、鬥毆、詐騙）。\n\
+         3. 避免選：金額、數量、時間點、門號、案發時刻這類純數字資訊 —— 這些幾乎每則社會新聞都有，\n\
+            當關鍵字沒有辨識度，除非那個數字本身就是新聞的重點（例如「reward」懸賞金額創新高的新聞）。\n\
+         4. 可包含英文或數字（不含前述第 3 點排除的情況）；每個關鍵字精簡（通常 2-6 字）。\n\
+         5. 直接輸出 JSON 字串陣列，不要加任何說明文字或 markdown 標記。\n\n\
+         範例（不是這則稿件的內容，只示範選擇標準）：\n\
+         好：[\"台中西區\", \"明禮街\", \"竊盜\", \"監視器\"]\n\
+         差：[\"1萬1千元\", \"4分鐘\", \"230支\", \"18:04\"] （純數字資訊，沒有辨識度）\n\n\
          標題：{title}\n內文：{body}"
     )
 }
@@ -178,6 +187,19 @@ pub fn api_key_from_env() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_prompt_tells_the_model_to_avoid_bare_numbers() {
+        // Regression guard for real output like #1萬1千元 / #4分鐘 / #230支 -- the
+        // model was technically obeying "do not fabricate" by picking any literal
+        // figure from the body, which produces hashtags with no search value. The
+        // prompt needs an explicit steer toward named entities/event type and away
+        // from amounts/counts/timestamps, not just a wider "do not fabricate" rule.
+        let prompt = keyword_prompt("標題", "內文", 4);
+        assert!(prompt.contains("避免選"), "prompt lost its guidance against low-signal numeric keywords");
+        assert!(prompt.contains("金額") && prompt.contains("時間點"), "prompt should name the exact failure mode seen in production");
+        assert!(prompt.contains("人名") && prompt.contains("地名"), "prompt should steer toward named entities instead");
+    }
 
     #[test]
     fn rate_limit_error_tells_the_user_to_wait_rather_than_dumping_the_status() {
