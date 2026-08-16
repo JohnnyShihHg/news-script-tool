@@ -16,7 +16,11 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # v4 targets Node 20, which runners now force onto Node 24 with a deprecation
+      # warning. v5+ targets Node 24 natively. The breaking change introduced in
+      # v5.1/v6/v7 only affects `pull_request_target` checkouts, which this workflow
+      # never performs -- it runs on tag pushes and manual dispatch only.
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Scoped to the core crate on purpose. `--workspace` also builds the Tauri app
@@ -33,7 +37,11 @@ jobs:
     needs: test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # v4 targets Node 20, which runners now force onto Node 24 with a deprecation
+      # warning. v5+ targets Node 24 natively. The breaking change introduced in
+      # v5.1/v6/v7 only affects `pull_request_target` checkouts, which this workflow
+      # never performs -- it runs on tag pushes and manual dispatch only.
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
