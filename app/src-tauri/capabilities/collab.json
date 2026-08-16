@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "collab-remote",
+  "description": "Grants the 'collab' window -- which loads a colleague's third-party page -- the single command its injected scraper needs to hand results back. Tauri refuses app commands from remote origins unless a capability with a matching `remote.urls` entry grants them, so this is scoped to exactly one command and one origin. receive_scraped_text additionally rejects callers whose window label isn't 'collab' (see main.rs), and every sensitive command is guarded by require_main_window, so this grant cannot widen into file or API-key access.",
+  "windows": ["collab"],
+  "local": false,
+  "permissions": ["allow-receive-scraped-text"],
+  "remote": {
+    "urls": ["https://small-helper-4-20260724.ebclan1.chatgpt.site"]
+  }
+}

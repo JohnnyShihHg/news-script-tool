@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-export-collab-text"
+description = "Enables the export_collab_text command without any pre-configured scope."
+commands.allow = ["export_collab_text"]
+
+[[permission]]
+identifier = "deny-export-collab-text"
+description = "Denies the export_collab_text command without any pre-configured scope."
+commands.deny = ["export_collab_text"]

@@ -1,0 +1,8 @@
+{
+  "name": "news-script-tool-ui",
+  "private": true,
+  "description": "UI logic tests. The app itself needs no build step -- src/ is embedded into the Tauri binary as-is.",
+  "scripts": {
+    "test": "node --test tests/logic.test.js"
+  }
+}

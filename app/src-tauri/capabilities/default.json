@@ -1,0 +1,31 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the main window. Because build.rs declares an app ACL manifest, every app-defined command the main window invokes must be listed here explicitly -- omitting one fails at runtime with 'Command X not allowed by ACL'. receive_scraped_text is deliberately absent: only the collab window ever calls it.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "updater:default",
+    "process:allow-restart",
+    "allow-import-folder",
+    "allow-pick-folder",
+    "allow-clear-folder",
+    "allow-save-text-file",
+    "allow-get-config",
+    "allow-save-config",
+    "allow-reset-config",
+    "allow-get-api-key-status",
+    "allow-set-api-key",
+    "allow-clear-api-key",
+    "allow-generate-keywords",
+    "allow-generate-keywords-batch",
+    "allow-open-collab-window",
+    "allow-compare-with-collab-doc",
+    "allow-diagnose-collab-bridge",
+    "allow-export-collab-text",
+    "allow-append-to-collab-doc"
+  ]
+}

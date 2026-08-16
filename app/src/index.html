@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>新聞文稿整理工具</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>新聞文稿整理工具</h1>
+    <div class="toolbar">
+      <span class="toolbar-group">
+        <button id="importBtn">匯入資料夾</button>
+        <button id="clearCardsBtn" disabled title="只清掉畫面上的卡片，不會刪除任何檔案">清空卡片</button>
+        <button id="clearFolderBtn" class="ghost" disabled title="請先匯入資料夾">清空資料夾</button>
+      </span>
+
+      <span class="toolbar-sep"></span>
+
+      <span class="toolbar-group">
+        <button id="openCollabBtn">開啟協作工具</button>
+        <button id="compareBtn" disabled title="請先匯入並開啟協作工具">比對 <span class="kbd-hint">Ctrl+R</span></button>
+        <button id="genAllKeywordsBtn">產生關鍵字</button>
+      </span>
+
+      <span class="toolbar-sep"></span>
+
+      <span class="toolbar-group">
+        <button id="writeBackBtn" class="primary" disabled title="把輸出內容附加到協作工具文件的最下方">寫入協作工具 <span class="kbd-hint">Ctrl+Enter</span></button>
+        <button id="copyBtn" class="ghost" disabled>複製全部</button>
+        <button id="saveBtn" class="ghost" disabled>存成 txt</button>
+      </span>
+
+      <span class="spacer"></span>
+      <span id="folderLabel" class="muted"></span>
+      <button id="settingsBtn" class="ghost">⚙ 設定</button>
+    </div>
+  </header>
+
+  <div id="funnel" class="funnel hidden"></div>
+
+  <div id="compareStatus" class="compare-status hidden"></div>
+
+  <div id="progressWrap" class="progress-wrap hidden">
+    <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+    <span id="progressLabel" class="progress-label"></span>
+  </div>
+
+  <section id="summary" class="summary hidden">
+    <button class="stat stat-passed" data-filter="passed">通過 <span id="statPassed">0</span></button>
+    <button class="stat stat-unknown" data-filter="unknown">未知樣式 <span id="statUnknown">0</span></button>
+    <button class="stat stat-manual" data-filter="manual">待補稿(TEL) <span id="statManual">0</span></button>
+    <button class="stat stat-filtered" data-filter="filtered">已濾除 <span id="statFiltered">0</span></button>
+    <button class="stat stat-failed" data-filter="failed">解析失敗 <span id="statFailed">0</span></button>
+    <button class="stat stat-all" data-filter="all">全部</button>
+  </section>
+
+  <main id="list"></main>
+
+  <footer id="emptyState" class="empty-state">
+    尚未匯入任何檔案。點左上角「匯入資料夾」選擇存放 iNews txt 的資料夾。
+  </footer>
+
+  <script src="logic.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

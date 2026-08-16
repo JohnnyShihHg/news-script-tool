@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-generate-keywords"
+description = "Enables the generate_keywords command without any pre-configured scope."
+commands.allow = ["generate_keywords"]
+
+[[permission]]
+identifier = "deny-generate-keywords"
+description = "Denies the generate_keywords command without any pre-configured scope."
+commands.deny = ["generate_keywords"]

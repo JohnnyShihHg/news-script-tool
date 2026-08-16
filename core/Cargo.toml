@@ -1,0 +1,16 @@
+[package]
+name = "news-script-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1"
+encoding_rs = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+once_cell = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["time", "rt-multi-thread", "macros"] }
+
+[dev-dependencies]

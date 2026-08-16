@@ -1,0 +1,32 @@
+# Rust / Tauri build output
+/target/
+/app/src-tauri/target/
+
+# Tauri updater signing keys. The private key must NEVER be committed: anyone holding
+# it can sign an update that every installed copy will trust and install silently.
+# Keep it in a password manager and in the repo's GitHub Actions secrets only.
+*.key
+*.key.pub
+/.tauri/
+
+# Built artifacts -- releases are published to GitHub Releases, not tracked in git
+/dist/
+/output/
+
+# Real newsroom material stays local. These carry unpublished copy, colleagues'
+# names and internal identifiers, and several entries are marked 勿上網 -- the
+# fixtures under core/tests/fixtures are synthetic stand-ins so tests still run.
+/EXflie/
+/EXflie - 複製/
+/協作工具內容.txt
+*協作工具內容*.txt
+
+# Node
+node_modules/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

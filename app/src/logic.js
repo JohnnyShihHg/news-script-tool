@@ -1,0 +1,114 @@
+/**
+ * Pure decision logic for the UI, deliberately free of DOM and Tauri references so
+ * it can run under `node --test`. Every bug found in review so far lived in these
+ * rules rather than in rendering, so this is where the safety net is worth having.
+ *
+ * Loaded as a plain script in the app (exposing `window.AppLogic`) and required
+ * directly by the tests -- no build step or module-type change to the app.
+ */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === "object" && module.exports) module.exports = api;
+  else root.AppLogic = api;
+})(typeof self !== "undefined" ? self : globalThis, function () {
+  /** Buckets whose entries are candidates for output at all. */
+  const OUTPUT_BUCKETS = ["passed", "manual", "unknown"];
+
+  function isOutputBucket(bucket) {
+    return OUTPUT_BUCKETS.includes(bucket);
+  }
+
+  /**
+   * spec §6 collapses "not in the doc" and "in the doc but unmarked" into the same
+   * ToCut status, but for deciding what to write back they are opposites. Only
+   * `matched_line` distinguishes them.
+   */
+  function isAlreadyInDoc(result) {
+    return result.status === "to_cut" && !!result.matched_line;
+  }
+
+  /**
+   * Whether an entry should stay ticked for output after a comparison.
+   *
+   * Derived fresh from the result rather than only ever being cleared: if an entry
+   * is later removed from the shared doc, comparing again must tick it back on.
+   * `defaultIncluded` keeps buckets that start unticked (unknown styles, which need
+   * a human call) from being silently opted in.
+   */
+  function decideInclusion(result, defaultIncluded) {
+    const handled = isAlreadyInDoc(result) || result.status === "removed";
+    return !handled && defaultIncluded;
+  }
+
+  /** Tally for the status line, keyed the same way the badges are labelled. */
+  function summarizeMatches(results) {
+    const counts = { toCut: 0, keepRefresh: 0, removed: 0, alreadyIn: 0 };
+    for (const r of results) {
+      if (isAlreadyInDoc(r)) counts.alreadyIn++;
+      else if (r.status === "to_cut") counts.toCut++;
+      else if (r.status === "keep_refresh") counts.keepRefresh++;
+      else if (r.status === "removed") counts.removed++;
+    }
+    return counts;
+  }
+
+  /**
+   * Entries worth spending Gemini quota on. Anything already handled in the shared
+   * doc is excluded: re-generating keywords for it burns tokens for output that
+   * would only be a duplicate.
+   */
+  function selectKeywordTargets(items) {
+    return items.filter(
+      (i) =>
+        isOutputBucket(i.bucket) &&
+        i.included &&
+        (i.body ?? "").trim() !== "" &&
+        (i.keywords ?? "").trim() === "" &&
+        i.matchStatus !== "removed" &&
+        !i.alreadyInDoc
+    );
+  }
+
+  /**
+   * The free tier caps requests per minute; that failure is worth a banner because
+   * the fix ("wait a minute, run again") differs from every other error.
+   */
+  function isRateLimitError(text) {
+    const s = String(text ?? "");
+    return s.includes("429") || s.includes("每分鐘請求上限");
+  }
+
+  /** Numbers behind the "N 則待處理 → N 則略過 → N 則寫入" line. */
+  function computeFunnel(items) {
+    const relevant = items.filter((i) => isOutputBucket(i.bucket));
+    const outgoing = relevant.filter((i) => i.included).length;
+    return { pending: relevant.length, skipped: relevant.length - outgoing, outgoing };
+  }
+
+  /**
+   * The four-line-per-entry output of spec §5, entries separated by a blank line.
+   * Header fields are slug / style / time / group, with group omitted when blank.
+   */
+  function buildOutputText(items) {
+    return items
+      .filter((i) => isOutputBucket(i.bucket) && i.included)
+      .map((i) => {
+        const head = [i.slug, i.style, i.time];
+        if ((i.group ?? "").trim() !== "") head.push(i.group);
+        return [head.join(" "), i.title, i.body, i.keywords].join("\n");
+      })
+      .join("\n\n");
+  }
+
+  return {
+    OUTPUT_BUCKETS,
+    isOutputBucket,
+    isAlreadyInDoc,
+    decideInclusion,
+    summarizeMatches,
+    selectKeywordTargets,
+    isRateLimitError,
+    computeFunnel,
+    buildOutputText,
+  };
+});

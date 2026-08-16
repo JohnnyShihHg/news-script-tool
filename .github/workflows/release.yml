@@ -1,0 +1,58 @@
+name: Release
+
+# Publishing is driven by a version tag: pushing v0.2.0 builds the installer, signs
+# it with the updater key, and attaches everything (including latest.json) to a
+# GitHub Release. Installed copies poll that release and offer the update in-app.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Rust tests
+        run: cargo test --workspace
+      - name: UI logic tests
+        working-directory: app
+        run: node --test tests/logic.test.js
+
+  release:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build, sign and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The private key never lives in the repo -- only in this secret.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app/src-tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: 新聞文稿整理工具 ${{ github.ref_name }}
+          releaseBody: |
+            ## 更新內容
+
+            <!-- 發布後可直接在 GitHub 上編輯這段，App 的更新提示會顯示這裡的文字 -->
+
+            ---
+            安裝後首次啟動若出現「Windows 已保護您的電腦」，請點「其他資訊」→「仍要執行」
+            （此程式未購買程式碼簽章憑證，屬預期行為）。
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "新聞文稿整理工具",
+  "version": "0.1.0",
+  "identifier": "tw.ebc.news-script-tool",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "新聞文稿整理工具",
+        "width": 1280,
+        "height": 860
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["TradChinese", "English"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/JohnnyShihHg/news-script-tool/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE3RUYwNDBBRUFGNTUxREMKUldUY1VmWHFDZ1R2RjdnU0Urd204ZnozZ0JqYVVhWTVJUFZ0L2ZvYVh6WTZXZi9VYlQ0VTMySy8K",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

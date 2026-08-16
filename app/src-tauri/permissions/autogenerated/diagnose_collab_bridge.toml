@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-diagnose-collab-bridge"
+description = "Enables the diagnose_collab_bridge command without any pre-configured scope."
+commands.allow = ["diagnose_collab_bridge"]
+
+[[permission]]
+identifier = "deny-diagnose-collab-bridge"
+description = "Denies the diagnose_collab_bridge command without any pre-configured scope."
+commands.deny = ["diagnose_collab_bridge"]

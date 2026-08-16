@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-append-to-collab-doc"
+description = "Enables the append_to_collab_doc command without any pre-configured scope."
+commands.allow = ["append_to_collab_doc"]
+
+[[permission]]
+identifier = "deny-append-to-collab-doc"
+description = "Denies the append_to_collab_doc command without any pre-configured scope."
+commands.deny = ["append_to_collab_doc"]
