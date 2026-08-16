@@ -19,8 +19,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Scoped to the core crate on purpose. `--workspace` also builds the Tauri app
+      # crate -- the whole wry/tao/WebView2 tree -- to run the zero tests it contains,
+      # which cost ~4 minutes per run for nothing. Compile errors in the app crate are
+      # still caught, by the release job that actually builds it.
       - name: Rust tests
-        run: cargo test --workspace
+        run: cargo test -p news-script-core
       - name: UI logic tests
         working-directory: app
         run: node --test tests/logic.test.js
