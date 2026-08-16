@@ -50,6 +50,12 @@ cargo run -p news-script-tool   # 開發模式執行
 3. GitHub Actions 會跑測試、建置、簽章並發布 Release
 4. 已安裝的使用者下次開啟就會收到更新提示
 
+### ⚠ `productName` 必須維持純 ASCII 且不含空格
+
+`tauri.conf.json` 的 `productName` 會直接變成安裝檔檔名。GitHub Release 在儲存 asset 時**會剝除非 ASCII 字元、並把空格轉成點**，檔名一旦被改寫，`tauri-action` 就無法把 `.sig` 對應回它的安裝檔，於是**靜默跳過 `latest.json`**（log 只留一行 `Signature not found for the updater JSON. Skipping upload...`），自動更新整個失效但 CI 仍顯示成功。
+
+v0.1.0 就是這樣壞的。中文名稱改放在視窗標題（`app.windows[].title`），使用者實際看到的仍是「新聞文稿整理工具」。
+
 需要在 repo 設定兩個 secret：
 
 - `TAURI_SIGNING_PRIVATE_KEY` — `.tauri/updater.key` 的內容
