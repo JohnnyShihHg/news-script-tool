@@ -3,6 +3,7 @@ const { listen } = window.__TAURI__.event;
 // Pure decision rules live in logic.js so they can be unit-tested without a DOM;
 // this file keeps only wiring, rendering and IPC. See app/tests/logic.test.js.
 const {
+  sortByTime,
   isAlreadyInDoc,
   decideInclusion,
   summarizeMatches,
@@ -242,8 +243,12 @@ function loadSummary(summary) {
       // Collapsed by default: a full day is ~16 entries and reviewing means scanning
       // slugs and statuses, not reading every body. Editing is one click away.
       collapsed: true,
+      time: fields.time ?? "",
     };
   });
+  // Running order: earliest 累積時間 first, because that is the order tapes get cut
+  // in. Sorting here means the card list and the written-back output share it.
+  items = sortByTime(items);
   el("compareBtn").disabled = items.length === 0;
 
   el("statPassed").textContent = summary.passed;
@@ -904,6 +909,14 @@ function settingsModalHtml(config, apiStatus) {
               <label>標題標記樣式（regex）</label>
               <input type="text" data-cfg="filter.title_tag_pattern" value="${escapeHtml(config.filter.title_tag_pattern)}" />
             </div>
+          </section>
+
+          <section class="settings-section">
+            <h3>內文雜訊清除</h3>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="clean.strip_marker_symbols" ${config.clean.strip_marker_symbols ? "checked" : ""} /> 移除每行開頭的雜訊符號（例如 <code>..早安你好</code> → <code>早安你好</code>）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="clean.drop_non_cjk_lines" ${config.clean.drop_non_cjk_lines ? "checked" : ""} /> 刪除整行沒有中文的備註行（例如單獨一行的 <code>##</code>、<code>OK</code>）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="clean.strip_trailing_symbols" ${config.clean.strip_trailing_symbols ? "checked" : ""} /> 移除內文結尾的符號（例如 <code>。##</code> → <code>。</code>）</label>
+            <div class="muted">句子中間的標點一律不動 —— 無法可靠分辨是誤打還是原文，改錯會動到要播出的稿件。含網址的行不受影響。</div>
           </section>
 
           <section class="settings-section">

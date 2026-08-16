@@ -91,8 +91,11 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 let r = punctuation::normalize(&title, &cfg.punctuation);
                 (r.text, r.warnings)
             };
+            // Marker stripping must precede punctuation normalization: that pass
+            // rewrites `.` to `、`, which would make `..` markers unrecognisable.
+            let body_cleaned = clean::strip_body_markers(&body_raw, &cfg.clean);
             let (body_norm, body_warnings) = {
-                let r = punctuation::normalize(&body_raw, &cfg.punctuation);
+                let r = punctuation::normalize(&body_cleaned, &cfg.punctuation);
                 (r.text, r.warnings)
             };
             warnings.extend(body_warnings);

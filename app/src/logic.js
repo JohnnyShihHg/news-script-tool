@@ -100,7 +100,35 @@
       .join("\n\n");
   }
 
+  /**
+   * Order entries by 累積時間 ascending — earliest at the top — because that is the
+   * order the tapes get cut in, and both the card list and the written-back output
+   * have to follow it.
+   *
+   * Times are `HH:MM:SS` and compare correctly as plain strings once zero-padded,
+   * which iNews already does. Anything without a usable time sorts last rather than
+   * first, so a missing field can never silently push an entry to the top of a
+   * running order. Ties keep their original order.
+   */
+  function sortByTime(items) {
+    const key = (i) => {
+      const t = (i.time ?? "").trim();
+      return /^\d{1,2}:\d{2}:\d{2}$/.test(t) ? t.padStart(8, "0") : null;
+    };
+    return items
+      .map((item, index) => ({ item, index, k: key(item) }))
+      .sort((a, b) => {
+        if (a.k === null && b.k === null) return a.index - b.index;
+        if (a.k === null) return 1;
+        if (b.k === null) return -1;
+        if (a.k === b.k) return a.index - b.index;
+        return a.k < b.k ? -1 : 1;
+      })
+      .map((w) => w.item);
+  }
+
   return {
+    sortByTime,
     OUTPUT_BUCKETS,
     isOutputBucket,
     isAlreadyInDoc,

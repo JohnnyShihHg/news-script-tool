@@ -26,6 +26,29 @@ impl Default for FilterConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanConfig {
+    /// Strip iNews control runs at the start of a line (e.g. `.^_^`), `#` marks, and
+    /// runs of two or more ASCII dots left behind by hand-typed notes.
+    pub strip_marker_symbols: bool,
+    /// Drop whole lines that carry no Chinese characters at all — standalone `##`,
+    /// `..`, `OK`, `TEST` notes producers leave in the body.
+    ///
+    /// This is the most aggressive of the three, and the one that could plausibly
+    /// eat real content (a line holding only a URL or only a date), so it is exposed
+    /// as a switch rather than hardcoded.
+    pub drop_non_cjk_lines: bool,
+    /// Strip trailing ASCII symbols from the very end of the body (`##`, `..`),
+    /// keeping CJK punctuation such as `。` intact.
+    pub strip_trailing_symbols: bool,
+}
+
+impl Default for CleanConfig {
+    fn default() -> Self {
+        Self { strip_marker_symbols: true, drop_non_cjk_lines: true, strip_trailing_symbols: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarkersConfig {
     pub refresh_keywords: Vec<String>,
 }
@@ -113,6 +136,8 @@ impl Default for UiConfig {
 pub struct Config {
     #[serde(default)]
     pub filter: FilterConfig,
+    #[serde(default)]
+    pub clean: CleanConfig,
     #[serde(default)]
     pub markers: MarkersConfig,
     #[serde(default)]

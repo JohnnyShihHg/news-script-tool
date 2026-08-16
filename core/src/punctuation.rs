@@ -5,6 +5,18 @@ use once_cell::sync::Lazy;
 // URL character class is restricted to ASCII URL-safe characters so the match
 // naturally stops at the first CJK character even when there's no whitespace
 // separating a URL from the following prose (real scripts do this).
+/// Byte-indexed mask of which positions in `input` sit inside a URL, so other passes
+/// (marker stripping in `clean`) can leave URLs alone the same way this module does.
+pub(crate) fn url_mask(input: &str) -> Vec<bool> {
+    let mut mask = vec![false; input.len()];
+    for m in URL_RE.find_iter(input) {
+        for i in m.start()..m.end() {
+            mask[i] = true;
+        }
+    }
+    mask
+}
+
 static URL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r"(?i)(?:https?|ftp)[:：]//[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+|www\.[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+",

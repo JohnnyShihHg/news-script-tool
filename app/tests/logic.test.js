@@ -171,3 +171,44 @@ test("unticked entries are left out of the output entirely", () => {
   ]);
   assert.equal(out, "");
 });
+
+// --- sortByTime: running order drives which tape gets cut when ---
+
+test("entries are ordered by 累積時間 with the earliest first", () => {
+  const items = [
+    { time: "10:57:44", slug: "c" },
+    { time: "06:48:32", slug: "a" },
+    { time: "19:02:27", slug: "d" },
+    { time: "07:01:27", slug: "b" },
+  ];
+  assert.deepEqual(L.sortByTime(items).map((i) => i.slug), ["a", "b", "c", "d"]);
+});
+
+test("single-digit hours still sort before later ones", () => {
+  const items = [{ time: "12:00:00", slug: "noon" }, { time: "9:30:00", slug: "morning" }];
+  assert.deepEqual(L.sortByTime(items).map((i) => i.slug), ["morning", "noon"]);
+});
+
+test("entries without a usable time sort last, never first", () => {
+  // A missing field must not quietly promote an entry to the top of a running order.
+  const items = [
+    { time: "", slug: "blank" },
+    { time: "08:00:00", slug: "real" },
+    { time: "not a time", slug: "junk" },
+  ];
+  assert.deepEqual(L.sortByTime(items).map((i) => i.slug), ["real", "blank", "junk"]);
+});
+
+test("equal times keep their original order", () => {
+  const items = [
+    { time: "08:00:00", slug: "first" },
+    { time: "08:00:00", slug: "second" },
+  ];
+  assert.deepEqual(L.sortByTime(items).map((i) => i.slug), ["first", "second"]);
+});
+
+test("sorting does not mutate the array it was given", () => {
+  const items = [{ time: "10:00:00", slug: "b" }, { time: "09:00:00", slug: "a" }];
+  L.sortByTime(items);
+  assert.deepEqual(items.map((i) => i.slug), ["b", "a"]);
+});
