@@ -40,12 +40,22 @@ fn normalize_for_match(s: &str) -> String {
 
 /// Classify one slug against the work-doc text (one entry per line, as pasted or
 /// scraped verbatim). See spec §6 for the "prefix before the slug" rule.
+///
+/// Takes the **last** matching line, not the first. The same slug legitimately
+/// appears more than once across a shift: a producer's original `(抓新) slug` request
+/// line, followed later by the plain `slug` line this tool itself writes back. Taking
+/// the first line would keep reading the original `(抓新)` request forever and write
+/// the same story back on every re-run, even after it was already handled. The last
+/// line is whatever is currently true about the story -- if someone adds a fresh
+/// `(抓新) slug` line below the plain one later, that also correctly asks for a
+/// re-paste again.
 pub fn match_slug(slug: &str, doc_text: &str, refresh_keywords: &[String]) -> MatchResult {
     let needle = normalize_for_match(slug);
     if needle.is_empty() {
         return MatchResult { status: MatchStatus::ToCut, matched_line: None };
     }
 
+    let mut result = None;
     for line in doc_text.lines() {
         let hay = normalize_for_match(line);
         if let Some(idx) = hay.find(&needle) {
@@ -57,11 +67,11 @@ pub fn match_slug(slug: &str, doc_text: &str, refresh_keywords: &[String]) -> Ma
             } else {
                 MatchStatus::Removed
             };
-            return MatchResult { status, matched_line: Some(line.trim().to_string()) };
+            result = Some(MatchResult { status, matched_line: Some(line.trim().to_string()) });
         }
     }
 
-    MatchResult { status: MatchStatus::ToCut, matched_line: None }
+    result.unwrap_or(MatchResult { status: MatchStatus::ToCut, matched_line: None })
 }
 
 /// Classify every entry's slug against the work-doc text in one pass.
@@ -151,6 +161,46 @@ YH 合成氣象 06：24：02
         let r = match_slug("", DOC_TEXT, &refresh());
         assert_eq!(r.status, MatchStatus::ToCut);
         assert_eq!(r.matched_line, None);
+    }
+
+    // --- Repeat writes: the last occurrence of a slug is what currently matters ---
+
+    const REPEAT_DOC: &str = "\
+(抓新)為鸚鵡砸親1100 slive 11:02:06
+普渡丟鈔票1100 TEL 11:07:43 中
+為鸚鵡砸親1100 slive 11:02:06
+";
+
+    #[test]
+    fn once_this_tool_has_written_the_plain_line_the_slug_reads_as_already_in_the_doc() {
+        // Screenshot scenario: the original (抓新) request line is still first, but a
+        // second, unprefixed occurrence was appended by this tool's own write-back.
+        // The first-line-wins rule used to keep reporting KeepRefresh forever and
+        // re-append the story on every re-run; the last line is what is actually true.
+        let r = match_slug("為鸚鵡砸親1100", REPEAT_DOC, &refresh());
+        assert_eq!(r.status, MatchStatus::ToCut);
+        assert_eq!(r.matched_line.as_deref(), Some("為鸚鵡砸親1100 slive 11:02:06"));
+    }
+
+    #[test]
+    fn a_fresh_refresh_tag_appended_after_a_plain_line_asks_for_a_re_paste_again() {
+        // The reverse direction: a story already written plain, then someone adds a
+        // new (抓新) request below it. The last line must win here too.
+        let doc = "為鸚鵡砸親1100 slive 11:02:06\n(抓新)為鸚鵡砸親1100 slive 11:02:06\n";
+        let r = match_slug("為鸚鵡砸親1100", doc, &refresh());
+        assert_eq!(r.status, MatchStatus::KeepRefresh);
+    }
+
+    #[test]
+    fn three_occurrences_still_resolve_on_the_last_one_not_a_count() {
+        let doc = "\
+(抓新)重播新聞0900 SOT 09:00:00
+重播新聞0900 SOT 09:00:00
+03 重播新聞0900 SOT 09:00:00
+";
+        let r = match_slug("重播新聞0900", doc, &refresh());
+        assert_eq!(r.status, MatchStatus::Removed);
+        assert_eq!(r.matched_line.as_deref(), Some("03 重播新聞0900 SOT 09:00:00"));
     }
 
     #[test]

@@ -26,8 +26,8 @@ fn main() {
     for e in &summary.passed { println!("  PASS  {} [{}]", e.slug, e.style); }
     println!("filtered(style blocked): {}", summary.filtered.len());
     for o in &summary.filtered {
-        if let news_script_core::model::Outcome::FilteredByStyle{slug, style, ..} = o {
-            println!("  FILT  {} [{}]", slug, style);
+        if let news_script_core::model::Outcome::FilteredByStyle(e) = o {
+            println!("  FILT  {} [{}]", e.slug, e.style);
         }
     }
     println!("unknown style: {}", summary.unknown.len());

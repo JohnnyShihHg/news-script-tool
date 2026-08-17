@@ -102,8 +102,8 @@ async fn main() {
 
     report.push_str("\n=== 已濾除（樣式在黑名單）===\n");
     for o in &summary.filtered {
-        if let Outcome::FilteredByStyle { slug, style, file_name } = o {
-            report.push_str(&format!("  {}　[{}]　{}\n", slug, style, file_name));
+        if let Outcome::FilteredByStyle(e) = o {
+            report.push_str(&format!("  {}　[{}]　{}\n", e.slug, e.style, e.file_name));
         }
     }
 

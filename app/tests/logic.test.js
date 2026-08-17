@@ -93,9 +93,41 @@ test("unticked entries and empty bodies are skipped", () => {
   assert.equal(L.selectKeywordTargets(items).length, 1);
 });
 
-test("filtered and failed buckets are never keyword targets", () => {
-  const items = [entry({ bucket: "filtered" }), entry({ bucket: "failed" }), entry({ bucket: "manual" })];
+test("failed entries are never keyword targets", () => {
+  const items = [entry({ bucket: "failed" }), entry({ bucket: "manual" })];
   assert.equal(L.selectKeywordTargets(items).length, 1);
+});
+
+// --- 已濾除 rescue: a blocked style is a default, not a verdict ---
+
+test("a filtered entry is not output or sent to the API while it stays unticked", () => {
+  const items = [entry({ bucket: "filtered", included: false })];
+  assert.equal(L.selectKeywordTargets(items).length, 0);
+  assert.equal(L.buildOutputText(items.map((i) => ({ ...i, slug: "s", title: "t" }))), "");
+});
+
+test("ticking a filtered entry lets it be written out and get keywords", () => {
+  const items = [entry({ bucket: "filtered", included: true })];
+  assert.equal(L.selectKeywordTargets(items).length, 1);
+  const out = L.buildOutputText([
+    { bucket: "filtered", included: true, slug: "後送2天嬰11", style: "BS", time: "11:00:00", group: "生", title: "標題", body: "內文", keywords: "#合成關鍵字" },
+  ]);
+  assert.ok(out.includes("後送2天嬰11"), out);
+  assert.ok(out.includes("內文"), out);
+});
+
+test("the funnel ignores filtered entries until one is rescued", () => {
+  const base = [entry({ bucket: "passed", included: true }), entry({ bucket: "filtered", included: false })];
+  assert.deepEqual(L.computeFunnel(base), { pending: 1, skipped: 0, outgoing: 1 });
+
+  // Once ticked it has to appear in 寫入, or the funnel under-reports what goes in.
+  const rescued = [entry({ bucket: "passed", included: true }), entry({ bucket: "filtered", included: true })];
+  assert.deepEqual(L.computeFunnel(rescued), { pending: 2, skipped: 0, outgoing: 2 });
+});
+
+test("failed entries stay out of output even if somehow ticked", () => {
+  const items = [{ bucket: "failed", included: true, slug: "x", title: "t", body: "b", keywords: "" }];
+  assert.equal(L.buildOutputText(items), "");
 });
 
 // --- splitKeywordRun: keeps a half-hour batch from hitting the per-minute cap ---
@@ -155,7 +187,8 @@ test("the funnel counts only output-eligible buckets", () => {
   const items = [
     entry(),
     entry({ included: false }),
-    entry({ bucket: "filtered" }),
+    // Filtered counts only once rescued (covered separately); failed never does.
+    entry({ bucket: "filtered", included: false }),
     entry({ bucket: "failed" }),
   ];
   assert.deepEqual(L.computeFunnel(items), { pending: 2, skipped: 1, outgoing: 1 });

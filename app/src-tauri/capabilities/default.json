@@ -22,6 +22,7 @@
     "allow-clear-api-key",
     "allow-generate-keywords",
     "allow-generate-keywords-batch",
+    "allow-normalize-text",
     "allow-open-collab-window",
     "allow-compare-with-collab-doc",
     "allow-diagnose-collab-bridge",

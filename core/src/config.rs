@@ -8,6 +8,15 @@ pub struct FilterConfig {
     pub excluded_slug_suffixes: Vec<String>,
     pub flag_styles: Vec<String>,
     pub title_tag_pattern: String,
+    /// Second-pass title-tag pattern, used only when `title_tag_pattern` matches
+    /// nothing anywhere in the production block.
+    ///
+    /// Some scripts (weather rundowns in particular) carry only plain `[BAR]` cards,
+    /// never a `[BAR_..大]`. Without a fallback those files parse to no title at all.
+    /// Deliberately still BAR-family only, not "any T2 in the block" — `[雙框_記者右]`
+    /// blocks carry a `T2主播姓名` line that must never be mistaken for a headline.
+    #[serde(default = "default_title_tag_fallback_pattern")]
+    pub title_tag_fallback_pattern: String,
     /// Terms that identify a style from the slug when 樣式 itself is blank.
     ///
     /// Some rundown rows carry no 樣式 at all and write the format into the slug
@@ -28,6 +37,10 @@ fn default_slug_style_terms() -> Vec<String> {
     vec!["推播".into()]
 }
 
+fn default_title_tag_fallback_pattern() -> String {
+    r"^\[BAR\]$".into()
+}
+
 impl Default for FilterConfig {
     fn default() -> Self {
         Self {
@@ -40,6 +53,7 @@ impl Default for FilterConfig {
             excluded_slug_suffixes: vec!["SOU".into()],
             flag_styles: vec!["TEL".into(), "電連".into()],
             title_tag_pattern: r"^\[BAR_.*大\]$".into(),
+            title_tag_fallback_pattern: default_title_tag_fallback_pattern(),
             slug_style_terms: default_slug_style_terms(),
         }
     }

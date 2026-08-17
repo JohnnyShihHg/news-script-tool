@@ -43,8 +43,14 @@ pub enum StyleClass {
 pub enum Outcome {
     /// Passed style filter, has title + body, ready for output.
     Passed(NewsEntry),
-    /// Style is blocked (e.g. BS/SO) — filtered out.
-    FilteredByStyle { file_name: String, slug: String, style: String },
+    /// Style is blocked (e.g. BS/SO) — filtered out of the output by default.
+    ///
+    /// Carries the fully parsed entry rather than just its name: a blocked style is a
+    /// default, not a verdict, and a BS story does occasionally turn out to be needed.
+    /// Keeping the parsed slug/title/body means it can be ticked back on from the
+    /// 已濾除 tab there and then, instead of the user having to edit the blocklist in
+    /// settings and re-import.
+    FilteredByStyle(NewsEntry),
     /// Style is neither on the allow list nor the block list — needs a human call.
     UnknownStyle(NewsEntry),
     /// TEL entry with no production block / no content — kept but needs manual script.

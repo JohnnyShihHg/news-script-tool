@@ -294,17 +294,6 @@ function cardHtml(item) {
   const { dto, kind, bucket, id } = item;
   const fields = dto[kind] ?? dto;
 
-  if (kind === "FilteredByStyle") {
-    return `
-      <div class="card filtered" data-bucket="${bucket}">
-        <div class="card-head">
-          <span class="slug">${fields.slug_marker ? `<span class="badge removed">${escapeHtml(fields.slug_marker)}</span> ` : ""}${escapeHtml(fields.slug)}</span>
-          <span class="badge filtered">已濾除・樣式 ${escapeHtml(fields.style)}</span>
-          <span class="file-name">${escapeHtml(fields.file_name)}</span>
-        </div>
-      </div>`;
-  }
-
   if (kind === "ParseFailed") {
     return `
       <div class="card failed" data-bucket="${bucket}">
@@ -316,7 +305,15 @@ function cardHtml(item) {
       </div>`;
   }
 
-  const badgeLabel = { Passed: "通過", UnknownStyle: "未知樣式", NeedsManualContent: "待補稿" }[kind];
+  const badgeLabel = {
+    Passed: "通過",
+    UnknownStyle: "未知樣式",
+    NeedsManualContent: "待補稿",
+    // Renders as a full, editable card like any other: it starts unticked, but the
+    // slug and body are there so a BS story that unexpectedly needs to go out can be
+    // ticked on the spot rather than requiring a blocklist edit and a re-import.
+    FilteredByStyle: "已濾除",
+  }[kind];
   const titleDiff = renderDiff(fields.raw_title, fields.raw_title !== undefined ? item.title : "");
   const bodyDiff = renderDiff(fields.raw_body, fields.raw_body !== undefined ? item.body : "");
   const hasDiff = !!(fields.raw_title || fields.raw_body);
@@ -356,6 +353,17 @@ function cardHtml(item) {
         <textarea class="edit-body" data-id="${id}">${escapeHtml(item.body)}</textarea>
       </div>
       <div id="diff-body-${id}" class="diff-box hidden">${bodyDiff ?? "（標點未變動）"}</div>
+
+      <div class="field">
+        <button class="normalize-btn" data-id="${id}" ${item.normalizing ? "disabled" : ""}>
+          ${item.normalizing ? "校正中…" : "校正標點（標題＋內文）"}
+        </button>
+        <span class="muted">匯入時的標點正規化只跑一次；這裡手動打的或貼上的字要自己按這個才會套用同一套規則。</span>
+        ${item.normalizeWarnings && item.normalizeWarnings.length ? `
+          <div class="warnings">
+            ${item.normalizeWarnings.map((w) => `<div class="w">⚠ ${escapeHtml(w)}</div>`).join("")}
+          </div>` : ""}
+      </div>
 
       <div class="field">
         <label>關鍵字（空格分隔）</label>
@@ -403,7 +411,14 @@ function render() {
   document.querySelectorAll(".include-cb").forEach((elm) => {
     elm.addEventListener("change", (e) => {
       const item = items.find((i) => i.id === e.target.dataset.id);
-      if (item) item.included = e.target.checked;
+      if (item) {
+        item.included = e.target.checked;
+        // An explicit tick becomes the new baseline, or the next 比對 would silently
+        // undo it: decideInclusion rebuilds `included` from `defaultIncluded`, which
+        // is false for the buckets a user rescues from (已濾除, 未知樣式). Unticking
+        // by hand sticks for the same reason.
+        item.defaultIncluded = e.target.checked;
+      }
       renderFunnel();
       updateKeywordButton();
     });
@@ -418,6 +433,9 @@ function render() {
   document.querySelectorAll(".gen-keywords-btn").forEach((elm) => {
     elm.addEventListener("click", (e) => generateKeywordsForOne(e.target.dataset.id));
   });
+  document.querySelectorAll(".normalize-btn").forEach((elm) => {
+    elm.addEventListener("click", (e) => normalizeOne(e.target.dataset.id));
+  });
   document.querySelectorAll(".collapse-toggle").forEach((elm) => {
     elm.addEventListener("click", (e) => {
       const item = items.find((i) => i.id === e.target.dataset.id);
@@ -429,6 +447,30 @@ function render() {
   // The button carries a live count of what a run would send, so it has to be
   // recomputed by the one path every state change already goes through.
   updateKeywordButton();
+}
+
+/// Applies the same punctuation pass import already runs, to a title/body the user
+/// typed or pasted by hand. Import-time normalization only ever touches text that
+/// existed at import time, so anything filled in afterwards (待補稿, a rescued 已濾除
+/// entry) would otherwise stay unnormalized forever unless this is run explicitly.
+async function normalizeOne(id) {
+  const item = items.find((i) => i.id === id);
+  if (!item) return;
+  item.normalizing = true;
+  render();
+  try {
+    const [titleResult, bodyResult] = await Promise.all([
+      invoke("normalize_text", { text: item.title }),
+      invoke("normalize_text", { text: item.body }),
+    ]);
+    item.title = titleResult.text;
+    item.body = bodyResult.text;
+    item.normalizeWarnings = [...titleResult.warnings, ...bodyResult.warnings];
+  } catch (err) {
+    item.normalizeWarnings = [`校正失敗：${err}`];
+  }
+  item.normalizing = false;
+  render();
 }
 
 async function generateKeywordsForOne(id) {
@@ -952,6 +994,11 @@ function settingsModalHtml(config, apiStatus) {
               <label>標題標記樣式（regex）</label>
               <input type="text" data-cfg="filter.title_tag_pattern" value="${escapeHtml(config.filter.title_tag_pattern)}" />
             </div>
+            <div class="field">
+              <label>標題標記備援樣式（regex，找不到上面那個才用）</label>
+              <input type="text" data-cfg="filter.title_tag_fallback_pattern" value="${escapeHtml(config.filter.title_tag_fallback_pattern)}" />
+            </div>
+            <div class="muted">氣象稿這類只有 [BAR]、沒有 [BAR_..大] 的稿件會用這個標記找標題。只在上面的標記整份稿子都找不到時才啟用，不會搶在正常標記前面。</div>
             ${styleField("樣式空白時改看 slug slug_style_terms", "filter.slug_style_terms", config.filter.slug_style_terms)}
             <div class="muted">有些稿件不填「樣式」，直接把類型寫在新聞名稱裡（例：心喻14推播）。樣式欄真的空白時才會用這裡的詞去比對 slug，比中就當成該樣式處理並在該則標上提醒；樣式欄有填就一律以樣式欄為準。同樣只比對完整詞。</div>
           </section>

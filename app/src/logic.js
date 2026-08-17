@@ -11,11 +11,23 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.AppLogic = api;
 })(typeof self !== "undefined" ? self : globalThis, function () {
-  /** Buckets whose entries are candidates for output at all. */
+  /** Buckets whose entries are part of the normal flow and counted in the funnel. */
   const OUTPUT_BUCKETS = ["passed", "manual", "unknown"];
 
   function isOutputBucket(bucket) {
     return OUTPUT_BUCKETS.includes(bucket);
+  }
+
+  /**
+   * Buckets an entry can be written out from *if the user ticks it*.
+   *
+   * 已濾除 is included: a blocked style is a default, not a verdict, and a BS story
+   * does occasionally turn out to be needed. Filtered entries start unticked, so this
+   * changes nothing until someone deliberately ticks one — the alternative was
+   * editing the blocklist in settings and re-importing just to rescue a single item.
+   */
+  function canOutputBucket(bucket) {
+    return isOutputBucket(bucket) || bucket === "filtered";
   }
 
   /**
@@ -60,7 +72,7 @@
   function selectKeywordTargets(items) {
     return items.filter(
       (i) =>
-        isOutputBucket(i.bucket) &&
+        canOutputBucket(i.bucket) &&
         i.included &&
         (i.body ?? "").trim() !== "" &&
         (i.keywords ?? "").trim() === "" &&
@@ -98,7 +110,12 @@
 
   /** Numbers behind the "N 則待處理 → N 則略過 → N 則寫入" line. */
   function computeFunnel(items) {
-    const relevant = items.filter((i) => isOutputBucket(i.bucket));
+    // Filtered entries only enter the count once rescued, so the everyday numbers are
+    // unchanged — but a rescued one must show up in 寫入, or the funnel would under-
+    // report what actually goes into the shared doc.
+    const relevant = items.filter(
+      (i) => isOutputBucket(i.bucket) || (i.bucket === "filtered" && i.included)
+    );
     const outgoing = relevant.filter((i) => i.included).length;
     return { pending: relevant.length, skipped: relevant.length - outgoing, outgoing };
   }
@@ -109,7 +126,7 @@
    */
   function buildOutputText(items) {
     return items
-      .filter((i) => isOutputBucket(i.bucket) && i.included)
+      .filter((i) => canOutputBucket(i.bucket) && i.included)
       .map((i) => {
         // The 編輯備註 marker is prefixed here, at output time only. It is never part
         // of `slug` itself, because `slug` is what gets matched against the shared
@@ -152,6 +169,7 @@
     sortByTime,
     OUTPUT_BUCKETS,
     isOutputBucket,
+    canOutputBucket,
     isAlreadyInDoc,
     decideInclusion,
     summarizeMatches,

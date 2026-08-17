@@ -52,9 +52,13 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     }
 
     let rest: String = text.lines().skip(header_lines).collect::<Vec<_>>().join("\n");
-    let body_parse = parse::parse_body(&rest, &cfg.filter.title_tag_pattern);
+    let body_parse = parse::parse_body(
+        &rest,
+        &cfg.filter.title_tag_pattern,
+        &cfg.filter.title_tag_fallback_pattern,
+    );
 
-    let (title_raw, body_raw) = match body_parse {
+    let (title_raw, body_raw, has_content) = match body_parse {
         parse::BodyParse::NoProductionBlock => {
             if style.eq_ignore_ascii_case("TEL") {
                 let entry = NewsEntry {
@@ -85,22 +89,73 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 reason: "製作區缺少結尾 >]".to_string(),
             };
         }
-        parse::BodyParse::Extracted { title, body } => (title, body),
+        parse::BodyParse::Extracted { title, body, has_content } => (title, body, has_content),
     };
 
     match (title_raw, body_raw.is_empty()) {
-        (None, true) => return Outcome::Skipped,
+        // A genuinely empty rundown placeholder (`[< >]`, no cards at all) is
+        // structure, not a news script -- silently skipped, as before.
+        (None, true) if !has_content => return Outcome::Skipped,
+        // Cards exist (has_content) but no T2 ever resolved to a title, or the title
+        // tag itself was never found -- and there's no稿頭內文 either. This is the
+        // same shape as TEL-with-no-content: a real story the tool cannot finish
+        // parsing, needing a human to fill in title and/or body by hand. Most common
+        // case: weather rundowns, which carry only [BAR] cards and no 稿頭內文 at all.
+        (None, true) => {
+            let entry = NewsEntry {
+                file_name: file_name.to_string(),
+                header,
+                slug,
+                style: style.clone(),
+                time,
+                group,
+                title: String::new(),
+                slug_marker: clean::slug_marker(&editor_note, &cfg.annotations),
+                body: String::new(),
+                raw_title: String::new(),
+                raw_body: String::new(),
+                keywords: Vec::new(),
+                warnings: vec!["找不到標題且無稿頭內文，需人工補稿".to_string()],
+            };
+            return Outcome::NeedsManualContent(entry);
+        }
         (None, false) => {
             return Outcome::ParseFailed {
                 file_name: file_name.to_string(),
                 reason: "找不到標題（標題標記下一行不是 T2）".to_string(),
             };
         }
-        (Some(_), true) => {
-            return Outcome::ParseFailed {
-                file_name: file_name.to_string(),
-                reason: "內文為空".to_string(),
+        (Some(title), true) => {
+            // The title tag resolved fine -- only 稿頭內文 is missing. Normalize and
+            // prefix the title exactly like the Passed path so it doesn't sit
+            // unformatted until the body is filled in.
+            let (title_norm, warnings_from_title) = {
+                let r = punctuation::normalize(&title, &cfg.punctuation);
+                (r.text, r.warnings)
             };
+            let mut warnings = warnings_from_title;
+            warnings.push("找到標題但無稿頭內文，需人工補稿".to_string());
+
+            let entry = NewsEntry {
+                file_name: file_name.to_string(),
+                header,
+                slug,
+                style: style.clone(),
+                time,
+                group,
+                title: format!(
+                    "{}{}",
+                    clean::title_prefix(&editor_note, &style, &title_norm, &cfg.annotations),
+                    title_norm
+                ),
+                slug_marker: clean::slug_marker(&editor_note, &cfg.annotations),
+                body: String::new(),
+                raw_title: title,
+                raw_body: String::new(),
+                keywords: Vec::new(),
+                warnings,
+            };
+            return Outcome::NeedsManualContent(entry);
         }
         (Some(title), false) => {
             let (title_norm, mut warnings) = {
@@ -144,11 +199,7 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
 
             match clean::classify_style(&style, &cfg.filter) {
                 StyleClass::Allowed => Outcome::Passed(entry),
-                StyleClass::Blocked => Outcome::FilteredByStyle {
-                    file_name: file_name.to_string(),
-                    slug: entry.slug,
-                    style,
-                },
+                StyleClass::Blocked => Outcome::FilteredByStyle(entry),
                 StyleClass::Unknown => Outcome::UnknownStyle(entry),
             }
         }

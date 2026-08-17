@@ -53,7 +53,7 @@ enum EntryDto {
     Passed(EntryFields),
     UnknownStyle(EntryFields),
     NeedsManualContent(EntryFields),
-    FilteredByStyle { file_name: String, slug: String, style: String },
+    FilteredByStyle(EntryFields),
     ParseFailed { file_name: String, reason: String },
 }
 
@@ -159,12 +159,8 @@ fn import_folder(window: tauri::Window, state: tauri::State<AppState>, folder: S
         }
     }
     for o in &summary.filtered {
-        if let Outcome::FilteredByStyle { file_name, slug, style } = o {
-            entries.push(EntryDto::FilteredByStyle {
-                file_name: file_name.clone(),
-                slug: slug.clone(),
-                style: style.clone(),
-            });
+        if let Outcome::FilteredByStyle(e) = o {
+            entries.push(EntryDto::FilteredByStyle(e.into()));
         }
     }
     for o in &summary.failed {
@@ -264,6 +260,8 @@ fn save_config_inner(state: &tauri::State<AppState>, config: Config) -> Result<(
     // Fail loudly on a broken regex rather than silently accepting a config that
     // would make every future import's title extraction fail.
     regex::Regex::new(&config.filter.title_tag_pattern).map_err(|e| format!("標題標記樣式（regex）錯誤：{e}"))?;
+    regex::Regex::new(&config.filter.title_tag_fallback_pattern)
+        .map_err(|e| format!("標題標記備援樣式（regex）錯誤：{e}"))?;
 
     let path = config_path().ok_or_else(|| "找不到設定檔存放路徑".to_string())?;
     news_script_core::config::save_to_path(&config, &path).map_err(|e| e.to_string())?;
@@ -283,6 +281,24 @@ fn reset_config(window: tauri::Window, state: tauri::State<AppState>) -> Result<
     let default = Config::default();
     save_config_inner(&state, default.clone())?;
     Ok(default)
+}
+
+#[derive(Serialize)]
+struct NormalizeResultDto {
+    text: String,
+    warnings: Vec<String>,
+}
+
+/// Runs the same punctuation pass import already applies, on text the user typed or
+/// pasted by hand -- import-time normalization never touches anything edited after
+/// the fact, so a manually filled-in body (a needs-manual-content entry, a rescued
+/// filtered entry) would otherwise stay unnormalized forever.
+#[tauri::command]
+fn normalize_text(window: tauri::Window, state: tauri::State<AppState>, text: String) -> Result<NormalizeResultDto, String> {
+    require_main_window(&window)?;
+    let cfg = state.config.lock().unwrap();
+    let result = news_script_core::punctuation::normalize(&text, &cfg.punctuation);
+    Ok(NormalizeResultDto { text: result.text, warnings: result.warnings })
 }
 
 // --- Settings: Gemini API key (OS keyring, never written to the TOML config) ---
@@ -779,6 +795,7 @@ fn main() {
             clear_api_key,
             generate_keywords,
             generate_keywords_batch,
+            normalize_text,
             open_collab_window,
             receive_scraped_text,
             compare_with_collab_doc,

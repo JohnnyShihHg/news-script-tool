@@ -21,6 +21,7 @@ fn main() {
             "clear_api_key",
             "generate_keywords",
             "generate_keywords_batch",
+            "normalize_text",
             "open_collab_window",
             "receive_scraped_text",
             "compare_with_collab_doc",

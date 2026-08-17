@@ -93,7 +93,48 @@ fn bs_style_with_inline_divider_is_filtered() {
     let (name, text) = fixture(&files, "合成濾除稿件0600.txt");
     let cfg = Config::default();
     match process_text(name, text, &cfg) {
-        Outcome::FilteredByStyle { style, .. } => assert_eq!(style, "bs"),
+        Outcome::FilteredByStyle(e) => {
+            assert_eq!(e.style, "bs");
+            // The parsed content must come along, or a BS story that unexpectedly
+            // needs to go out could not be rescued from the 已濾除 tab.
+            assert!(!e.slug.is_empty(), "slug must survive filtering");
+            assert!(!e.title.is_empty(), "title must survive filtering");
+            assert!(!e.body.is_empty(), "body must survive filtering");
+        }
+        other => panic!("expected FilteredByStyle, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_source_credit_line_before_t2_does_not_fail_a_blocked_style_bs_script() {
+    // Real example: [bar] (lowercase, fallback pattern) then a source-credit noise
+    // line "#n自由時報" before the actual T2. BS is blocked by default, so this also
+    // exercises FilteredByStyle carrying the full parsed entry for rescue.
+    let files = load_fixtures();
+    let (name, text) = fixture(&files, "合成蛋價BS0900.txt");
+    let cfg = Config::default();
+    match process_text(name, text, &cfg) {
+        Outcome::FilteredByStyle(e) => {
+            // Punctuation normalization fullwidths the ":" -- expected, unrelated to
+            // the noise-skipping under test.
+            assert_eq!(e.title, "產銷平衡 北市蛋商公會：這周蛋價不調漲");
+        }
+        other => panic!("expected FilteredByStyle, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_filtered_entry_is_normalized_exactly_like_a_passing_one() {
+    // Rescuing only helps if the content is already cleaned up; a rescued entry must
+    // not arrive as raw text that the user then has to fix by hand.
+    let files = load_fixtures();
+    let (name, text) = fixture(&files, "合成濾除稿件0600.txt");
+    let cfg = Config::default();
+    match process_text(name, text, &cfg) {
+        Outcome::FilteredByStyle(e) => {
+            assert!(!e.body.contains("==="), "inline dividers should be stripped: {}", e.body);
+            assert_ne!(e.raw_body, "", "the pre-normalisation text is kept for the diff view");
+        }
         other => panic!("expected FilteredByStyle, got {other:?}"),
     }
 }
@@ -104,7 +145,7 @@ fn so_style_is_filtered() {
     let (name, text) = fixture(&files, "合成濾除稿件SO0620.txt");
     let cfg = Config::default();
     match process_text(name, text, &cfg) {
-        Outcome::FilteredByStyle { style, .. } => assert_eq!(style, "SO"),
+        Outcome::FilteredByStyle(e) => assert_eq!(e.style, "SO"),
         other => panic!("expected FilteredByStyle, got {other:?}"),
     }
 }
@@ -146,6 +187,59 @@ fn blank_style_rows_are_silently_skipped_even_with_real_text_in_the_body() {
     let (name, text) = fixture(&files, "合成空白樣式0800.txt");
     let cfg = Config::default();
     assert_eq!(process_text(name, text, &cfg), Outcome::Skipped);
+}
+
+#[test]
+fn weather_style_scripts_with_only_plain_bar_cards_still_get_a_title() {
+    // Weather rundowns carry no [BAR_..大] at all -- confirms the fallback pattern
+    // reaches process_text end to end, not just parse_body in isolation.
+    let files = load_fixtures();
+    let (name, text) = fixture(&files, "合成氣象無大字1045.txt");
+    let cfg = Config::default();
+    match process_text(name, text, &cfg) {
+        Outcome::Passed(e) => {
+            // style LIVE is a breaking style (最新》prefix) and punctuation
+            // normalization fullwidths the "!" -- both expected, unrelated to the
+            // fallback-title feature under test.
+            assert_eq!(e.title, "最新》本週天氣不穩！ 低壓帶盤據 慎防強對流發展");
+        }
+        other => panic!("expected Passed, got {other:?}"),
+    }
+}
+
+#[test]
+fn weather_script_with_no_content_after_the_block_needs_manual_content_not_skipped() {
+    // Mirrors the real shape reported by the user: only [BAR] cards, no 稿頭內文 at
+    // all after >]. Must not be silently dropped -- the title was found fine, only
+    // the body is missing.
+    let files = load_fixtures();
+    let (name, text) = fixture(&files, "合成氣象無稿頭1050.txt");
+    let cfg = Config::default();
+    match process_text(name, text, &cfg) {
+        Outcome::NeedsManualContent(e) => {
+            assert!(e.title.contains("本週天氣不穩"), "title was {:?}", e.title);
+            assert_eq!(e.body, "");
+            assert!(e.warnings.iter().any(|w| w.contains("無稿頭內文")));
+        }
+        other => panic!("expected NeedsManualContent, got {other:?}"),
+    }
+}
+
+#[test]
+fn block_with_content_but_no_recognizable_title_tag_needs_manual_content_not_skipped() {
+    // Distinguishes "the block has real cards but nothing this tool's patterns can
+    // identify as a title" from a genuinely empty rundown placeholder -- both have no
+    // title and no body, but only the latter is safe to skip silently.
+    let files = load_fixtures();
+    let (name, text) = fixture(&files, "合成無標題無稿頭1055.txt");
+    let cfg = Config::default();
+    match process_text(name, text, &cfg) {
+        Outcome::NeedsManualContent(e) => {
+            assert_eq!(e.title, "");
+            assert_eq!(e.body, "");
+        }
+        other => panic!("expected NeedsManualContent, got {other:?}"),
+    }
 }
 
 #[test]
