@@ -70,6 +70,24 @@
   }
 
   /**
+   * Split a keyword run into the slice to send now and the count left over.
+   *
+   * Producers tidy up roughly every half hour, so one import can hold dozens of
+   * scripts — well past the free tier's per-minute request cap. Sending them all
+   * would return a screen of 429 cards, so a run is capped and the remainder is
+   * reported instead. Re-running picks up exactly the leftovers, because entries
+   * that already have keywords are filtered out by selectKeywordTargets.
+   *
+   * A limit of 0 or less means "no cap" — someone on a paid key should not be
+   * throttled by a free-tier number.
+   */
+  function splitKeywordRun(targets, limit) {
+    const list = targets ?? [];
+    if (!Number.isFinite(limit) || limit <= 0) return { batch: list, remaining: 0 };
+    return { batch: list.slice(0, limit), remaining: Math.max(0, list.length - limit) };
+  }
+
+  /**
    * The free tier caps requests per minute; that failure is worth a banner because
    * the fix ("wait a minute, run again") differs from every other error.
    */
@@ -138,6 +156,7 @@
     decideInclusion,
     summarizeMatches,
     selectKeywordTargets,
+    splitKeywordRun,
     isRateLimitError,
     computeFunnel,
     buildOutputText,

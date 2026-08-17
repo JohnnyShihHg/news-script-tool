@@ -8,6 +8,7 @@ const {
   decideInclusion,
   summarizeMatches,
   selectKeywordTargets,
+  splitKeywordRun,
   isRateLimitError,
   computeFunnel,
   buildOutputText,
@@ -24,6 +25,9 @@ let hasCompared = false;
  *  (it re-renders on a debounce) can never let the same entry be written twice. */
 const writtenSlugs = new Set();
 const KEYWORD_COUNT = 4;
+/** Max entries one keyword run may send; overwritten from config on startup.
+ *  Matches the free tier's per-minute request cap. 0 = no cap. */
+let keywordMaxPerRun = 15;
 
 const el = (id) => document.getElementById(id);
 
@@ -133,6 +137,7 @@ async function initFromConfig() {
     return;
   }
   applyTheme(config.ui?.theme);
+  if (Number.isFinite(config.gemini?.max_per_run)) keywordMaxPerRun = config.gemini.max_per_run;
   const folder = config.import?.default_folder ?? "";
   if (!folder) return;
 
@@ -175,11 +180,15 @@ listen("keyword-progress", (event) => {
   }
 });
 
-/// After an import, run the steps the user would otherwise have to remember: compare
-/// against the shared doc first, then generate keywords only for the entries that
-/// actually still need to go in. Doing compare first is what keeps this cheap --
-/// entries already handled in the doc never reach Gemini, so no tokens are spent
-/// re-processing them.
+/// After an import, compare against the shared doc — and stop there.
+///
+/// Keyword generation is deliberately NOT run automatically. Producers tidy up roughly
+/// every half hour, so one import routinely holds dozens of scripts; firing them all at
+/// Gemini on import walks straight into the free tier's per-minute cap and hands back a
+/// screen of failed cards, having spent quota on entries the user may not even keep.
+/// Compare still runs on its own because it costs nothing and it is what prunes the
+/// keyword list, so by the time the user presses 產生關鍵字 the targets are already
+/// narrowed to entries that actually need to go in.
 async function runAutoPipeline() {
   if (items.length === 0) return;
   const status = el("compareStatus");
@@ -198,17 +207,7 @@ async function runAutoPipeline() {
     status.textContent =
       "已匯入。尚未比對（協作工具視窗還沒開），請先點「開啟協作工具」再按「比對」，以免重複寫入。";
   }
-
-  if (!hasApiKey) return;
-
-  const targets = keywordTargets();
-  if (targets.length === 0) {
-    if (compared) {
-      status.textContent += "　所有稿件都已在文件中，未產生關鍵字（不浪費 token）。";
-    }
-    return;
-  }
-  await generateKeywordsFor(targets);
+  updateKeywordButton();
 }
 
 function keywordTargets() {
@@ -397,6 +396,8 @@ function render() {
     elm.addEventListener("input", (e) => {
       const item = items.find((i) => i.id === e.target.dataset.id);
       if (item) item.keywords = e.target.value;
+      // Typing keywords by hand takes that entry out of the run.
+      updateKeywordButton();
     });
   });
   document.querySelectorAll(".include-cb").forEach((elm) => {
@@ -404,6 +405,7 @@ function render() {
       const item = items.find((i) => i.id === e.target.dataset.id);
       if (item) item.included = e.target.checked;
       renderFunnel();
+      updateKeywordButton();
     });
   });
   document.querySelectorAll(".diff-toggle").forEach((elm) => {
@@ -424,6 +426,9 @@ function render() {
       render();
     });
   });
+  // The button carries a live count of what a run would send, so it has to be
+  // recomputed by the one path every state change already goes through.
+  updateKeywordButton();
 }
 
 async function generateKeywordsForOne(id) {
@@ -443,8 +448,42 @@ async function generateKeywordsForOne(id) {
   render();
 }
 
-function generateKeywordsForAllIncluded() {
-  return generateKeywordsFor(keywordTargets());
+/// Keeps the button honest about what pressing it will do: how many entries are
+/// waiting, and whether this run will only cover part of them. Called after anything
+/// that can change the target set (import, compare, tick, manual keyword edit).
+function updateKeywordButton() {
+  const btn = el("genAllKeywordsBtn");
+  if (!hasApiKey) {
+    btn.disabled = true;
+    btn.textContent = "產生關鍵字";
+    btn.title = "尚未設定 Gemini API key，請到設定頁輸入";
+    return;
+  }
+  const targets = keywordTargets();
+  const { batch, remaining } = splitKeywordRun(targets, keywordMaxPerRun);
+  btn.disabled = targets.length === 0;
+  btn.textContent = targets.length === 0 ? "產生關鍵字" : `產生關鍵字（${batch.length}）`;
+  btn.title =
+    targets.length === 0
+      ? "沒有需要產生關鍵字的稿件（已有關鍵字、未勾選，或已在文件中）"
+      : remaining > 0
+        ? `待產生 ${targets.length} 則，本次先送 ${batch.length} 則，剩下 ${remaining} 則等約一分鐘後再按一次`
+        : `待產生 ${targets.length} 則`;
+}
+
+async function generateKeywordsForAllIncluded() {
+  const targets = keywordTargets();
+  const { batch, remaining } = splitKeywordRun(targets, keywordMaxPerRun);
+  await generateKeywordsFor(batch);
+  if (remaining > 0) {
+    const status = el("compareStatus");
+    status.classList.remove("hidden");
+    status.className = "compare-status";
+    status.textContent =
+      `本次已送出 ${batch.length} 則（避開 Gemini 每分鐘上限）。還有 ${remaining} 則未產生，` +
+      `請等約一分鐘後再按一次「產生關鍵字」——已完成的不會重複消耗額度。`;
+  }
+  updateKeywordButton();
 }
 
 async function generateKeywordsFor(targets) {
@@ -703,9 +742,7 @@ document.querySelectorAll(".stat").forEach((btn) => {
 async function refreshApiKeyStatus() {
   const status = await invoke("get_api_key_status");
   hasApiKey = status.has_key;
-  const btn = el("genAllKeywordsBtn");
-  btn.disabled = !hasApiKey;
-  btn.title = hasApiKey ? "" : "尚未設定 Gemini API key，請到設定頁輸入";
+  updateKeywordButton();
   return status;
 }
 
@@ -851,6 +888,11 @@ function settingsModalHtml(config, apiStatus) {
               <label>模型</label>
               <input type="text" data-cfg="gemini.model" value="${escapeHtml(config.gemini.model)}" />
             </div>
+            <div class="field">
+              <label>單次產生上限（則）</label>
+              <input type="number" min="0" data-cfg-num="gemini.max_per_run" value="${config.gemini.max_per_run}" />
+            </div>
+            <div class="muted">免費方案每分鐘的請求數有上限，一次送太多會有一半以上失敗。按一次「產生關鍵字」最多送這麼多則，剩下的等約一分鐘再按一次即可接續（已完成的不會重複消耗額度）。填 0 代表不限制。</div>
           </section>
 
           <section class="settings-section">
@@ -910,6 +952,8 @@ function settingsModalHtml(config, apiStatus) {
               <label>標題標記樣式（regex）</label>
               <input type="text" data-cfg="filter.title_tag_pattern" value="${escapeHtml(config.filter.title_tag_pattern)}" />
             </div>
+            ${styleField("樣式空白時改看 slug slug_style_terms", "filter.slug_style_terms", config.filter.slug_style_terms)}
+            <div class="muted">有些稿件不填「樣式」，直接把類型寫在新聞名稱裡（例：心喻14推播）。樣式欄真的空白時才會用這裡的詞去比對 slug，比中就當成該樣式處理並在該則標上提醒；樣式欄有填就一律以樣式欄為準。同樣只比對完整詞。</div>
           </section>
 
           <section class="settings-section">
@@ -979,6 +1023,7 @@ const LIST_FIELDS = new Set([
   "filter.blocked_styles",
   "filter.excluded_slug_suffixes",
   "filter.flag_styles",
+  "filter.slug_style_terms",
   "markers.refresh_keywords",
   "annotations.no_upload_terms",
   "annotations.copyright_terms",
@@ -1071,6 +1116,10 @@ async function openSettings() {
       // theme the user just committed.
       config.ui.theme = updated.ui.theme;
       applyTheme(updated.ui.theme);
+      if (Number.isFinite(updated.gemini?.max_per_run)) {
+        keywordMaxPerRun = updated.gemini.max_per_run;
+        updateKeywordButton();
+      }
       if (!currentFolder) await initFromConfig();
       status.textContent = "已儲存";
       status.style.color = "var(--ok)";

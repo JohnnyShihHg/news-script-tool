@@ -98,6 +98,44 @@ test("filtered and failed buckets are never keyword targets", () => {
   assert.equal(L.selectKeywordTargets(items).length, 1);
 });
 
+// --- splitKeywordRun: keeps a half-hour batch from hitting the per-minute cap ---
+
+test("a run is capped at the limit and reports what is left", () => {
+  const targets = Array.from({ length: 23 }, () => entry());
+  const { batch, remaining } = L.splitKeywordRun(targets, 15);
+  assert.equal(batch.length, 15);
+  assert.equal(remaining, 8);
+});
+
+test("a batch under the limit is sent whole with nothing left over", () => {
+  const { batch, remaining } = L.splitKeywordRun([entry(), entry()], 15);
+  assert.equal(batch.length, 2);
+  assert.equal(remaining, 0);
+});
+
+test("a limit of zero means no cap, for anyone on a paid key", () => {
+  const targets = Array.from({ length: 40 }, () => entry());
+  const { batch, remaining } = L.splitKeywordRun(targets, 0);
+  assert.equal(batch.length, 40);
+  assert.equal(remaining, 0);
+});
+
+test("re-running picks up exactly the leftovers", () => {
+  // The second press must cover the remainder and nothing else: selectKeywordTargets
+  // drops whatever already has keywords, so the two steps compose.
+  const targets = Array.from({ length: 23 }, () => entry());
+  const first = L.splitKeywordRun(targets, 15);
+  first.batch.forEach((i) => { i.keywords = "#合成關鍵字"; });
+  const second = L.splitKeywordRun(L.selectKeywordTargets(targets), 15);
+  assert.equal(second.batch.length, 8);
+  assert.equal(second.remaining, 0);
+});
+
+test("an empty or missing target list is safe", () => {
+  assert.deepEqual(L.splitKeywordRun([], 15), { batch: [], remaining: 0 });
+  assert.deepEqual(L.splitKeywordRun(undefined, 15), { batch: [], remaining: 0 });
+});
+
 // --- isRateLimitError ---
 
 test("recognises the quota failure from either the status code or the message", () => {

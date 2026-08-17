@@ -64,8 +64,8 @@ fn strip_inline_dividers(body: &str) -> String {
 }
 
 /// Parse the production block (`[<` ... `>]`) after the header divider: extract the title
-/// (the line right after the first `^\[BAR_.*大\]$`-style tag, case-insensitive, that itself
-/// starts with `T2`/`t2`) and the body (everything after `>]`, trimmed, with inline `===xxx===`
+/// (the first non-blank line after the first `^\[BAR_.*大\]$`-style tag, case-insensitive, that
+/// itself starts with `T2`/`t2`) and the body (everything after `>]`, trimmed, with inline `===xxx===`
 /// divider lines removed).
 pub fn parse_body(text_after_header: &str, title_tag_pattern: &str) -> BodyParse {
     let title_tag_re = Regex::new(&format!("(?i){}", title_tag_pattern)).unwrap();
@@ -86,10 +86,15 @@ pub fn parse_body(text_after_header: &str, title_tag_pattern: &str) -> BodyParse
     let block_lines: Vec<&str> = block.lines().collect();
     for (i, line) in block_lines.iter().enumerate() {
         if title_tag_re.is_match(line.trim()) {
-            if let Some(next) = block_lines.get(i + 1) {
-                let t = next.trim();
-                if t.len() >= 2 && t[..2].eq_ignore_ascii_case("t2") {
-                    title = Some(t[2..].trim().to_string());
+            // Blank lines between the tag and its T2 line are common in real scripts,
+            // so skip them; anything else (another tag, a T1 line) still means no title.
+            if let Some(next) = block_lines[i + 1..]
+                .iter()
+                .map(|l| l.trim())
+                .find(|t| !t.is_empty())
+            {
+                if next.len() >= 2 && next[..2].eq_ignore_ascii_case("t2") {
+                    title = Some(next[2..].trim().to_string());
                 }
             }
             break;
@@ -175,6 +180,35 @@ mod tests {
                 assert_eq!(title, None);
                 assert_eq!(body, "內文");
             }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn blank_line_between_tag_and_t2_still_finds_the_title() {
+        let text = "[<\n[BAR_獨大]\n\nT2天熱\"水蜜桃冰\"排翻\n>]\n內文";
+        match parse_body(text, TITLE_PATTERN) {
+            BodyParse::Extracted { title, .. } => {
+                assert_eq!(title.as_deref(), Some("天熱\"水蜜桃冰\"排翻"));
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn whitespace_only_lines_between_tag_and_t2_are_also_skipped() {
+        let text = "[<\n[BAR_大]\n   \n\t\nT2標題\n>]\n內文";
+        match parse_body(text, TITLE_PATTERN) {
+            BodyParse::Extracted { title, .. } => assert_eq!(title.as_deref(), Some("標題")),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn blank_then_non_t2_line_still_yields_no_title() {
+        let text = "[<\n[BAR_大]\n\nT1不該被抓\n>]\n內文";
+        match parse_body(text, TITLE_PATTERN) {
+            BodyParse::Extracted { title, .. } => assert_eq!(title, None),
             other => panic!("unexpected {:?}", other),
         }
     }

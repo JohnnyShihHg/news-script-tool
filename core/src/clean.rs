@@ -166,12 +166,83 @@ pub fn is_flagged_style(style: &str, cfg: &FilterConfig) -> bool {
     cfg.flag_styles.iter().any(|s| eq_ci(s, style))
 }
 
+/// Style inferred from the slug, for rows that leave 樣式 blank and write the format
+/// into the news name instead (`心喻14推播` → `推播`).
+///
+/// Only consulted when 樣式 is actually empty — a real 樣式 always wins, so this can
+/// never override what the producer typed. Returns the configured term itself (not the
+/// slug text) so it lines up with `allowed_styles`/`latest_styles` exactly.
+pub fn style_from_slug(slug: &str, cfg: &FilterConfig) -> Option<String> {
+    cfg.slug_style_terms
+        .iter()
+        .find(|t| !t.trim().is_empty() && slug.contains(t.trim()))
+        .map(|t| t.trim().to_string())
+}
+
 /// slug ends with one of the excluded suffixes (e.g. `SOU`), case-insensitive.
 pub fn is_excluded_slug(slug: &str, cfg: &FilterConfig) -> bool {
     let slug_lower = slug.trim().to_lowercase();
     cfg.excluded_slug_suffixes
         .iter()
         .any(|suf| slug_lower.ends_with(&suf.to_lowercase()))
+}
+
+#[cfg(test)]
+mod slug_style_tests {
+    use super::*;
+
+    fn f() -> FilterConfig {
+        FilterConfig::default()
+    }
+
+    #[test]
+    fn anchor_hour_push_slug_yields_the_push_style() {
+        assert_eq!(style_from_slug("心喻14推播", &f()).as_deref(), Some("推播"));
+    }
+
+    #[test]
+    fn the_configured_term_is_returned_not_the_slug_text() {
+        // Must line up with allowed_styles/latest_styles exactly, or classification
+        // and the 最新》 prefix would both miss.
+        let style = style_from_slug("心喻14推播", &f()).unwrap();
+        assert!(f().allowed_styles.iter().any(|s| s == &style));
+    }
+
+    /// Real slug forms collected from the newsroom. The term can sit anywhere —
+    /// leading, trailing, or buried mid-string — so this is a plain substring test,
+    /// deliberately not a position or shape rule.
+    #[test]
+    fn every_real_world_push_slug_form_is_recognized() {
+        for slug in [
+            "欣怡推播14稿標",
+            "禕呈推播稿標",
+            "生活推播1020",
+            "XX14推播",
+            "XX推播預錄",
+            "心喻14推播",
+        ] {
+            assert_eq!(style_from_slug(slug, &f()).as_deref(), Some("推播"), "missed {slug}");
+        }
+    }
+
+    #[test]
+    fn a_bare_push_character_does_not_match() {
+        // 鬼月撿便宜14推 is a different kind of row; matching the single character 推
+        // would sweep it in. Whole terms only.
+        assert_eq!(style_from_slug("鬼月撿便宜14推", &f()), None);
+    }
+
+    #[test]
+    fn an_ordinary_slug_infers_nothing() {
+        assert_eq!(style_from_slug("含冰排吃冰1800", &f()), None);
+    }
+
+    #[test]
+    fn an_empty_configured_term_never_matches_everything() {
+        let mut cfg = f();
+        cfg.slug_style_terms = vec!["  ".into()];
+        assert_eq!(style_from_slug("含冰排吃冰1800", &cfg), None);
+    }
 }
 
 #[cfg(test)]

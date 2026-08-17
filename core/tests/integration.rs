@@ -149,6 +149,27 @@ fn blank_style_rows_are_silently_skipped_even_with_real_text_in_the_body() {
 }
 
 #[test]
+fn blank_style_row_whose_slug_says_push_is_recovered_and_marked_latest() {
+    let files = load_fixtures();
+    // 樣式 is blank, but the slug carries 推播, so the row is a real push item rather
+    // than rundown structure.
+    let (name, text) = fixture(&files, "合成主播14推播.txt");
+    let cfg = Config::default();
+    match process_text(name, text, &cfg) {
+        Outcome::Passed(entry) => {
+            assert_eq!(entry.style, "推播");
+            assert!(entry.title.starts_with("最新》"), "got title {:?}", entry.title);
+            assert!(
+                entry.warnings.iter().any(|w| w.contains("依 slug 判定")),
+                "the inference must be visible to the user, got {:?}",
+                entry.warnings
+            );
+        }
+        other => panic!("expected Passed, got {other:?}"),
+    }
+}
+
+#[test]
 fn non_blank_unrecognized_style_with_no_title_tag_still_surfaces_as_a_failure() {
     let files = load_fixtures();
     let (name, text) = fixture(&files, "合成無標記失敗0900.txt");

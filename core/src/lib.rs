@@ -22,7 +22,7 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     let (header, header_lines) = parse::parse_header(&text);
 
     let slug = header_value(&header, "新聞名稱(標題)");
-    let style = header_value(&header, "樣式");
+    let mut style = header_value(&header, "樣式");
     let time = header_value(&header, "累積時間");
     let group = header_value(&header, "組");
     // 註記 is deliberately not read: in practice it holds a camera operator's name,
@@ -33,8 +33,20 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
         return Outcome::Skipped;
     }
 
-    // A blank 樣式 means this row is rundown structure (bumper/sponsor-spot/producer
-    // note), not a news script, no matter what text happens to sit in the body.
+    // Some rows leave 樣式 blank and write the format into the slug instead
+    // (`心喻14推播`). Recover it before the blank-樣式 skip below, or those rows
+    // silently never reach the output.
+    let mut inferred_style = None;
+    if style.is_empty() {
+        if let Some(from_slug) = clean::style_from_slug(&slug, &cfg.filter) {
+            inferred_style = Some(from_slug.clone());
+            style = from_slug;
+        }
+    }
+
+    // A blank 樣式 with nothing in the slug either means this row is rundown structure
+    // (bumper/sponsor-spot/producer note), not a news script, no matter what text
+    // happens to sit in the body.
     if style.is_empty() {
         return Outcome::Skipped;
     }
@@ -105,6 +117,9 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
             warnings.extend(body_warnings);
             if clean::is_flagged_style(&style, &cfg.filter) {
                 warnings.push(format!("樣式「{}」可回寫但請確認", style));
+            }
+            if let Some(ref s) = inferred_style {
+                warnings.push(format!("樣式空白，依 slug 判定為「{}」", s));
             }
 
             let entry = NewsEntry {

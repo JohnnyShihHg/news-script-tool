@@ -8,6 +8,24 @@ pub struct FilterConfig {
     pub excluded_slug_suffixes: Vec<String>,
     pub flag_styles: Vec<String>,
     pub title_tag_pattern: String,
+    /// Terms that identify a style from the slug when 樣式 itself is blank.
+    ///
+    /// Some rundown rows carry no 樣式 at all and write the format into the slug
+    /// instead. Without this the row looks like rundown structure and gets skipped,
+    /// so a 推播 silently never reaches the output.
+    ///
+    /// Matched as a plain substring, anywhere in the slug — the term shows up in
+    /// every position in practice (`XX14推播`, `欣怡推播14稿標`, `XX推播預錄`), so
+    /// there is deliberately no position or shape rule to go stale.
+    ///
+    /// Whole terms only, never a single character: `推` alone would also match
+    /// unrelated rows such as `鬼月撿便宜14推`.
+    #[serde(default = "default_slug_style_terms")]
+    pub slug_style_terms: Vec<String>,
+}
+
+fn default_slug_style_terms() -> Vec<String> {
+    vec!["推播".into()]
 }
 
 impl Default for FilterConfig {
@@ -22,6 +40,7 @@ impl Default for FilterConfig {
             excluded_slug_suffixes: vec!["SOU".into()],
             flag_styles: vec!["TEL".into(), "電連".into()],
             title_tag_pattern: r"^\[BAR_.*大\]$".into(),
+            slug_style_terms: default_slug_style_terms(),
         }
     }
 }
@@ -163,11 +182,24 @@ impl Default for OutputConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiSettingsConfig {
     pub model: String,
+    /// How many entries one 產生關鍵字 run may send, so a half-hour batch of dozens of
+    /// scripts does not walk straight into the free tier's per-minute request cap and
+    /// come back as a screen of failed cards.
+    ///
+    /// The run stops at this many and reports how many are left; pressing the button
+    /// again a minute later picks up exactly the remainder, because entries that
+    /// already have keywords are never re-sent.
+    #[serde(default = "default_keyword_max_per_run")]
+    pub max_per_run: usize,
+}
+
+fn default_keyword_max_per_run() -> usize {
+    15
 }
 
 impl Default for GeminiSettingsConfig {
     fn default() -> Self {
-        Self { model: "gemini-3.5-flash-lite".into() }
+        Self { model: "gemini-3.5-flash-lite".into(), max_per_run: default_keyword_max_per_run() }
     }
 }
 
@@ -193,7 +225,7 @@ impl Default for UiConfig {
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 1;
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -246,6 +278,7 @@ pub fn migrate(cfg: &mut Config) -> bool {
 
     union(&mut cfg.filter.allowed_styles, &defaults.filter.allowed_styles);
     union(&mut cfg.markers.refresh_keywords, &defaults.markers.refresh_keywords);
+    union(&mut cfg.filter.slug_style_terms, &defaults.filter.slug_style_terms);
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -324,6 +357,16 @@ theme = "warm"
             assert!(cfg.filter.allowed_styles.iter().any(|s| s == style), "missing {style}");
         }
         assert!(cfg.markers.refresh_keywords.iter().any(|s| s == "抓"));
+        assert!(cfg.filter.slug_style_terms.iter().any(|s| s == "推播"));
+    }
+
+    #[test]
+    fn a_config_file_predating_slug_style_terms_still_loads() {
+        // FilterConfig's fields are not individually `#[serde(default)]`, so a new
+        // field without its own default would make every existing config.toml fail
+        // to parse — the app would come up with factory settings.
+        let cfg = load_from_str(legacy_toml()).unwrap();
+        assert_eq!(cfg.filter.slug_style_terms, vec!["推播".to_string()]);
     }
 
     #[test]
