@@ -4,6 +4,7 @@ const { listen } = window.__TAURI__.event;
 // this file keeps only wiring, rendering and IPC. See app/tests/logic.test.js.
 const {
   sortByTime,
+  sortForDisplay,
   isAlreadyInDoc,
   decideInclusion,
   summarizeMatches,
@@ -76,6 +77,7 @@ async function pickAndImport() {
 /// Clears the on-screen cards only. Deliberately separate from 清空資料夾, which
 /// deletes files on disk -- this one touches nothing outside the UI.
 function clearCards() {
+  clearCooldown();
   items = [];
   hasCompared = false;
   el("summary").classList.add("hidden");
@@ -218,6 +220,7 @@ function loadSummary(summary) {
   // A fresh card set has not been compared against the doc yet, whatever the previous
   // set's state was -- otherwise the write-back guard would trust a stale comparison.
   hasCompared = false;
+  clearCooldown();
   items = summary.entries.map((dto, i) => {
     const kind = kindOf(dto);
     const bucket = bucketOf(kind);
@@ -227,10 +230,12 @@ function loadSummary(summary) {
       kind,
       bucket,
       id: `entry-${i}`,
-      included: bucket === "passed" || bucket === "manual",
+      // 待補稿 starts unticked: it has no body yet, so writing it out by default
+      // would push empty entries into the doc.
+      included: bucket === "passed",
       /// The import-time default, kept so a re-compare can restore the tick without
-      /// opting in buckets (unknown styles) that are deliberately off to begin with.
-      defaultIncluded: bucket === "passed" || bucket === "manual",
+      /// opting in buckets (待補稿, unknown styles) that are deliberately off to begin with.
+      defaultIncluded: bucket === "passed",
       title: fields.title ?? "",
       body: fields.body ?? "",
       keywords: "",
@@ -385,7 +390,10 @@ function cardHtml(item) {
 }
 
 function render() {
-  const visible = activeFilter === "all" ? items : items.filter((i) => i.bucket === activeFilter);
+  const shown = activeFilter === "all" ? items : items.filter((i) => i.bucket === activeFilter);
+  // Ticked cards first so they don't have to be scrolled for; display only -- `items`
+  // itself stays in running order, which is what the output follows.
+  const visible = sortForDisplay(shown);
   el("list").innerHTML = visible.map(cardHtml).join("");
 
   document.querySelectorAll(".edit-title").forEach((elm) => {
@@ -421,6 +429,8 @@ function render() {
       }
       renderFunnel();
       updateKeywordButton();
+      // Move the card into the ticked/unticked group straight away.
+      render();
     });
   });
   document.querySelectorAll(".diff-toggle").forEach((elm) => {
@@ -513,10 +523,47 @@ function updateKeywordButton() {
         : `待產生 ${targets.length} 則`;
 }
 
+/// One-minute countdown under the status line, shown only when the user will have to
+/// send again: a run left entries over, or the per-minute cap was hit. Counted from a
+/// fixed end time so a throttled timer can't drift.
+let cooldownTimer = null;
+const COOLDOWN_MS = 60_000;
+
+function clearCooldown() {
+  if (cooldownTimer) clearInterval(cooldownTimer);
+  cooldownTimer = null;
+  el("cooldown")?.remove();
+}
+
+function startCooldown() {
+  clearCooldown();
+  const node = document.createElement("div");
+  node.id = "cooldown";
+  node.className = "cooldown";
+  el("compareStatus").appendChild(node);
+  const end = Date.now() + COOLDOWN_MS;
+  const tick = () => {
+    // Another action rewrote the status line; the countdown went with it.
+    if (!node.isConnected) return clearCooldown();
+    const left = Math.ceil((end - Date.now()) / 1000);
+    if (left <= 0) {
+      node.textContent = "✅ 可以再次送出";
+      node.classList.add("done");
+      clearInterval(cooldownTimer);
+      cooldownTimer = null;
+      return;
+    }
+    node.textContent = `⏳ 倒數 ${left} 秒後可再次送出`;
+  };
+  tick();
+  cooldownTimer = setInterval(tick, 1000);
+}
+
 async function generateKeywordsForAllIncluded() {
+  clearCooldown();
   const targets = keywordTargets();
   const { batch, remaining } = splitKeywordRun(targets, keywordMaxPerRun);
-  await generateKeywordsFor(batch);
+  const rateLimited = await generateKeywordsFor(batch);
   if (remaining > 0) {
     const status = el("compareStatus");
     status.classList.remove("hidden");
@@ -525,17 +572,20 @@ async function generateKeywordsForAllIncluded() {
       `本次已送出 ${batch.length} 則（避開 Gemini 每分鐘上限）。還有 ${remaining} 則未產生，` +
       `請等約一分鐘後再按一次「產生關鍵字」——已完成的不會重複消耗額度。`;
   }
+  if (remaining > 0 || rateLimited) startCooldown();
   updateKeywordButton();
 }
 
+/// Returns whether the run hit the per-minute cap.
 async function generateKeywordsFor(targets) {
-  if (!targets || targets.length === 0) return;
+  if (!targets || targets.length === 0) return false;
 
   showProgress(0, targets.length, `產生關鍵字 0 / ${targets.length}`);
   targets.forEach((i) => { i.keywordStatus = "loading"; });
   render();
 
   const requests = targets.map((i) => ({ id: i.id, title: i.title, body: i.body }));
+  let rateLimited = false;
   try {
     const results = await invoke("generate_keywords_batch", { items: requests, count: KEYWORD_COUNT });
     for (const r of results) {
@@ -550,13 +600,14 @@ async function generateKeywordsFor(targets) {
         item.keywordError = r.error ?? "未知錯誤";
       }
     }
-    reportRateLimit(results.filter((r) => !r.keywords).map((r) => r.error ?? ""), targets.length);
+    rateLimited = reportRateLimit(results.filter((r) => !r.keywords).map((r) => r.error ?? ""), targets.length);
   } catch (err) {
     targets.forEach((i) => { i.keywordStatus = "error"; i.keywordError = String(err); });
     hideProgress();
-    reportRateLimit([String(err)], targets.length);
+    rateLimited = reportRateLimit([String(err)], targets.length);
   }
   render();
+  return rateLimited;
 }
 
 /// The free Gemini tier caps requests per minute, and a big batch walks straight into
@@ -565,13 +616,14 @@ async function generateKeywordsFor(targets) {
 /// line buried on card 14 of 20.
 function reportRateLimit(errors, attempted) {
   const hits = errors.filter(isRateLimitError);
-  if (hits.length === 0) return;
+  if (hits.length === 0) return false;
   const status = el("compareStatus");
   status.classList.remove("hidden");
   status.className = "compare-status error";
   status.textContent =
     `⚠ 已達 Gemini 每分鐘請求上限（429）：${attempted} 則中有 ${hits.length} 則沒產生成功。` +
     `請等約一分鐘後，再按「全部產生關鍵字」補跑（已成功的不會重複消耗額度）。`;
+  return true;
 }
 
 /// Flattens each card's enum payload into the shape buildOutputText expects, so the
@@ -1091,7 +1143,9 @@ function readConfigFromForm(base) {
     const path = elm.dataset.cfg;
     const isListField = LIST_FIELDS.has(path);
     const value = isListField
-      ? elm.value.split(",").map((s) => s.trim()).filter((s) => s !== "")
+      // Settings are typed with a Chinese IME, so accept full-width commas and 、 too;
+      // otherwise `發動畫，TIRO` is saved as one entry that never matches anything.
+      ? elm.value.split(/[,，、;；\s]+/).map((s) => s.trim()).filter((s) => s !== "")
       : elm.value;
     setPath(cfg, path, value);
   });

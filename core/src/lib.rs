@@ -10,6 +10,16 @@ pub mod punctuation;
 use config::Config;
 use model::{Header, NewsEntry, Outcome, StyleClass};
 
+/// An entry that still needs its script filled in by hand -- unless its style is on
+/// the blocklist. Without this check only fully parsed entries were ever filtered, so
+/// a blocked style with no 稿頭內文 slipped past the blocklist into 待補稿.
+fn needs_manual(entry: NewsEntry, cfg: &Config) -> Outcome {
+    match clean::classify_style(&entry.style, &cfg.filter) {
+        StyleClass::Blocked => Outcome::FilteredByStyle(entry),
+        _ => Outcome::NeedsManualContent(entry),
+    }
+}
+
 fn header_value(header: &Header, key: &str) -> String {
     header.get(key).unwrap_or("").trim().to_string()
 }
@@ -76,7 +86,7 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                     keywords: Vec::new(),
                     warnings: vec!["TEL 無稿頭內容，需人工補稿".to_string()],
                 };
-                return Outcome::NeedsManualContent(entry);
+                return needs_manual(entry, cfg);
             }
             return Outcome::ParseFailed {
                 file_name: file_name.to_string(),
@@ -117,7 +127,7 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 keywords: Vec::new(),
                 warnings: vec!["找不到標題且無稿頭內文，需人工補稿".to_string()],
             };
-            return Outcome::NeedsManualContent(entry);
+            return needs_manual(entry, cfg);
         }
         (None, false) => {
             return Outcome::ParseFailed {
@@ -155,7 +165,7 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 keywords: Vec::new(),
                 warnings,
             };
-            return Outcome::NeedsManualContent(entry);
+            return needs_manual(entry, cfg);
         }
         (Some(title), false) => {
             let (title_norm, mut warnings) = {

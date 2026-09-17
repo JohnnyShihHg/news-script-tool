@@ -324,3 +324,18 @@ test("the marker never becomes part of the slug used for doc matching", () => {
   const item = { slug: "合成焦點報導1800", slug_marker: "【勿上網】" };
   assert.equal(item.slug, "合成焦點報導1800");
 });
+
+// --- sortForDisplay: ticked cards on top, running order kept inside each group ---
+
+test("sortForDisplay puts ticked entries first and keeps time order within each group", () => {
+  const items = [
+    { slug: "a", time: "10:00:00", included: false },
+    { slug: "b", time: "09:00:00", included: true },
+    { slug: "c", time: "08:00:00", included: false },
+    { slug: "d", time: "11:00:00", included: true },
+    { slug: "e", time: "", included: true },
+  ];
+  assert.deepEqual(L.sortForDisplay(items).map((i) => i.slug), ["b", "d", "e", "c", "a"]);
+  // Display only: the input's own order is untouched.
+  assert.deepEqual(items.map((i) => i.slug), ["a", "b", "c", "d", "e"]);
+});

@@ -302,3 +302,29 @@ fn punctuation_normalization_survives_the_full_pipeline() {
         entry.body
     );
 }
+
+#[test]
+fn a_blocked_style_with_no_body_is_filtered_not_left_in_manual_content() {
+    // The blocklist used to be checked only for fully parsed entries, so a blocked
+    // style with nothing to parse (發動畫, TIRO) piled up in 待補稿 instead.
+    let files = load_fixtures();
+    let mut cfg = Config::default();
+    cfg.filter.blocked_styles.push("發動畫".into());
+    cfg.filter.blocked_styles.push("TIRO".into());
+
+    let (name, text) = fixture(&files, "合成氣象無稿頭1050.txt");
+    let text = text.replace("樣式: LIVE", "樣式: 發動畫");
+    match process_text(name, &text, &cfg) {
+        Outcome::FilteredByStyle(e) => assert_eq!(e.style, "發動畫"),
+        other => panic!("expected FilteredByStyle, got {other:?}"),
+    }
+
+    // No title and no body either -- and a full-width style typed through an IME.
+    let (name, text) = fixture(&files, "合成無標題無稿頭1055.txt");
+    let style_line = text.lines().find(|l| l.starts_with("樣式:")).unwrap();
+    let text = text.replace(style_line, "樣式: ＴＩＲＯ");
+    match process_text(name, &text, &cfg) {
+        Outcome::FilteredByStyle(e) => assert_eq!(e.style, "ＴＩＲＯ"),
+        other => panic!("expected FilteredByStyle, got {other:?}"),
+    }
+}

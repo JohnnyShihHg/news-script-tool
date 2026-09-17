@@ -420,3 +420,6 @@ select {
   color: var(--text);
   min-width: 200px;
 }
+
+.cooldown { margin-top: 6px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cooldown.done { color: var(--ok); }

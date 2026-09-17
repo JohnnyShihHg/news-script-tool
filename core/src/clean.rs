@@ -148,8 +148,25 @@ pub fn title_prefix(editor_note: &str, style: &str, title: &str, cfg: &Annotatio
     chosen.clone()
 }
 
+/// Trimmed, lowercased, with full-width ASCII (`ＴＩＲＯ`, `，`) folded to half-width.
+///
+/// Settings are typed with a Chinese IME, so `ＴＩＲＯ` in the list must still match
+/// `TIRO` in a script (and vice versa) — otherwise the entry silently never applies.
+fn fold(s: &str) -> String {
+    s.trim()
+        .chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_lowercase()
+}
+
 fn eq_ci(a: &str, b: &str) -> bool {
-    a.trim().eq_ignore_ascii_case(b.trim()) || a.trim() == b.trim()
+    fold(a) == fold(b)
 }
 
 pub fn classify_style(style: &str, cfg: &FilterConfig) -> StyleClass {
@@ -175,16 +192,16 @@ pub fn is_flagged_style(style: &str, cfg: &FilterConfig) -> bool {
 pub fn style_from_slug(slug: &str, cfg: &FilterConfig) -> Option<String> {
     cfg.slug_style_terms
         .iter()
-        .find(|t| !t.trim().is_empty() && slug.contains(t.trim()))
+        .find(|t| !t.trim().is_empty() && fold(slug).contains(&fold(t)))
         .map(|t| t.trim().to_string())
 }
 
 /// slug ends with one of the excluded suffixes (e.g. `SOU`), case-insensitive.
 pub fn is_excluded_slug(slug: &str, cfg: &FilterConfig) -> bool {
-    let slug_lower = slug.trim().to_lowercase();
+    let slug = fold(slug);
     cfg.excluded_slug_suffixes
         .iter()
-        .any(|suf| slug_lower.ends_with(&suf.to_lowercase()))
+        .any(|suf| !fold(suf).is_empty() && slug.ends_with(&fold(suf)))
 }
 
 #[cfg(test)]
@@ -193,6 +210,25 @@ mod slug_style_tests {
 
     fn f() -> FilterConfig {
         FilterConfig::default()
+    }
+
+    #[test]
+    fn full_width_entries_match_half_width_styles_both_ways() {
+        let mut cfg = f();
+        cfg.blocked_styles = vec!["ＴＩＲＯ".into(), "發動畫".into()];
+        assert_eq!(classify_style("TIRO", &cfg), StyleClass::Blocked);
+        assert_eq!(classify_style("tiro", &cfg), StyleClass::Blocked);
+        assert_eq!(classify_style(" 發動畫 ", &cfg), StyleClass::Blocked);
+        cfg.blocked_styles = vec!["TIRO".into()];
+        assert_eq!(classify_style("ＴＩＲＯ", &cfg), StyleClass::Blocked);
+    }
+
+    #[test]
+    fn full_width_slug_suffix_still_excludes() {
+        let mut cfg = f();
+        cfg.excluded_slug_suffixes = vec!["ＳＯＵ".into(), " ".into()];
+        assert!(is_excluded_slug("合成連線報導sou", &cfg));
+        assert!(!is_excluded_slug("合成連線報導", &cfg), "a blank entry must not exclude everything");
     }
 
     #[test]

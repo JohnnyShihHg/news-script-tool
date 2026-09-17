@@ -165,8 +165,18 @@
       .map((w) => w.item);
   }
 
+  /**
+   * Card order on screen: ticked entries first, unticked after, each group still in
+   * running order. Stable, so it never reshuffles entries within a group.
+   */
+  function sortForDisplay(items) {
+    const sorted = sortByTime(items);
+    return [...sorted.filter((i) => i.included), ...sorted.filter((i) => !i.included)];
+  }
+
   return {
     sortByTime,
+    sortForDisplay,
     OUTPUT_BUCKETS,
     isOutputBucket,
     canOutputBucket,
