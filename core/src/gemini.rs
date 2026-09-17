@@ -1,3 +1,5 @@
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -73,8 +75,11 @@ fn keyword_prompt(title: &str, body: &str, count: usize) -> String {
          2. 優先選：人名、地名（縣市/行政區/路名）、機構或店家名稱、案件或事件類型（例如竊盜、鬥毆、詐騙）。\n\
          3. 避免選：金額、數量、時間點、門號、案發時刻這類純數字資訊 —— 這些幾乎每則社會新聞都有，\n\
             當關鍵字沒有辨識度，除非那個數字本身就是新聞的重點（例如「reward」懸賞金額創新高的新聞）。\n\
-         4. 可包含英文或數字（不含前述第 3 點排除的情況）；每個關鍵字精簡（通常 2-6 字）。\n\
-         5. 直接輸出 JSON 字串陣列，不要加任何說明文字或 markdown 標記。\n\n\
+         4. 記者、連線記者、主播、攝影的姓名一律不可當關鍵字（例如「連線記者王小明」的「王小明」）——\n\
+            那是播報的人，不是新聞內容；受訪者、當事人、官員等新聞人物的姓名仍然可以選。\n\
+         5. 可包含英文或數字（不含前述第 3 點排除的情況）；每個關鍵字精簡（通常 2-6 字）。\n\
+         6. 依重要性由高到低排列。\n\
+         7. 直接輸出 JSON 字串陣列，不要加任何說明文字或 markdown 標記。\n\n\
          範例（不是這則稿件的內容，只示範選擇標準）：\n\
          好：[\"台中西區\", \"明禮街\", \"竊盜\", \"監視器\"]\n\
          差：[\"1萬1千元\", \"4分鐘\", \"230支\", \"18:04\"] （純數字資訊，沒有辨識度）\n\n\
@@ -89,6 +94,40 @@ fn keyword_response_schema(count: usize) -> serde_json::Value {
         "minItems": count,
         "maxItems": count
     })
+}
+
+/// Extra keywords requested beyond `count`, so dropping a reporter's name still
+/// leaves enough. Same single request, so it costs no extra quota.
+const SPARE_KEYWORDS: usize = 2;
+
+/// Whatever follows `記者` / `連線記者` in the script: the start of a reporter's name
+/// plus possibly a trailing word (`王明報導`). Names run 2-3 characters and nothing
+/// marks where they end, so the span is kept loose and matched by prefix instead.
+static REPORTER_SPAN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"記者[\s\u{3000}:：]*([\p{Han}]{2,4})").unwrap());
+
+fn reporter_spans(text: &str) -> Vec<String> {
+    REPORTER_SPAN
+        .captures_iter(text)
+        .map(|c| c[1].to_string())
+        // 記者會 is a press conference, not a byline.
+        .filter(|span| !span.starts_with('會'))
+        .collect()
+}
+
+/// Safety net behind the prompt rule: the model still picks the reporter's name
+/// sometimes, and one stray #王小明 makes the whole tag line look wrong.
+fn drop_reporter_names(words: Vec<String>, source: &str, count: usize) -> Vec<String> {
+    let spans = reporter_spans(source);
+    words
+        .into_iter()
+        .filter(|w| {
+            let k = w.trim_start_matches('#');
+            let is_name = k.chars().count() >= 2 && spans.iter().any(|s| s.starts_with(k) || k.starts_with(s.as_str()));
+            !is_name && !k.contains("記者")
+        })
+        .take(count)
+        .collect()
 }
 
 fn normalize_keyword(raw: &str) -> String {
@@ -131,10 +170,10 @@ pub async fn generate_keywords(
         cfg.model, cfg.api_key
     );
     let payload = serde_json::json!({
-        "contents": [{ "parts": [{ "text": keyword_prompt(title, body, count) }] }],
+        "contents": [{ "parts": [{ "text": keyword_prompt(title, body, count + SPARE_KEYWORDS) }] }],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": keyword_response_schema(count),
+            "responseSchema": keyword_response_schema(count + SPARE_KEYWORDS),
         }
     });
 
@@ -163,7 +202,12 @@ pub async fn generate_keywords(
             let text = parsed
                 .first_text()
                 .ok_or_else(|| GeminiError::Parse("回應中沒有內容".to_string()))?;
-            return parse_keywords_json(&text);
+            let words = parse_keywords_json(&text)?;
+            let words = drop_reporter_names(words, &format!("{title}\n{body}"), count);
+            if words.is_empty() {
+                return Err(GeminiError::Parse("產生的關鍵字都是記者姓名，請重試".to_string()));
+            }
+            return Ok(words);
         }
 
         let retryable = status.as_u16() == 429 || status.is_server_error();
@@ -199,6 +243,37 @@ mod tests {
         assert!(prompt.contains("避免選"), "prompt lost its guidance against low-signal numeric keywords");
         assert!(prompt.contains("金額") && prompt.contains("時間點"), "prompt should name the exact failure mode seen in production");
         assert!(prompt.contains("人名") && prompt.contains("地名"), "prompt should steer toward named entities instead");
+    }
+
+    #[test]
+    fn keyword_prompt_forbids_reporter_names() {
+        let prompt = keyword_prompt("標題", "內文", 4);
+        assert!(prompt.contains("連線記者") && prompt.contains("不可當關鍵字"));
+    }
+
+    fn tags(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| format!("#{w}")).collect()
+    }
+
+    #[test]
+    fn reporter_names_are_dropped_and_spares_fill_the_gap() {
+        let body = "現場由連線記者王小明為您報導。另外記者 陳美報導指出，台中市長林大同表示將加強巡邏。";
+        let words = tags(&["王小明", "台中", "陳美", "林大同", "巡邏", "治安"]);
+        assert_eq!(drop_reporter_names(words, body, 4), tags(&["台中", "林大同", "巡邏", "治安"]));
+    }
+
+    #[test]
+    fn press_conference_is_not_a_byline() {
+        let body = "記者會上，王大明宣布參選。";
+        let words = tags(&["王大明", "記者會", "參選", "會上"]);
+        // 記者會 itself is dropped by the 記者 rule; the person in the news stays.
+        assert_eq!(drop_reporter_names(words, body, 4), tags(&["王大明", "參選", "會上"]));
+    }
+
+    #[test]
+    fn keywords_are_capped_at_count_without_reporters() {
+        let words = tags(&["甲地", "乙案", "丙人", "丁事", "戊物", "己處"]);
+        assert_eq!(drop_reporter_names(words, "沒有記者署名", 4).len(), 4);
     }
 
     #[test]
