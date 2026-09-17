@@ -54,6 +54,9 @@ pub enum BodyParse {
         /// to a title (e.g. no T2 line anywhere). Both can have `title: None`, but
         /// only the former is safe to skip silently.
         has_content: bool,
+        /// Whether a title tag (primary or fallback) was found at all. With a tag but
+        /// no filled-in T2 the script is real and only its title is missing.
+        title_tag_found: bool,
     },
 }
 
@@ -91,7 +94,8 @@ fn scan_window_for_t2(block_lines: &[&str], tag_idx: usize) -> Option<String> {
         if t.starts_with('[') {
             break;
         }
-        if t.len() >= 2 && t[..2].eq_ignore_ascii_case("t2") {
+        // A bare `T2` with nothing after it is an unfilled card, not a title.
+        if t.len() >= 2 && t[..2].eq_ignore_ascii_case("t2") && !t[2..].trim().is_empty() {
             return Some(t[2..].trim().to_string());
         }
     }
@@ -128,11 +132,9 @@ pub fn parse_body(
     let after = &text_after_header[close_idx + 2..];
 
     let block_lines: Vec<&str> = block.lines().collect();
-    let title = match find_tag_line(&block_lines, &title_tag_re) {
-        Some(idx) => scan_window_for_t2(&block_lines, idx),
-        None => find_tag_line(&block_lines, &fallback_re)
-            .and_then(|idx| scan_window_for_t2(&block_lines, idx)),
-    };
+    let tag_idx = find_tag_line(&block_lines, &title_tag_re)
+        .or_else(|| find_tag_line(&block_lines, &fallback_re));
+    let title = tag_idx.and_then(|idx| scan_window_for_t2(&block_lines, idx));
     // block_lines[0] is always the "[<" marker line itself; anything real starts
     // after it.
     let has_content = block_lines[1..].iter().any(|l| !l.trim().is_empty());
@@ -140,7 +142,7 @@ pub fn parse_body(
     let body_raw = after.trim();
     let body = strip_inline_dividers(body_raw).trim().to_string();
 
-    BodyParse::Extracted { title, body, has_content }
+    BodyParse::Extracted { title, body, has_content, title_tag_found: tag_idx.is_some() }
 }
 
 #[cfg(test)]

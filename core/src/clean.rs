@@ -68,6 +68,25 @@ pub fn strip_body_markers(body: &str, cfg: &CleanConfig) -> String {
     text.trim().to_string()
 }
 
+/// Collapse a body onto a single line. Reporters break lines mid-sentence at will and
+/// the destination wraps on its own, so line breaks carry no meaning in the output.
+/// Chinese joins directly; a space is kept only between two ASCII word characters so
+/// `APP\n下載` stays tight but `iPhone\n17` doesn't fuse into `iPhone17`.
+pub fn join_lines(body: &str) -> String {
+    let mut out = String::new();
+    for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let needs_space = matches!(
+            (out.chars().last(), line.chars().next()),
+            (Some(a), Some(b)) if a.is_ascii_alphanumeric() && b.is_ascii_alphanumeric()
+        );
+        if needs_space {
+            out.push(' ');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 fn strip_line_markers(line: &str) -> String {
     let url = crate::punctuation::url_mask(line);
 
@@ -196,6 +215,15 @@ pub fn style_from_slug(slug: &str, cfg: &FilterConfig) -> Option<String> {
         .map(|t| t.trim().to_string())
 }
 
+/// 編輯備註 contains one of the terms that filter a story out regardless of style.
+pub fn blocked_note_term<'a>(editor_note: &str, cfg: &'a FilterConfig) -> Option<&'a str> {
+    let note = fold(editor_note);
+    cfg.blocked_note_terms
+        .iter()
+        .map(|t| t.trim())
+        .find(|t| !t.is_empty() && note.contains(&fold(t)))
+}
+
 /// slug ends with one of the excluded suffixes (e.g. `SOU`), case-insensitive.
 pub fn is_excluded_slug(slug: &str, cfg: &FilterConfig) -> bool {
     let slug = fold(slug);
@@ -318,6 +346,12 @@ mod marker_tests {
     fn blank_lines_between_paragraphs_are_preserved() {
         let out = strip_body_markers("第一段。\n\n第二段。", &cfg());
         assert_eq!(out, "第一段。\n\n第二段。");
+    }
+
+    #[test]
+    fn join_lines_collapses_body_onto_one_line() {
+        assert_eq!(join_lines("今天台北\n天氣炎熱，\n\n民眾下載APP\n使用"), "今天台北天氣炎熱，民眾下載APP使用");
+        assert_eq!(join_lines("新款iPhone\n17開賣"), "新款iPhone 17開賣");
     }
 
     #[test]

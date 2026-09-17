@@ -31,6 +31,15 @@ pub struct FilterConfig {
     /// unrelated rows such as `鬼月撿便宜14推`.
     #[serde(default = "default_slug_style_terms")]
     pub slug_style_terms: Vec<String>,
+    /// Substrings in 編輯備註 that send a story straight to 已濾除 whatever its style
+    /// (`預告` marks a promo, not a story to publish). Still a default, not a verdict:
+    /// the entry is fully parsed and can be ticked back on.
+    #[serde(default = "default_blocked_note_terms")]
+    pub blocked_note_terms: Vec<String>,
+}
+
+fn default_blocked_note_terms() -> Vec<String> {
+    vec!["預告".into()]
 }
 
 fn default_slug_style_terms() -> Vec<String> {
@@ -55,6 +64,7 @@ impl Default for FilterConfig {
             title_tag_pattern: r"^\[BAR_.*大\]$".into(),
             title_tag_fallback_pattern: default_title_tag_fallback_pattern(),
             slug_style_terms: default_slug_style_terms(),
+            blocked_note_terms: default_blocked_note_terms(),
         }
     }
 }
@@ -381,6 +391,7 @@ theme = "warm"
         // to parse — the app would come up with factory settings.
         let cfg = load_from_str(legacy_toml()).unwrap();
         assert_eq!(cfg.filter.slug_style_terms, vec!["推播".to_string()]);
+        assert_eq!(cfg.filter.blocked_note_terms, vec!["預告".to_string()]);
     }
 
     #[test]

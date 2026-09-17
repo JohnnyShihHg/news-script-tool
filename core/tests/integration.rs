@@ -328,3 +328,64 @@ fn a_blocked_style_with_no_body_is_filtered_not_left_in_manual_content() {
         other => panic!("expected FilteredByStyle, got {other:?}"),
     }
 }
+
+#[test]
+fn push_row_with_blank_t2_and_format_only_body_needs_manual_content() {
+    // The big BAR card is there but its T2 was never filled in, and everything after
+    // `>]` is producer formatting with no actual script. Neither counts as content.
+    let text = "新聞名稱(標題): 心喻14推播\n樣式:\n累積時間: 14:40:30\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2   \n>]\n\n..^_^\n##\nSOT IN\n\n";
+    let cfg = Config::default();
+    match process_text("push.txt", text, &cfg) {
+        Outcome::NeedsManualContent(e) => {
+            assert_eq!(e.style, "推播");
+            assert_eq!(e.title, "");
+            assert_eq!(e.body, "");
+        }
+        other => panic!("expected NeedsManualContent, got {other:?}"),
+    }
+}
+
+#[test]
+fn passed_body_is_output_on_a_single_line() {
+    let text = "新聞名稱(標題): 換行測試1800\n樣式: SOT\n累積時間: 18:00:00\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_大]\nT2標題\n>]\n今天台北\n天氣炎熱\n\n民眾紛紛\n消暑。\n";
+    let cfg = Config::default();
+    match process_text("wrap.txt", text, &cfg) {
+        Outcome::Passed(e) => assert_eq!(e.body, "今天台北天氣炎熱民眾紛紛消暑。"),
+        other => panic!("expected Passed, got {other:?}"),
+    }
+}
+
+#[test]
+fn blank_t2_with_real_body_needs_manual_title_and_keeps_the_body() {
+    let text = "新聞名稱(標題): 心喻14推播\n樣式:\n累積時間: 14:40:30\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2\n>]\n今天台北\n天氣炎熱。\n";
+    let cfg = Config::default();
+    match process_text("push.txt", text, &cfg) {
+        Outcome::NeedsManualContent(e) => {
+            assert_eq!(e.title, "");
+            assert_eq!(e.body, "今天台北天氣炎熱。");
+            assert!(e.warnings.iter().any(|w| w.contains("T2 空白")), "got {:?}", e.warnings);
+        }
+        other => panic!("expected NeedsManualContent, got {other:?}"),
+    }
+}
+
+#[test]
+fn editor_note_with_preview_term_is_filtered_even_when_style_passes() {
+    let text = "編輯備註: 明天預告\n新聞名稱(標題): 預告測試1800\n樣式: SOT\n累積時間: 18:00:00\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_大]\nT2標題\n>]\n內文。\n";
+    let cfg = Config::default();
+    match process_text("preview.txt", text, &cfg) {
+        Outcome::FilteredByStyle(e) => {
+            assert_eq!(e.body, "內文。");
+            assert!(e.warnings.iter().any(|w| w.contains("預告")), "got {:?}", e.warnings);
+        }
+        other => panic!("expected FilteredByStyle, got {other:?}"),
+    }
+}

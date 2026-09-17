@@ -28,6 +28,24 @@ fn header_value(header: &Header, key: &str) -> String {
 /// slug-suffix exclusion -> production-block/body/title parse -> style
 /// classification -> punctuation normalization.
 pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
+    let outcome = classify_text(file_name, text, cfg);
+    // A blocked 編輯備註 term (`預告`) overrides whichever bucket the style chose.
+    let blocked = |e: &NewsEntry| {
+        clean::blocked_note_term(&header_value(&e.header, "編輯備註"), &cfg.filter).map(str::to_string)
+    };
+    match outcome {
+        Outcome::Passed(mut e) | Outcome::UnknownStyle(mut e) | Outcome::NeedsManualContent(mut e)
+            if blocked(&e).is_some() =>
+        {
+            let term = blocked(&e).unwrap();
+            e.warnings.push(format!("編輯備註含「{}」，已濾除", term));
+            Outcome::FilteredByStyle(e)
+        }
+        other => other,
+    }
+}
+
+fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     let text = parse::decode_and_normalize(text.as_bytes());
     let (header, header_lines) = parse::parse_header(&text);
 
@@ -68,7 +86,7 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
         &cfg.filter.title_tag_fallback_pattern,
     );
 
-    let (title_raw, body_raw, has_content) = match body_parse {
+    let (title_raw, body_raw, has_content, title_tag_found) = match body_parse {
         parse::BodyParse::NoProductionBlock => {
             if style.eq_ignore_ascii_case("TEL") {
                 let entry = NewsEntry {
@@ -99,10 +117,16 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 reason: "製作區缺少結尾 >]".to_string(),
             };
         }
-        parse::BodyParse::Extracted { title, body, has_content } => (title, body, has_content),
+        parse::BodyParse::Extracted { title, body, has_content, title_tag_found } => {
+            (title, body, has_content, title_tag_found)
+        }
     };
 
-    match (title_raw, body_raw.is_empty()) {
+    // Judge emptiness on the cleaned body: a body that is nothing but producer
+    // markers or non-Chinese format lines has no real script in it.
+    let body_cleaned = clean::strip_body_markers(&body_raw, &cfg.clean);
+
+    match (title_raw, body_cleaned.is_empty()) {
         // A genuinely empty rundown placeholder (`[< >]`, no cards at all) is
         // structure, not a news script -- silently skipped, as before.
         (None, true) if !has_content => return Outcome::Skipped,
@@ -129,10 +153,39 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
             };
             return needs_manual(entry, cfg);
         }
+        // The title card is there but its T2 was never filled in, while the script
+        // itself is real: keep the body and let a human supply the title.
+        (None, false) if title_tag_found => {
+            let (body_norm, warnings) = {
+                let r = punctuation::normalize(&body_cleaned, &cfg.punctuation);
+                (clean::join_lines(&r.text), r.warnings)
+            };
+            let mut warnings = warnings;
+            warnings.push("有標題標記但 T2 空白，需人工補標題".to_string());
+            if let Some(ref s) = inferred_style {
+                warnings.push(format!("樣式空白，依 slug 判定為「{}」", s));
+            }
+            let entry = NewsEntry {
+                file_name: file_name.to_string(),
+                header,
+                slug,
+                style: style.clone(),
+                time,
+                group,
+                title: String::new(),
+                slug_marker: clean::slug_marker(&editor_note, &cfg.annotations),
+                body: body_norm,
+                raw_title: String::new(),
+                raw_body: body_raw,
+                keywords: Vec::new(),
+                warnings,
+            };
+            return needs_manual(entry, cfg);
+        }
         (None, false) => {
             return Outcome::ParseFailed {
                 file_name: file_name.to_string(),
-                reason: "找不到標題（標題標記下一行不是 T2）".to_string(),
+                reason: "找不到標題標記".to_string(),
             };
         }
         (Some(title), true) => {
@@ -172,12 +225,11 @@ pub fn process_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 let r = punctuation::normalize(&title, &cfg.punctuation);
                 (r.text, r.warnings)
             };
-            // Marker stripping must precede punctuation normalization: that pass
-            // rewrites `.` to `、`, which would make `..` markers unrecognisable.
-            let body_cleaned = clean::strip_body_markers(&body_raw, &cfg.clean);
+            // Marker stripping (above) must precede punctuation normalization: that
+            // pass rewrites `.` to `、`, which would make `..` markers unrecognisable.
             let (body_norm, body_warnings) = {
                 let r = punctuation::normalize(&body_cleaned, &cfg.punctuation);
-                (r.text, r.warnings)
+                (clean::join_lines(&r.text), r.warnings)
             };
             warnings.extend(body_warnings);
             if clean::is_flagged_style(&style, &cfg.filter) {

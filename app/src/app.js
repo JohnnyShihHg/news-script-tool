@@ -1053,6 +1053,8 @@ function settingsModalHtml(config, apiStatus) {
             <div class="muted">氣象稿這類只有 [BAR]、沒有 [BAR_..大] 的稿件會用這個標記找標題。只在上面的標記整份稿子都找不到時才啟用，不會搶在正常標記前面。</div>
             ${styleField("樣式空白時改看 slug slug_style_terms", "filter.slug_style_terms", config.filter.slug_style_terms)}
             <div class="muted">有些稿件不填「樣式」，直接把類型寫在新聞名稱裡（例：心喻14推播）。樣式欄真的空白時才會用這裡的詞去比對 slug，比中就當成該樣式處理並在該則標上提醒；樣式欄有填就一律以樣式欄為準。同樣只比對完整詞。</div>
+            ${styleField("編輯備註含這些詞就濾除 blocked_note_terms", "filter.blocked_note_terms", config.filter.blocked_note_terms)}
+            <div class="muted">編輯備註裡出現這裡的詞（例：預告），不管樣式是什麼都直接放進「已濾除」，需要時仍可在已濾除勾回來。</div>
           </section>
 
           <section class="settings-section">
@@ -1123,6 +1125,7 @@ const LIST_FIELDS = new Set([
   "filter.excluded_slug_suffixes",
   "filter.flag_styles",
   "filter.slug_style_terms",
+  "filter.blocked_note_terms",
   "markers.refresh_keywords",
   "annotations.no_upload_terms",
   "annotations.copyright_terms",
