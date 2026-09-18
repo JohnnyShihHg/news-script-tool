@@ -381,3 +381,80 @@ test("sortForDisplay puts ticked entries first and keeps time order within each 
   // Display only: the input's own order is untouched.
   assert.deepEqual(items.map((i) => i.slug), ["a", "b", "c", "d", "e"]);
 });
+
+// --- itemFromDto: the layer v0.1.9's tests skipped over ---
+// The (勿上網) rules below were all unit-tested and all correct; what broke was the
+// step before them, which never copied slug_marker onto the item. These tests start
+// from a backend DTO rather than a hand-built item, so that gap cannot reopen.
+
+/** The shape core/src/model.rs serialises for a passed entry. */
+function passedDto(fields = {}) {
+  return {
+    kind: "Passed",
+    Passed: {
+      slug: "合成焦點報導1200",
+      slug_marker: "",
+      style: "SOT",
+      time: "11:32:45",
+      group: "生",
+      title: "合成標題",
+      body: "合成內文",
+      ...fields,
+    },
+  };
+}
+
+test("a (勿上網) marker on the backend DTO survives the mapping onto a UI item", () => {
+  const item = L.itemFromDto(passedDto({ slug_marker: "(勿上網)" }), 0);
+  assert.equal(item.slug_marker, "(勿上網)");
+  assert.equal(item.bucket, "passed");
+  assert.equal(item.title, "合成標題");
+  assert.equal(item.time, "11:32:45");
+});
+
+test("an entry mapped from a (勿上網) DTO is kept out of the batch keyword run", () => {
+  const items = [
+    L.itemFromDto(passedDto({ slug_marker: "(勿上網)" }), 0),
+    L.itemFromDto(passedDto({ slug: "合成生活消息0830" }), 1),
+  ];
+  const targets = L.selectKeywordTargets(items, "(勿上網)");
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].dto.Passed.slug, "合成生活消息0830");
+});
+
+test("a (勿上網) entry is still reported as such, so the card can badge it", () => {
+  const item = L.itemFromDto(passedDto({ slug_marker: "(勿上網)" }), 0);
+  assert.equal(L.isNoUpload(item, "(勿上網)"), true);
+  // ...and it is still an ordinary ticked entry: the single-entry keyword button
+  // stays available, this only opts it out of the batch.
+  assert.equal(item.included, true);
+});
+
+test("the marker reaches the output line but never the slug itself", () => {
+  const items = [L.itemFromDto(passedDto({ slug_marker: "(勿上網)" }), 0)];
+  items[0].slug = items[0].dto.Passed.slug;
+  items[0].style = "SOT";
+  items[0].time = "11:32:45";
+  items[0].group = "生";
+  const out = L.buildOutputText(items);
+  assert.match(out, /^\(勿上網\)合成焦點報導1200 SOT 11:32:45 生$/m);
+  assert.equal(items[0].slug, "合成焦點報導1200");
+});
+
+test("other markers are mapped through untouched and stay in the batch", () => {
+  for (const marker of ["(可上網)", "(版權問題)", ""]) {
+    const item = L.itemFromDto(passedDto({ slug_marker: marker }), 0);
+    assert.equal(item.slug_marker, marker);
+    assert.equal(L.selectKeywordTargets([item], "(勿上網)").length, 1, `marker was ${marker}`);
+  }
+});
+
+test("a DTO with no slug_marker at all maps to an empty string, not undefined", () => {
+  const dto = { kind: "UnknownStyle", UnknownStyle: { slug: "合成未知樣式0700", title: "", body: "" } };
+  const item = L.itemFromDto(dto, 3);
+  assert.equal(item.slug_marker, "");
+  assert.equal(item.bucket, "unknown");
+  // Not part of the normal flow, so it starts unticked.
+  assert.equal(item.included, false);
+  assert.equal(item.id, "entry-3");
+});

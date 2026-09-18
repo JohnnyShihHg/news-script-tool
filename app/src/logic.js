@@ -196,7 +196,69 @@
     return [...sorted.filter((i) => i.included), ...sorted.filter((i) => !i.included)];
   }
 
+  /** The backend enum tag carried on every entry DTO. */
+  function kindOf(dto) {
+    return dto.kind; // "Passed" | "UnknownStyle" | "NeedsManualContent" | "FilteredByStyle" | "ParseFailed"
+  }
+
+  function bucketOf(kind) {
+    switch (kind) {
+      case "Passed": return "passed";
+      case "UnknownStyle": return "unknown";
+      case "NeedsManualContent": return "manual";
+      case "FilteredByStyle": return "filtered";
+      case "ParseFailed": return "failed";
+      default: return "unknown";
+    }
+  }
+
+  /**
+   * Build one UI item from a backend entry DTO.
+   *
+   * Lives here, as a pure function, because of what happened in v0.1.9: this mapping
+   * quietly dropped `slug_marker`, so every rule downstream that reads it — the
+   * (勿上網) badge, keeping those entries out of the Gemini batch — saw `undefined`
+   * and silently did nothing. The unit tests had built their items by hand, complete
+   * with a `slug_marker`, so nothing caught it. Anything a rule reads off an item has
+   * to be produced here, by code a test can call.
+   */
+  function itemFromDto(dto, index) {
+    const kind = kindOf(dto);
+    const bucket = bucketOf(kind);
+    const fields = dto[kind] ?? dto; // enum payload
+    // 待補稿 starts unticked: it has no body yet, so writing it out by default would
+    // push empty entries into the doc.
+    const included = bucket === "passed";
+    return {
+      dto,
+      kind,
+      bucket,
+      id: `entry-${index}`,
+      included,
+      /** The import-time default, kept so a re-compare can restore the tick without
+       *  opting in buckets (待補稿, unknown styles) that are deliberately off to begin
+       *  with. */
+      defaultIncluded: included,
+      title: fields.title ?? "",
+      body: fields.body ?? "",
+      slug_marker: fields.slug_marker ?? "",
+      keywords: "",
+      keywordStatus: "idle", // idle | loading | error
+      keywordError: "",
+      matchStatus: null, // null | "to_cut" | "keep_refresh" | "removed"
+      matchedLine: null,
+      alreadyInDoc: false,
+      // Collapsed by default: a full day is ~16 entries and reviewing means scanning
+      // slugs and statuses, not reading every body. Editing is one click away.
+      collapsed: true,
+      time: fields.time ?? "",
+    };
+  }
+
   return {
+    kindOf,
+    bucketOf,
+    itemFromDto,
     sortByTime,
     sortForDisplay,
     OUTPUT_BUCKETS,

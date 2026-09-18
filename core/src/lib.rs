@@ -278,10 +278,40 @@ pub struct ImportSummary {
     pub failed: Vec<Outcome>,
 }
 
+/// `process_text` behind a panic boundary, so one malformed script cannot take the
+/// whole import -- and with `windows_subsystem = "windows"`, the whole app -- down with
+/// it. This is a last line of defence, not error handling: expected format problems
+/// still come back as a normal `Outcome::ParseFailed` from `process_text` itself. What
+/// this catches is a parser bug we have not foreseen, and it reports the file name so
+/// the offending script can actually be found next time.
+fn process_text_isolated(file_name: &str, text: &str, cfg: &Config) -> Outcome {
+    isolate(file_name, || process_text(file_name, text, cfg))
+}
+
+/// The panic boundary itself, split out from `process_text_isolated` so a test can
+/// drive it with a closure that really panics -- once the known panics are fixed there
+/// is no input left that would exercise it through `process_text`.
+fn isolate<F: FnOnce() -> Outcome>(file_name: &str, f: F) -> Outcome {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "未知錯誤".to_string());
+            Outcome::ParseFailed {
+                file_name: file_name.to_string(),
+                reason: format!("解析時發生未預期錯誤：{detail}"),
+            }
+        }
+    }
+}
+
 pub fn import_files(files: &[(String, String)], cfg: &Config) -> ImportSummary {
     let mut summary = ImportSummary::default();
     for (name, text) in files {
-        let outcome = process_text(name, text, cfg);
+        let outcome = process_text_isolated(name, text, cfg);
         match outcome {
             Outcome::Skipped => {}
             Outcome::Passed(e) => {
@@ -307,4 +337,29 @@ pub fn import_files(files: &[(String, String)], cfg: &Config) -> ImportSummary {
         }
     }
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_parse_becomes_a_named_parse_failure() {
+        // Silence the default hook: this panic is the thing under test, and its
+        // backtrace in the test output would just look like a failure.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = isolate("合成爆炸稿件.txt", || panic!("byte index 2 is not a char boundary"));
+        std::panic::set_hook(previous);
+
+        match outcome {
+            Outcome::ParseFailed { file_name, reason } => {
+                assert_eq!(file_name, "合成爆炸稿件.txt");
+                // The reason has to carry the cause, or the next crash is just as hard
+                // to trace back to a script as this one was.
+                assert!(reason.contains("char boundary"), "reason was {reason:?}");
+            }
+            other => panic!("expected ParseFailed, got {other:?}"),
+        }
+    }
 }

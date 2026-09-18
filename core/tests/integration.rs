@@ -389,3 +389,53 @@ fn editor_note_with_preview_term_is_filtered_even_when_style_passes() {
         other => panic!("expected FilteredByStyle, got {other:?}"),
     }
 }
+
+/// Regression: the v0.1.9 Windows launch crash. A header written with full-width
+/// colons and a Chinese noise line between the title tag and its T2 both used to slice
+/// a byte index into the middle of a multi-byte character and panic -- and in a
+/// `windows_subsystem = "windows"` release that panic surfaced as the app vanishing on
+/// startup with no message at all.
+#[test]
+fn fullwidth_colon_and_chinese_noise_fixture_parses_instead_of_panicking() {
+    let files = load_fixtures();
+    let (name, text) = fixture(&files, "合成全形冒號1200.txt");
+    let cfg = Config::default();
+    let entry = match process_text(name, text, &cfg) {
+        Outcome::Passed(e) => e,
+        other => panic!("expected Passed, got {other:?}"),
+    };
+    assert_eq!(entry.slug, "合成全形冒號1200");
+    assert_eq!(entry.style, "SOT");
+    // The value keeps its own half-width colons: the separator is the earliest colon of
+    // either width, not the first ASCII one.
+    assert_eq!(entry.time, "12:00:15");
+    assert_eq!(entry.group, "生");
+    assert_eq!(entry.slug_marker, "(勿上網)");
+    assert!(entry.title.contains("不該讓程式閃退"), "title was {:?}", entry.title);
+}
+
+/// A bad file in the middle of a batch must not cost the good ones on either side of
+/// it -- the whole point of the per-file panic boundary in `import_files`.
+#[test]
+fn one_unparseable_file_does_not_take_the_rest_of_the_batch_with_it() {
+    let files = load_fixtures();
+    let cfg = Config::default();
+    let (good_a, text_a) = fixture(&files, "合成焦點報導1800.txt");
+    let (good_b, text_b) = fixture(&files, "合成全形冒號1200.txt");
+    let batch = vec![
+        (good_a.to_string(), text_a.to_string()),
+        {
+            let (bad, text) = fixture(&files, "合成無標記失敗0900.txt");
+            (bad.to_string(), text.to_string())
+        },
+        (good_b.to_string(), text_b.to_string()),
+    ];
+
+    let summary = import_files(&batch, &cfg);
+    assert_eq!(summary.passed.len(), 2, "both good scripts must still import");
+    assert_eq!(summary.failed.len(), 1);
+    match &summary.failed[0] {
+        Outcome::ParseFailed { file_name, .. } => assert_eq!(file_name, "合成無標記失敗0900.txt"),
+        other => panic!("expected ParseFailed, got {other:?}"),
+    }
+}

@@ -28,8 +28,13 @@ pub fn parse_header(text: &str) -> (Header, usize) {
             break;
         }
         if let Some(idx) = line.find([':', '：']) {
+            // The separator can be half- or full-width, and the full-width one is three
+            // bytes in UTF-8 -- slicing at `idx + 1` would cut inside it and panic. Take
+            // the length of the character actually matched. `find` guarantees `idx` sits
+            // on a boundary, so `chars().next()` is always `Some` here.
+            let sep_len = line[idx..].chars().next().map_or(1, char::len_utf8);
             let key = line[..idx].trim().to_string();
-            let value = line[idx + 1..].trim().to_string();
+            let value = line[idx + sep_len..].trim().to_string();
             if !key.is_empty() {
                 fields.push((key, value));
             }
@@ -94,9 +99,15 @@ fn scan_window_for_t2(block_lines: &[&str], tag_idx: usize) -> Option<String> {
         if t.starts_with('[') {
             break;
         }
-        // A bare `T2` with nothing after it is an unfilled card, not a title.
-        if t.len() >= 2 && t[..2].eq_ignore_ascii_case("t2") && !t[2..].trim().is_empty() {
-            return Some(t[2..].trim().to_string());
+        // Match the prefix by character, not by byte: a noise line starting with a
+        // Chinese character is 3+ bytes long, so a byte-index slice would cut inside it
+        // and panic. A bare `T2` with nothing after it is an unfilled card, not a title
+        // -- keep scanning rather than giving up, the real one may be further down.
+        if let Some(rest) = t.strip_prefix("T2").or_else(|| t.strip_prefix("t2")) {
+            let title = rest.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
         }
     }
     None
@@ -370,6 +381,86 @@ mod tests {
             BodyParse::Extracted { title, body, .. } => {
                 assert_eq!(title, None);
                 assert_eq!(body, "");
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    // --- UTF-8 boundary regressions (Windows startup crash, v0.1.9) ---
+    // Both of these used to panic on a byte-index slice landing inside a multi-byte
+    // character, which in a windows_subsystem="windows" release looks like a silent
+    // crash on launch.
+
+    #[test]
+    fn fullwidth_colon_in_header_is_parsed() {
+        let text = "編輯備註：勿上網\n樣式：SL\n_______________________________________________________________\nbody";
+        let (header, _) = parse_header(text);
+        assert_eq!(header.get("編輯備註"), Some("勿上網"));
+        assert_eq!(header.get("樣式"), Some("SL"));
+    }
+
+    #[test]
+    fn fullwidth_colon_key_keeps_a_halfwidth_colon_inside_its_value() {
+        // The separator is the *earliest* colon of either width, not the first ASCII
+        // one -- otherwise 累積時間 would come back as key "累積時間：07".
+        let (header, _) = parse_header("累積時間：07:49:58\n");
+        assert_eq!(header.get("累積時間"), Some("07:49:58"));
+    }
+
+    #[test]
+    fn header_mixes_both_colon_widths_across_lines() {
+        let text = "序號: *03\n新聞名稱(標題)：合成測試稿1000\n樣式: SOT\n組：生\n";
+        let (header, _) = parse_header(text);
+        assert_eq!(header.get("序號"), Some("*03"));
+        assert_eq!(header.get("新聞名稱(標題)"), Some("合成測試稿1000"));
+        assert_eq!(header.get("樣式"), Some("SOT"));
+        assert_eq!(header.get("組"), Some("生"));
+    }
+
+    #[test]
+    fn fullwidth_colon_without_a_following_space_is_parsed() {
+        let (header, _) = parse_header("編輯備註：勿上網\n編輯備註2： 勿上網\n");
+        assert_eq!(header.get("編輯備註"), Some("勿上網"));
+        assert_eq!(header.get("編輯備註2"), Some("勿上網"));
+    }
+
+    #[test]
+    fn a_chinese_noise_line_before_t2_is_skipped() {
+        let text = "[<\n[BAR_某大]\n來源 中央社\nT2這才是真正標題\n>]\n內文";
+        match parse_body(text, TITLE_PATTERN) {
+            BodyParse::Extracted { title, .. } => assert_eq!(title.as_deref(), Some("這才是真正標題")),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chinese_noise_with_no_t2_at_all_yields_no_title() {
+        let text = "[<\n[BAR]\n標題待補\n>]\n內文";
+        match parse_body(text, FALLBACK_PATTERN) {
+            BodyParse::Extracted { title, .. } => assert_eq!(title, None),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn multibyte_noise_of_any_kind_before_t2_is_skipped() {
+        for noise in ["🎬 開場", "ＴＯＰ", "・來源", "來"] {
+            let text = format!("[<\n[BAR_大]\n{noise}\nT2真正標題\n>]\n內文");
+            match parse_body(&text, TITLE_PATTERN) {
+                BodyParse::Extracted { title, .. } => {
+                    assert_eq!(title.as_deref(), Some("真正標題"), "noise was {noise}")
+                }
+                other => panic!("unexpected {:?} for noise {noise}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn a_bare_t2_keeps_scanning_for_a_later_filled_one() {
+        let text = "[<\n[BAR_大]\nT2\n來源 中央社\nT2後面這個才有標題\n>]\n內文";
+        match parse_body(text, TITLE_PATTERN) {
+            BodyParse::Extracted { title, .. } => {
+                assert_eq!(title.as_deref(), Some("後面這個才有標題"))
             }
             other => panic!("unexpected {:?}", other),
         }

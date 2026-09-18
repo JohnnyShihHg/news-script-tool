@@ -3,6 +3,7 @@ const { listen } = window.__TAURI__.event;
 // Pure decision rules live in logic.js so they can be unit-tested without a DOM;
 // this file keeps only wiring, rendering and IPC. See app/tests/logic.test.js.
 const {
+  itemFromDto,
   sortByTime,
   sortForDisplay,
   isAlreadyInDoc,
@@ -37,21 +38,6 @@ let noUploadLabel = "(勿上網)";
 const el = (id) => document.getElementById(id);
 
 const slugOf = (item) => (item.dto[item.kind] ?? item.dto).slug;
-
-function kindOf(dto) {
-  return dto.kind; // "Passed" | "UnknownStyle" | "NeedsManualContent" | "FilteredByStyle" | "ParseFailed"
-}
-
-function bucketOf(kind) {
-  switch (kind) {
-    case "Passed": return "passed";
-    case "UnknownStyle": return "unknown";
-    case "NeedsManualContent": return "manual";
-    case "FilteredByStyle": return "filtered";
-    case "ParseFailed": return "failed";
-    default: return "unknown";
-  }
-}
 
 function escapeHtml(s) {
   return (s ?? "").replace(/[&<>"']/g, (c) => ({
@@ -226,35 +212,7 @@ function loadSummary(summary) {
   // set's state was -- otherwise the write-back guard would trust a stale comparison.
   hasCompared = false;
   clearCooldown();
-  items = summary.entries.map((dto, i) => {
-    const kind = kindOf(dto);
-    const bucket = bucketOf(kind);
-    const fields = dto[kind] ?? dto; // enum payload
-    return {
-      dto,
-      kind,
-      bucket,
-      id: `entry-${i}`,
-      // 待補稿 starts unticked: it has no body yet, so writing it out by default
-      // would push empty entries into the doc.
-      included: bucket === "passed",
-      /// The import-time default, kept so a re-compare can restore the tick without
-      /// opting in buckets (待補稿, unknown styles) that are deliberately off to begin with.
-      defaultIncluded: bucket === "passed",
-      title: fields.title ?? "",
-      body: fields.body ?? "",
-      keywords: "",
-      keywordStatus: "idle", // idle | loading | error
-      keywordError: "",
-      matchStatus: null, // null | "to_cut" | "keep_refresh" | "removed"
-      matchedLine: null,
-      alreadyInDoc: false,
-      // Collapsed by default: a full day is ~16 entries and reviewing means scanning
-      // slugs and statuses, not reading every body. Editing is one click away.
-      collapsed: true,
-      time: fields.time ?? "",
-    };
-  });
+  items = summary.entries.map(itemFromDto);
   // Running order: earliest 累積時間 first, because that is the order tapes get cut
   // in. Sorting here means the card list and the written-back output share it.
   items = sortByTime(items);

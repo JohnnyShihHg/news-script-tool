@@ -363,3 +363,26 @@ slug_marker: fields.slug_marker ?? "",
 - 若準備發布，升版後另確認 updater release 仍產出安裝檔、`.sig` 與 `latest.json`。
 
 記憶體最佳化與完整啟動 log 可另列後續工作；它們值得做，但不應阻擋本次先修復兩個已重現的 panic 與 `slug_marker` regression。
+
+---
+
+## 【修復狀態 2026-09-18】
+
+本檔列出的四項全部修完，Rust 99 + 25 測試、JS 48 測試、`cargo check --workspace` 皆通過。
+
+| 項目 | 狀態 | 位置 |
+|---|---|---|
+| 1. `parse_header` 全形冒號 | 已修 | `core/src/parse.rs`：保留 `find([':', '：'])`，`+1` 換成 `len_utf8()` |
+| 2. `scan_window_for_t2` | 已修 | `core/src/parse.rs`：改用 `strip_prefix`，裸 `T2` 繼續往後掃 |
+| 3. 單檔 panic 隔離 | 已修 | `core/src/lib.rs`：新增 `isolate()`，只包住 `process_text` 單次呼叫 |
+| 4. `slug_marker` 映射 | 已修 | 映射抽成 `logic.js` 的 `itemFromDto()`，`app.js` 改為呼叫它 |
+
+補充說明：
+
+- `isolate()` 從 `process_text_isolated` 拆出來，是為了讓測試能用一個真的會 panic 的
+  closure 去驗證它 —— 已知的 panic 修掉後，已經沒有任何輸入能從 `process_text` 走到
+  這條路徑。捕捉後的 `ParseFailed` 帶檔名與 panic 原因。
+- 新增 fixture `core/tests/fixtures/合成全形冒號1200.txt`：表頭全形冒號、標題卡後一行
+  中文雜訊，兩個 panic 的形狀都在裡面。內容全為虛構合成資料。
+- `累積時間：07:49:58` 有專門的斷言，確保分隔符取的是「最早出現的冒號」而非第一個半形。
+- 第 5 項（啟動／panic log）與第 6 項（記憶體、延遲渲染）未做，維持後續工作。
