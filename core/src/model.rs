@@ -22,7 +22,7 @@ pub struct NewsEntry {
     pub time: String,
     pub group: String,
     pub title: String,
-    /// Label for the slug line (e.g. `【勿上網】`), composed at output time. Kept out
+    /// Label for the slug line (e.g. `(勿上網)`), composed at output time. Kept out
     /// of `slug` itself because `slug` is what gets matched against the shared doc.
     pub slug_marker: String,
     pub body: String,

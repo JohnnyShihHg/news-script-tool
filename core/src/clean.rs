@@ -405,17 +405,17 @@ mod annotation_tests {
             "勿上網", "勿上YT", "勿YT", "不上YT", "不上網", "不po網", "版權勿上",
             "不要上網", "勿網", "網勿",
         ] {
-            assert_eq!(slug_marker(note, &ann()), "【勿上網】", "note was {note}");
+            assert_eq!(slug_marker(note, &ann()), "(勿上網)", "note was {note}");
         }
     }
 
     #[test]
     fn copyright_and_cleared_wordings_collapse_to_their_own_labels() {
         for note in ["未授權", "不授權", "版權問題"] {
-            assert_eq!(slug_marker(note, &ann()), "【版權問題】", "note was {note}");
+            assert_eq!(slug_marker(note, &ann()), "(版權問題)", "note was {note}");
         }
         for note in ["已授權", "授權可上", "可上YT", "可上網"] {
-            assert_eq!(slug_marker(note, &ann()), "【可上網】", "note was {note}");
+            assert_eq!(slug_marker(note, &ann()), "(可上網)", "note was {note}");
         }
     }
 
@@ -435,7 +435,7 @@ mod annotation_tests {
 
     #[test]
     fn a_marker_is_found_inside_a_longer_note() {
-        assert_eq!(slug_marker("版權問題 待確認", &ann()), "【版權問題】");
+        assert_eq!(slug_marker("版權問題 待確認", &ann()), "(版權問題)");
     }
 
     #[test]

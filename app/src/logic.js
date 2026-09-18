@@ -65,11 +65,32 @@
   }
 
   /**
+   * Whether an entry is marked do-not-publish, by comparing its composed marker with
+   * the configured label. Both sides come from the same config, so a user who renames
+   * the label keeps working.
+   *
+   * A blank label means "no marker configured" and must never match, or every entry
+   * without a marker at all would read as do-not-publish.
+   */
+  function isNoUpload(item, noUploadLabel) {
+    const label = (noUploadLabel ?? "").trim();
+    if (label === "") return false;
+    return (item.slug_marker ?? "").trim() === label;
+  }
+
+  /**
    * Entries worth spending Gemini quota on. Anything already handled in the shared
    * doc is excluded: re-generating keywords for it burns tokens for output that
    * would only be a duplicate.
+   *
+   * 勿上網 entries are excluded too. They still get written back normally -- they are
+   * only skipped here, because a story that never goes online has no use for
+   * keywords, and the run is capped per minute by the free tier: letting them in
+   * pushes stories that *do* need keywords into the next batch and another minute of
+   * waiting. This is the batch default only; the per-card 產生關鍵字 button still
+   * works on them, so it stays a default rather than a verdict.
    */
-  function selectKeywordTargets(items) {
+  function selectKeywordTargets(items, noUploadLabel) {
     return items.filter(
       (i) =>
         canOutputBucket(i.bucket) &&
@@ -77,7 +98,8 @@
         (i.body ?? "").trim() !== "" &&
         (i.keywords ?? "").trim() === "" &&
         i.matchStatus !== "removed" &&
-        !i.alreadyInDoc
+        !i.alreadyInDoc &&
+        !isNoUpload(i, noUploadLabel)
     );
   }
 
@@ -181,6 +203,7 @@
     isOutputBucket,
     canOutputBucket,
     isAlreadyInDoc,
+    isNoUpload,
     decideInclusion,
     summarizeMatches,
     selectKeywordTargets,

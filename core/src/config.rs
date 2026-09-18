@@ -139,14 +139,14 @@ impl Default for AnnotationsConfig {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-            no_upload_label: "【勿上網】".into(),
+            no_upload_label: "(勿上網)".into(),
             copyright_terms: ["未授權", "不授權", "版權問題"].iter().map(|s| s.to_string()).collect(),
-            copyright_label: "【版權問題】".into(),
+            copyright_label: "(版權問題)".into(),
             allowed_upload_terms: ["已授權", "授權可上", "可上YT", "可上網"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            allowed_upload_label: "【可上網】".into(),
+            allowed_upload_label: "(可上網)".into(),
 
             exclusive_terms: vec!["獨".into()],
             exclusive_prefix: "獨家》".into(),
@@ -249,7 +249,7 @@ impl Default for UiConfig {
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 2;
+pub const CURRENT_CONFIG_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -303,6 +303,22 @@ pub fn migrate(cfg: &mut Config) -> bool {
     union(&mut cfg.filter.allowed_styles, &defaults.filter.allowed_styles);
     union(&mut cfg.markers.refresh_keywords, &defaults.markers.refresh_keywords);
     union(&mut cfg.filter.slug_style_terms, &defaults.filter.slug_style_terms);
+
+    // v0.1.9 switched the slug-line markers from 【】 to half-width (). These are
+    // scalar fields, so `union` cannot reach them: rewrite only a label still holding
+    // the old default, which leaves a label the user typed themselves untouched.
+    let retag = |current: &mut String, was: &str, now: &str| {
+        if current.trim() == was {
+            *current = now.to_string();
+        }
+    };
+    retag(&mut cfg.annotations.no_upload_label, "【勿上網】", &defaults.annotations.no_upload_label);
+    retag(&mut cfg.annotations.copyright_label, "【版權問題】", &defaults.annotations.copyright_label);
+    retag(
+        &mut cfg.annotations.allowed_upload_label,
+        "【可上網】",
+        &defaults.annotations.allowed_upload_label,
+    );
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -417,6 +433,28 @@ theme = "warm"
     }
 
     #[test]
+    fn a_saved_full_width_marker_label_is_rewritten_to_half_width() {
+        // The labels are scalar strings, so nothing else in `migrate` can reach them:
+        // without this, anyone who has opened the settings page keeps 【勿上網】.
+        let mut cfg = load_from_str(legacy_toml()).unwrap();
+        cfg.annotations.no_upload_label = "【勿上網】".into();
+        cfg.annotations.copyright_label = "【版權問題】".into();
+        cfg.annotations.allowed_upload_label = "【可上網】".into();
+        migrate(&mut cfg);
+        assert_eq!(cfg.annotations.no_upload_label, "(勿上網)");
+        assert_eq!(cfg.annotations.copyright_label, "(版權問題)");
+        assert_eq!(cfg.annotations.allowed_upload_label, "(可上網)");
+    }
+
+    #[test]
+    fn a_hand_typed_marker_label_survives_migration() {
+        let mut cfg = load_from_str(legacy_toml()).unwrap();
+        cfg.annotations.no_upload_label = "★禁上網★".into();
+        migrate(&mut cfg);
+        assert_eq!(cfg.annotations.no_upload_label, "★禁上網★");
+    }
+
+    #[test]
     fn a_freshly_defaulted_config_is_already_current() {
         let mut cfg = Config::default();
         cfg.config_version = CURRENT_CONFIG_VERSION;
@@ -427,7 +465,7 @@ theme = "warm"
     fn missing_sections_fall_back_to_defaults_without_migration() {
         // The legacy file has no [annotations] and no [clean]; serde fills them in.
         let cfg = load_from_str(legacy_toml()).unwrap();
-        assert_eq!(cfg.annotations.no_upload_label, "【勿上網】");
+        assert_eq!(cfg.annotations.no_upload_label, "(勿上網)");
         assert!(cfg.clean.strip_marker_symbols);
     }
 }

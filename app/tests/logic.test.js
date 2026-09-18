@@ -98,6 +98,48 @@ test("failed entries are never keyword targets", () => {
   assert.equal(L.selectKeywordTargets(items).length, 1);
 });
 
+// --- 勿上網: kept out of batch keyword runs, but still written back ---
+
+const NO_UPLOAD = "(勿上網)";
+
+test("a 勿上網 entry is not sent to the API in a batch run", () => {
+  const items = [entry({ slug_marker: NO_UPLOAD }), entry()];
+  assert.equal(L.selectKeywordTargets(items, NO_UPLOAD).length, 1);
+});
+
+test("a 勿上網 entry is still written back to the doc", () => {
+  // Skipping the API must not turn into skipping the entry: it goes out as usual,
+  // just with an empty keyword line.
+  const item = {
+    ...entry({ slug_marker: NO_UPLOAD }),
+    slug: "合成焦點報導1800", title: "合成標題", style: "SOT", time: "07:49:58", group: "政",
+  };
+  assert.equal(L.buildOutputText([item]).split("\n")[0], "(勿上網)合成焦點報導1800 SOT 07:49:58 政");
+});
+
+test("other markers are unaffected", () => {
+  const items = [entry({ slug_marker: "(可上網)" }), entry({ slug_marker: "(版權問題)" })];
+  assert.equal(L.selectKeywordTargets(items, NO_UPLOAD).length, 2);
+});
+
+test("a renamed label still matches, because both sides come from the same config", () => {
+  const items = [entry({ slug_marker: "★禁上網★" })];
+  assert.equal(L.selectKeywordTargets(items, "★禁上網★").length, 0);
+});
+
+test("a blank label matches nothing rather than everything", () => {
+  // Entries with no marker at all have slug_marker "", so a blank label comparing
+  // equal would silently empty every keyword run.
+  const items = [entry(), entry({ slug_marker: "" })];
+  assert.equal(L.selectKeywordTargets(items, "").length, 2);
+  assert.equal(L.selectKeywordTargets(items, undefined).length, 2);
+});
+
+test("isNoUpload ignores surrounding whitespace on both sides", () => {
+  assert.equal(L.isNoUpload({ slug_marker: " (勿上網) " }, NO_UPLOAD), true);
+  assert.equal(L.isNoUpload({}, NO_UPLOAD), false);
+});
+
 // --- 已濾除 rescue: a blocked style is a default, not a verdict ---
 
 test("a filtered entry is not output or sent to the API while it stays unticked", () => {
@@ -290,12 +332,12 @@ test("the 編輯備註 marker is prefixed onto the slug line in the output", () 
   const out = L.buildOutputText([
     {
       bucket: "passed", included: true,
-      slug: "合成焦點報導1800", slug_marker: "【勿上網】",
+      slug: "合成焦點報導1800", slug_marker: "(勿上網)",
       style: "SOT", time: "07:49:58", group: "政",
       title: "合成標題範例", body: "內文", keywords: "#關鍵字",
     },
   ]);
-  assert.equal(out.split("\n")[0], "【勿上網】合成焦點報導1800 SOT 07:49:58 政");
+  assert.equal(out.split("\n")[0], "(勿上網)合成焦點報導1800 SOT 07:49:58 政");
 });
 
 test("an entry with no marker renders exactly as before", () => {
@@ -321,7 +363,7 @@ test("a missing slug_marker field does not print 'undefined'", () => {
 test("the marker never becomes part of the slug used for doc matching", () => {
   // Compare sends `slug` to the shared doc; if the marker were fused in, every
   // comparison would miss and the tool would re-write entries already in the doc.
-  const item = { slug: "合成焦點報導1800", slug_marker: "【勿上網】" };
+  const item = { slug: "合成焦點報導1800", slug_marker: "(勿上網)" };
   assert.equal(item.slug, "合成焦點報導1800");
 });
 

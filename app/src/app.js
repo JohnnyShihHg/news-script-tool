@@ -6,6 +6,7 @@ const {
   sortByTime,
   sortForDisplay,
   isAlreadyInDoc,
+  isNoUpload,
   decideInclusion,
   summarizeMatches,
   selectKeywordTargets,
@@ -29,6 +30,9 @@ const KEYWORD_COUNT = 4;
 /** Max entries one keyword run may send; overwritten from config on startup.
  *  Matches the free tier's per-minute request cap. 0 = no cap. */
 let keywordMaxPerRun = 15;
+/** The configured 勿上網 label, overwritten from config on startup. Entries carrying
+ *  it are kept out of batch keyword runs -- see selectKeywordTargets in logic.js. */
+let noUploadLabel = "(勿上網)";
 
 const el = (id) => document.getElementById(id);
 
@@ -140,6 +144,7 @@ async function initFromConfig() {
   }
   applyTheme(config.ui?.theme);
   if (Number.isFinite(config.gemini?.max_per_run)) keywordMaxPerRun = config.gemini.max_per_run;
+  noUploadLabel = config.annotations?.no_upload_label ?? noUploadLabel;
   const folder = config.import?.default_folder ?? "";
   if (!folder) return;
 
@@ -213,7 +218,7 @@ async function runAutoPipeline() {
 }
 
 function keywordTargets() {
-  return selectKeywordTargets(items);
+  return selectKeywordTargets(items, noUploadLabel);
 }
 
 function loadSummary(summary) {
@@ -326,6 +331,10 @@ function cardHtml(item) {
     ? "已在文件中"
     : { to_cut: "待處理", keep_refresh: "要重貼", removed: "已剔除" }[item.matchStatus];
   const matchClass = item.alreadyInDoc ? "removed" : item.matchStatus;
+  // The 編輯備註 marker only ever showed up in the output text, so a 勿上網 story was
+  // indistinguishable from any other card on screen. Show it where the call is made.
+  const marker = (item.slug_marker ?? "").trim();
+  const noUpload = isNoUpload(item, noUploadLabel);
 
   return `
     <div class="card ${bucket} ${item.collapsed ? "collapsed" : ""} ${item.alreadyInDoc ? "done" : ""}" data-bucket="${bucket}" data-id="${id}">
@@ -337,6 +346,7 @@ function cardHtml(item) {
         </label>
         <span class="slug">${escapeHtml(fields.slug)}</span>
         <span class="badge ${bucket}">${badgeLabel}</span>
+        ${marker ? `<span class="badge marker">${escapeHtml(marker)}</span>` : ""}
         ${matchLabel ? `<span class="badge ${matchClass}" title="${escapeHtml(item.matchedLine ?? "")}">${matchLabel}</span>` : ""}
         <span>${escapeHtml(fields.style)}</span>
         <span>${escapeHtml(fields.time)}</span>
@@ -379,6 +389,7 @@ function cardHtml(item) {
           </button>
         </div>
         ${item.keywordStatus === "error" ? `<div class="w">⚠ 產生失敗：${escapeHtml(item.keywordError)}</div>` : ""}
+        ${noUpload ? `<div class="muted">${escapeHtml(marker)}，批次產生會略過（不上網的稿子用不到關鍵字，也不占每分鐘額度）。要的話按上面那顆按鈕單獨產生。</div>` : ""}
       </div>
 
       ${fields.warnings && fields.warnings.length ? `
@@ -1222,6 +1233,12 @@ async function openSettings() {
       applyTheme(updated.ui.theme);
       if (Number.isFinite(updated.gemini?.max_per_run)) {
         keywordMaxPerRun = updated.gemini.max_per_run;
+        updateKeywordButton();
+      }
+      // The label is what decides which entries a batch run skips, so an edited one
+      // has to reach the running card set without a restart.
+      if (updated.annotations?.no_upload_label !== undefined) {
+        noUploadLabel = updated.annotations.no_upload_label;
         updateKeywordButton();
       }
       if (!currentFolder) await initFromConfig();
