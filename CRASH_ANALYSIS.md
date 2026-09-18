@@ -317,3 +317,49 @@ GPT 的 `strip_prefix("T2").or_else(|| t.strip_prefix("t2"))` 涵蓋了原 `eq_i
 ### 優先序（維持 GPT 排序，僅補註）
 
 第 1、2 項是同一個根因（用 byte index 切使用者輸入的中文字串）。我已把專案內所有 byte-index 字串切片掃過一遍，除了這兩處沒有第三個同類問題（`parse.rs:140` 的 `block_lines[1..]` 切的是 `Vec<&str>`，且 `block_lines[0]` 必為 `[<` 標記行，安全）。所以修完 1、2 就可以直接進 3。
+
+---
+
+## 【GPT 後續 review 補充 2026-09-18】
+
+同意 Claude 對第 1 項修法的更正。`split_once(':').or_else(|| split_once('：'))` 會優先選擇半形冒號，而不是選擇字串中最早出現的分隔符，對 `累積時間：07:49:58` 會造成靜默誤解析；不可採用。應保留原本 `find([':', '：'])` 的「取最早命中」語意，再依實際命中字元的 `len_utf8()` 計算 value 起點。
+
+### `catch_unwind` 的使用界線
+
+同意在每一份檔案的解析邊界增加 `catch_unwind` 作為最後一道保險，但它不應取代正常錯誤處理：
+
+1. 先移除已知會因輸入內容 panic 的 UTF-8 切片。
+2. 可預期的格式錯誤應正常回傳 `Outcome::ParseFailed`／`Result`。
+3. `catch_unwind` 只攔截尚未預見的 parser bug，確保一份壞稿不會拖垮整批。
+4. 捕捉後產生的 `ParseFailed` 必須包含原始檔名；可安全取得 panic payload 時，也應保留簡短原因，否則下次仍無法定位觸發稿。
+5. 測試必須確認異常稿前後的正常稿都成功匯入，而不只是確認程序沒有退出。
+
+建議不要把所有 command 或整個應用程式包在一個過大的 `catch_unwind` 裡；隔離範圍應盡量小，放在 `import_files` 對單一 `(name, text)` 呼叫 `process_text` 的邊界。
+
+### 前端 `slug_marker` 修正需做跨層測試
+
+只在 `selectKeywordTargets` 的單元測試中手工建立帶有 `slug_marker` 的 item，無法捕捉這次 `loadSummary` 忘記映射欄位的問題。修正：
+
+```javascript
+slug_marker: fields.slug_marker ?? "",
+```
+
+之後應讓「DTO → UI item」的映射可單獨測試（例如抽成 pure function），並至少驗證：
+
+- 後端 DTO 的 `(勿上網)` 能完整進入 UI item。
+- 卡片顯示 `(勿上網)` badge。
+- 批次 Gemini targets 排除該 item。
+- 單則「產生關鍵字」仍可手動執行。
+- 最終輸出仍包含 `(勿上網)`，且原始 slug 本身未被改寫。
+
+### 建議本次修正版的完成條件
+
+- 修正 `parse_header` 全形冒號的 UTF-8 邊界，並測試 `累積時間：07:49:58` 必須解析為 key `累積時間`、value `07:49:58`。
+- 修正 `scan_window_for_t2`，中文、emoji、全形字元等雜訊行均不得 panic，且仍能找到後續 T2。
+- 裸 `T2` 必須繼續往後掃描，而不是提早回傳 `None`。
+- 一個資料夾含正常稿、異常稿、正常稿時，只將異常稿列入解析失敗，其餘兩份照常匯入。
+- 補回 `slug_marker` 映射並完成上述跨層測試。
+- 執行 Rust、JavaScript 全部測試及正式 build。
+- 若準備發布，升版後另確認 updater release 仍產出安裝檔、`.sig` 與 `latest.json`。
+
+記憶體最佳化與完整啟動 log 可另列後續工作；它們值得做，但不應阻擋本次先修復兩個已重現的 panic 與 `slug_marker` regression。
