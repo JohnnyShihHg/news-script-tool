@@ -74,9 +74,16 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
 
     // A blank 樣式 with nothing in the slug either means this row is rundown structure
     // (bumper/sponsor-spot/producer note), not a news script, no matter what text
-    // happens to sit in the body.
+    // happens to sit in the body -- unless 編輯備註 names a format. The remark is
+    // prose, not a field, so it is not trusted to set the style (「推播預告」 and
+    // 「不推播」 both contain the term); it only keeps the row out of the silent-skip
+    // path, so it surfaces in 未知樣式 for a human to call instead of vanishing.
+    let mut note_style_hint = None;
     if style.is_empty() {
-        return Outcome::Skipped;
+        match clean::note_style_term(&editor_note, &cfg.filter) {
+            Some(term) => note_style_hint = Some(term),
+            None => return Outcome::Skipped,
+        }
     }
 
     let rest: String = text.lines().skip(header_lines).collect::<Vec<_>>().join("\n");
@@ -126,6 +133,17 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     // markers or non-Chinese format lines has no real script in it.
     let body_cleaned = clean::strip_body_markers(&body_raw, &cfg.clean);
 
+    // Both ways a blank 樣式 can be resolved leave the user with something to check,
+    // so every bucket below carries the reason it ended up where it did.
+    let push_style_notes = |warnings: &mut Vec<String>| {
+        if let Some(ref s) = inferred_style {
+            warnings.push(format!("樣式空白，依 slug 判定為「{}」", s));
+        }
+        if let Some(ref t) = note_style_hint {
+            warnings.push(format!("樣式空白，編輯備註含「{}」，未自動判定樣式，請人工確認", t));
+        }
+    };
+
     match (title_raw, body_cleaned.is_empty()) {
         // A genuinely empty rundown placeholder (`[< >]`, no cards at all) is
         // structure, not a news script -- silently skipped, as before.
@@ -149,7 +167,11 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 raw_title: String::new(),
                 raw_body: String::new(),
                 keywords: Vec::new(),
-                warnings: vec!["找不到標題且無稿頭內文，需人工補稿".to_string()],
+                warnings: {
+                    let mut w = vec!["找不到標題且無稿頭內文，需人工補稿".to_string()];
+                    push_style_notes(&mut w);
+                    w
+                },
             };
             return needs_manual(entry, cfg);
         }
@@ -162,9 +184,7 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
             };
             let mut warnings = warnings;
             warnings.push("有標題標記但 T2 空白，需人工補標題".to_string());
-            if let Some(ref s) = inferred_style {
-                warnings.push(format!("樣式空白，依 slug 判定為「{}」", s));
-            }
+            push_style_notes(&mut warnings);
             let entry = NewsEntry {
                 file_name: file_name.to_string(),
                 header,
@@ -198,6 +218,7 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
             };
             let mut warnings = warnings_from_title;
             warnings.push("找到標題但無稿頭內文，需人工補稿".to_string());
+            push_style_notes(&mut warnings);
 
             let entry = NewsEntry {
                 file_name: file_name.to_string(),
@@ -235,9 +256,7 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
             if clean::is_flagged_style(&style, &cfg.filter) {
                 warnings.push(format!("樣式「{}」可回寫但請確認", style));
             }
-            if let Some(ref s) = inferred_style {
-                warnings.push(format!("樣式空白，依 slug 判定為「{}」", s));
-            }
+            push_style_notes(&mut warnings);
 
             let entry = NewsEntry {
                 file_name: file_name.to_string(),

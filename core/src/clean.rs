@@ -209,9 +209,25 @@ pub fn is_flagged_style(style: &str, cfg: &FilterConfig) -> bool {
 /// never override what the producer typed. Returns the configured term itself (not the
 /// slug text) so it lines up with `allowed_styles`/`latest_styles` exactly.
 pub fn style_from_slug(slug: &str, cfg: &FilterConfig) -> Option<String> {
+    style_term_in(slug, cfg)
+}
+
+/// A format term mentioned in 編輯備註, for rows that leave 樣式 blank and keep the
+/// slug clean but note the format in the editor's remark (`推播`).
+///
+/// Deliberately does NOT set the style the way `style_from_slug` does: the slug is
+/// the row's own name, while the remark is free-form prose — 「推播預告」,
+/// 「不推播」 and 「推播完再改」 all contain the term and mean different things. So
+/// this only says "this row is not rundown structure, keep it visible", leaving the
+/// style blank for a human to decide in 未知樣式 rather than publishing it as 推播.
+pub fn note_style_term(editor_note: &str, cfg: &FilterConfig) -> Option<String> {
+    style_term_in(editor_note, cfg)
+}
+
+fn style_term_in(text: &str, cfg: &FilterConfig) -> Option<String> {
     cfg.slug_style_terms
         .iter()
-        .find(|t| !t.trim().is_empty() && fold(slug).contains(&fold(t)))
+        .find(|t| !t.trim().is_empty() && fold(text).contains(&fold(t)))
         .map(|t| t.trim().to_string())
 }
 

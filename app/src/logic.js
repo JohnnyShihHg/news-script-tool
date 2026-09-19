@@ -157,7 +157,7 @@
 
   /**
    * The four-line-per-entry output of spec §5, entries separated by a blank line.
-   * Header fields are slug / style / time / group, with group omitted when blank.
+   * Header fields are slug / style / time / group; blank fields are dropped.
    */
   function buildOutputText(items) {
     return items
@@ -166,8 +166,11 @@
         // The 編輯備註 marker is prefixed here, at output time only. It is never part
         // of `slug` itself, because `slug` is what gets matched against the shared
         // doc -- a prefixed slug would fail every comparison.
-        const head = [`${i.slug_marker ?? ""}${i.slug}`, i.style, i.time];
-        if ((i.group ?? "").trim() !== "") head.push(i.group);
+        // 樣式 can legitimately be blank now: a row kept only because 編輯備註 named
+        // a format carries no style until a human sets one, and a blank field would
+        // otherwise leave a double space in the middle of the header line.
+        const head = [`${i.slug_marker ?? ""}${i.slug}`, i.style, i.time, i.group]
+          .filter((f) => (f ?? "").trim() !== "");
         return [head.join(" "), i.title, i.body, i.keywords].join("\n");
       })
       .join("\n\n");

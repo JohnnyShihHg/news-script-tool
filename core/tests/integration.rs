@@ -264,6 +264,76 @@ fn blank_style_row_whose_slug_says_push_is_recovered_and_marked_latest() {
 }
 
 #[test]
+fn blank_style_row_whose_editor_note_says_push_surfaces_instead_of_vanishing() {
+    // A 稿標 row: 樣式 blank, slug says nothing, the only hint is 編輯備註. It used to
+    // hit the rundown-structure skip and disappear without a trace -- no bucket, no
+    // count, nothing to notice. The style stays blank on purpose (the remark is prose,
+    // not a field), so the row lands in a bucket the user has to look at.
+    let files = load_fixtures();
+    let (name, text) = fixture(&files, "合成備註推播稿標.txt");
+    let cfg = Config::default();
+    match process_text(name, text, &cfg) {
+        Outcome::NeedsManualContent(e) => {
+            assert_eq!(e.style, "", "the remark must not be promoted to a real 樣式");
+            assert_eq!(e.title, "合成稿標標題 合成單位公布最新數據");
+            assert!(
+                e.warnings.iter().any(|w| w.contains("編輯備註含「推播」")),
+                "the reason it was kept must be visible, got {:?}",
+                e.warnings
+            );
+        }
+        other => panic!("expected NeedsManualContent, got {other:?}"),
+    }
+}
+
+#[test]
+fn blank_style_row_with_push_in_the_note_and_a_real_body_lands_in_unknown_style() {
+    let text = "編輯備註: 推播\n新聞名稱(標題): 合成記者稿標\n樣式:\n累積時間: 15:10:00\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成標題\n>]\n今天台北天氣炎熱。\n";
+    let cfg = Config::default();
+    match process_text("note.txt", text, &cfg) {
+        Outcome::UnknownStyle(e) => {
+            assert_eq!(e.style, "");
+            assert_eq!(e.body, "今天台北天氣炎熱。");
+            assert!(
+                !e.title.starts_with("最新》"),
+                "a remark must not earn the 最新》 prefix, got {:?}",
+                e.title
+            );
+        }
+        other => panic!("expected UnknownStyle, got {other:?}"),
+    }
+}
+
+#[test]
+fn blank_style_row_with_no_hint_anywhere_is_still_silently_skipped() {
+    // The other half of the rule: genuine rundown structure (bumpers, sponsor spots)
+    // must keep vanishing, or every import fills up with noise.
+    let text = "編輯備註: 攝影小王\n新聞名稱(標題): 合成片頭\n樣式:\n累積時間: 15:10:00\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成標題\n>]\n今天台北天氣炎熱。\n";
+    let cfg = Config::default();
+    assert_eq!(process_text("bumper.txt", text, &cfg), Outcome::Skipped);
+}
+
+#[test]
+fn a_push_preview_note_is_filtered_rather_than_skipped() {
+    // 「推播預告」 contains both terms. Keeping the row visible wins over the silent
+    // skip, and the 預告 rule then puts it in 已濾除 -- unticked, but there to tick.
+    let text = "編輯備註: 推播預告\n新聞名稱(標題): 合成記者稿標\n樣式:\n累積時間: 15:10:00\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成標題\n>]\n今天台北天氣炎熱。\n";
+    let cfg = Config::default();
+    match process_text("preview.txt", text, &cfg) {
+        Outcome::FilteredByStyle(e) => {
+            assert!(e.warnings.iter().any(|w| w.contains("預告")), "got {:?}", e.warnings);
+        }
+        other => panic!("expected FilteredByStyle, got {other:?}"),
+    }
+}
+
+#[test]
 fn non_blank_unrecognized_style_with_no_title_tag_still_surfaces_as_a_failure() {
     let files = load_fixtures();
     let (name, text) = fixture(&files, "合成無標記失敗0900.txt");
