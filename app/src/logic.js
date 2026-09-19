@@ -130,6 +130,19 @@
     return s.includes("429") || s.includes("每分鐘請求上限");
   }
 
+  /**
+   * The entries an output action (複製 / 存檔 / 寫入) would send, right now.
+   *
+   * One rule, used by every button and by the enabled/disabled state behind them.
+   * It used to be spelled out again inside the write-back handler as
+   * passed/manual/unknown, which quietly dropped rescued 已濾除 entries: the funnel
+   * counted them and buildOutputText wrote them, but 寫入 stayed greyed out and
+   * reported "沒有勾選任何要輸出的稿件".
+   */
+  function outgoingItems(items) {
+    return (items ?? []).filter((i) => canOutputBucket(i.bucket) && i.included);
+  }
+
   /** Numbers behind the "N 則待處理 → N 則略過 → N 則寫入" line. */
   function computeFunnel(items) {
     // Filtered entries only enter the count once rescued, so the everyday numbers are
@@ -272,6 +285,7 @@
     splitKeywordRun,
     isRateLimitError,
     computeFunnel,
+    outgoingItems,
     buildOutputText,
   };
 });

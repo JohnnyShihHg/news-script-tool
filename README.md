@@ -46,7 +46,7 @@ cargo run -p news-script-tool   # 開發模式執行
 ## 發布新版
 
 1. 更新 `app/src-tauri/tauri.conf.json` 的 `version`
-2. `git tag v0.2.0 && git push origin v0.2.0`
+2. `git tag v0.2.1 && git push origin v0.2.1`
 3. GitHub Actions 會跑測試、建置、簽章並發布 Release
 4. 已安裝的使用者下次開啟就會收到更新提示
 

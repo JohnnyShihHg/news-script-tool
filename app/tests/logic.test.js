@@ -167,6 +167,32 @@ test("the funnel ignores filtered entries until one is rescued", () => {
   assert.deepEqual(L.computeFunnel(rescued), { pending: 2, skipped: 0, outgoing: 2 });
 });
 
+test("a rescued filtered entry is part of what 複製／存檔／寫入 send", () => {
+  // The write-back handler used to re-spell this rule as passed/manual/unknown, so a
+  // ticked 已濾除 story was written by buildOutputText but counted as nothing by the
+  // button in front of it: 寫入 stayed disabled and reported 沒有勾選任何要輸出的稿件.
+  const items = [
+    entry({ bucket: "passed", included: true }),
+    entry({ bucket: "filtered", included: true }),
+    entry({ bucket: "filtered", included: false }),
+    entry({ bucket: "unknown", included: true }),
+    entry({ bucket: "manual", included: true }),
+    entry({ bucket: "failed", included: true }),
+  ];
+  const out = L.outgoingItems(items);
+  assert.equal(out.length, 4);
+  assert.deepEqual(out.map((i) => i.bucket), ["passed", "filtered", "unknown", "manual"]);
+});
+
+test("outgoingItems agrees with what buildOutputText actually writes", () => {
+  const items = [
+    entry({ bucket: "filtered", included: true, slug: "後送2天嬰11", style: "BS", time: "11:00:00", title: "標題", body: "內文" }),
+    entry({ bucket: "passed", included: false, slug: "略過", style: "SOT", time: "12:00:00", title: "t", body: "b" }),
+  ];
+  const written = L.buildOutputText(items).split("\n\n").filter((s) => s.trim() !== "");
+  assert.equal(written.length, L.outgoingItems(items).length);
+});
+
 test("failed entries stay out of output even if somehow ticked", () => {
   const items = [{ bucket: "failed", included: true, slug: "x", title: "t", body: "b", keywords: "" }];
   assert.equal(L.buildOutputText(items), "");

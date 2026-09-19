@@ -8,12 +8,15 @@ const {
   sortForDisplay,
   isAlreadyInDoc,
   isNoUpload,
+  canOutputBucket,
+  isOutputBucket,
   decideInclusion,
   summarizeMatches,
   selectKeywordTargets,
   splitKeywordRun,
   isRateLimitError,
   computeFunnel,
+  outgoingItems: outgoingOf,
   buildOutputText,
 } = window.AppLogic;
 
@@ -226,20 +229,34 @@ function loadSummary(summary) {
   el("summary").classList.remove("hidden");
   el("emptyState").classList.toggle("hidden", items.length > 0);
 
-  const hasOutput = summary.passed + summary.needs_manual > 0;
-  el("copyBtn").disabled = !hasOutput;
-  el("saveBtn").disabled = !hasOutput;
-  el("writeBackBtn").disabled = !hasOutput;
   el("clearCardsBtn").disabled = items.length === 0;
 
   renderFunnel();
   render();
 }
 
+/// The single answer to "what would 複製／存檔／寫入 send right now?" -- every one of
+/// those three has to agree, so none of them may re-derive the rule. The rule itself
+/// lives in logic.js, where a test can reach it.
+function outgoingItems() {
+  return outgoingOf(items);
+}
+
+/// Output buttons follow the ticks, not the import-time parse tally. Deriving them
+/// from the tally alone left a rescued 已濾除 (or 未知樣式) entry with everything on
+/// screen ready to go and 寫入 still greyed out.
+function updateOutputButtons() {
+  const none = outgoingItems().length === 0;
+  el("copyBtn").disabled = none;
+  el("saveBtn").disabled = none;
+  el("writeBackBtn").disabled = none;
+}
+
 /// One line answering "if I press 寫入 now, what goes in?" -- the stat pills above are
 /// filters for the parse outcome, which is a different question and doesn't tell the
 /// user what the write button will actually do.
 function renderFunnel() {
+  updateOutputButtons();
   const node = el("funnel");
   const { pending, skipped, outgoing } = computeFunnel(items);
   if (pending === 0) {
@@ -424,8 +441,10 @@ function render() {
     });
   });
   // The button carries a live count of what a run would send, so it has to be
-  // recomputed by the one path every state change already goes through.
+  // recomputed by the one path every state change already goes through -- and so do
+  // the output buttons, for the same reason.
   updateKeywordButton();
+  updateOutputButtons();
 }
 
 /// Applies the same punctuation pass import already runs, to a title/body the user
@@ -645,9 +664,7 @@ el("writeBackBtn").addEventListener("click", writeBackToCollab);
 // Writing lands in a document colleagues are editing live, so this always confirms
 // first and shows exactly how much is going in -- never a silent one-click send.
 async function writeBackToCollab() {
-  const outgoing = items.filter(
-    (i) => (i.bucket === "passed" || i.bucket === "manual" || i.bucket === "unknown") && i.included
-  );
+  const outgoing = outgoingItems();
   if (outgoing.length === 0) {
     window.alert("目前沒有勾選任何要輸出的稿件。");
     return;
@@ -763,7 +780,10 @@ async function compareWithCollabDoc({ silent = false } = {}) {
   status.textContent = "比對中…";
   hasCompared = false;
 
-  const targets = items.filter((i) => i.bucket === "passed" || i.bucket === "unknown" || i.bucket === "manual");
+  // 已濾除 is compared too: it can be rescued by a tick, and an entry that can be
+  // written out has to be checked against the doc like any other, or the duplicate
+  // guard would have nothing to go on for exactly the entries a human picked by hand.
+  const targets = items.filter((i) => canOutputBucket(i.bucket));
   const slugs = targets.map((i) => (i.dto[i.kind] ?? i.dto).slug);
 
   try {
@@ -778,7 +798,10 @@ async function compareWithCollabDoc({ silent = false } = {}) {
       item.matchedLine = r.matched_line;
       item.alreadyInDoc = isAlreadyInDoc(r);
       item.included = decideInclusion(r, item.defaultIncluded);
-      matched.push(r);
+      // 已濾除 entries are matched so their badge and the duplicate guard are right,
+      // but they stay out of the tally: it reads as "how much of today's run is left
+      // to do", and BS stories are not part of that unless someone rescues one.
+      if (isOutputBucket(item.bucket) || item.included) matched.push(r);
     }
     const { toCut, keepRefresh, removed, alreadyIn } = summarizeMatches(matched);
     hasCompared = true;
