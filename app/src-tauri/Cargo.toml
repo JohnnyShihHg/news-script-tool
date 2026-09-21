@@ -20,6 +20,7 @@ news-script-core = { path = "../../core" }
 keyring = { version = "3", features = ["windows-native"] }
 directories = "5"
 regex = "1"
+chrono = "0.4"
 tokio = { version = "1", features = ["sync", "time"] }
 
 [[bin]]

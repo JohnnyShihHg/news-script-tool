@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod weather;
+
 use news_script_core::config::Config;
 use news_script_core::gemini::{self, GeminiConfig};
 use news_script_core::model::{NewsEntry, Outcome};
@@ -137,12 +139,13 @@ fn read_txt_files(folder: &str) -> std::io::Result<Vec<(String, String)>> {
 }
 
 #[tauri::command]
-fn import_folder(window: tauri::Window, state: tauri::State<AppState>, folder: String) -> Result<ImportSummaryDto, String> {
+async fn import_folder(window: tauri::Window, state: tauri::State<'_, AppState>, folder: String) -> Result<ImportSummaryDto, String> {
     require_main_window(&window)?;
     let files = read_txt_files(&folder).map_err(|e| e.to_string())?;
     let total_files = files.len();
     let cfg = state.config.lock().unwrap().clone();
-    let summary = import_files(&files, &cfg);
+    let mut summary = import_files(&files, &cfg);
+    weather::fill_manual_weather(&mut summary.needs_manual).await;
 
     let mut entries = Vec::new();
     for e in &summary.passed {
