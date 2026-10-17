@@ -580,14 +580,17 @@ test("evening hit needs a doc hit and no 勿上網 note of its own", () => {
   assert.equal(L.isEveningHit("hit", { marker: "(勿上網)" }, "(勿上網)"), false);
   assert.equal(L.isEveningHit("not_found", { marker: "" }, "(勿上網)"), false);
   assert.equal(L.isEveningHit("no_online", { marker: "" }, "(勿上網)"), false);
-  assert.equal(L.isEveningStyle("SOT", ["SOT"]), true);
-  assert.equal(L.isEveningStyle("ＳＯＴ", ["SOT"]), true);
-  assert.equal(L.isEveningStyle(" sot ", ["SOT"]), true);
-  assert.equal(L.isEveningStyle("短SOT", ["SOT", "短sot"]), true);
-  for (const style of ["專題", "SL", "BS", "LIVE", ""]) {
-    assert.equal(L.isEveningStyle(style, ["SOT", "短sot"]), false, style);
+  assert.equal(L.isEveningStyle("SL", ["SL"]), false);
+  assert.equal(L.isEveningStyle("ＳＬ", ["SL"]), false);
+  assert.equal(L.isEveningStyle(" sl ", ["SL"]), false);
+  for (const style of ["SOT", "短sot", "LIVE", "SLIVE", ""]) {
+    assert.equal(L.isEveningStyle(style, ["SL"]), true, style);
   }
-  assert.equal(L.isEveningStyle("專題", []), true, "an empty list turns the check off");
+  assert.equal(L.isEveningExcluded({ slug: "專颱風動態1800", group: "生" }, ["專"]), true, "slug starting with 專");
+  assert.equal(L.isEveningExcluded({ slug: "颱風動態1800", group: "專" }, ["專"]), true, "group 專");
+  assert.equal(L.isEveningExcluded({ slug: "颱風動態1800", group: "專題組" }, ["專"]), true, "group containing 專");
+  assert.equal(L.isEveningExcluded({ slug: "醫療專家1800", group: "生" }, ["專"]), false, "專 mid-slug is an ordinary story");
+  assert.equal(L.isEveningExcluded({ slug: "專颱風動態1800", group: "" }, []), false, "an empty list turns the check off");
 });
 
 test("re-importing keeps edits by slug and takes fresh fields from the new import", () => {

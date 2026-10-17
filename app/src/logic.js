@@ -321,13 +321,26 @@
 
   /**
    * Whether a story's rundown style may run in the 晚報 at all. Online is not enough:
-   * 專題, SL and the like are online but never go on the list. An empty `allowed`
-   * list switches the check off.
+   * SL goes online but never runs in the 晚報. Evening rundowns are nearly all
+   * SOT/短sot, so `blocked` only names the exceptions.
    */
-  function isEveningStyle(style, allowed) {
-    if (!allowed || allowed.length === 0) return true;
+  function isEveningStyle(style, blocked) {
     const s = foldStyle(style);
-    return allowed.some((a) => foldStyle(a) === s);
+    return !(blocked ?? []).some((b) => foldStyle(b) === s);
+  }
+
+  /**
+   * Whether a story is a 專題 package, which never runs in the 晚報: its slug starts
+   * with one of `terms` (`專ＯＯＯ`) or its 組 contains one. Only the slug's start
+   * counts, so an ordinary 專家/專櫃 story in the middle of a slug is not caught.
+   */
+  function isEveningExcluded(item, terms) {
+    const slug = foldStyle(item?.slug);
+    const group = foldStyle(item?.group);
+    return (terms ?? [])
+      .map(foldStyle)
+      .filter(Boolean)
+      .some((t) => slug.startsWith(t) || group.includes(t));
   }
 
   /**
@@ -473,6 +486,7 @@
     eveningItemFromDto,
     isEveningHit,
     isEveningStyle,
+    isEveningExcluded,
     eveningGroupSizes,
     splitIntoGroups,
     pickHeadline,

@@ -267,10 +267,15 @@ pub struct EveningConfig {
     /// story that *is* online. Only these markers keep a story off the list.
     #[serde(default = "default_no_online_markers")]
     pub no_online_markers: Vec<String>,
-    /// Rundown styles (樣式) that may go on the list. Packages such as 專題 or SL
-    /// are online but never run in the 晚報, so only SOT and 短sot qualify by default.
-    #[serde(default = "default_evening_styles")]
-    pub allowed_styles: Vec<String>,
+    /// Rundown styles (樣式) that never run in the 晚報 even though they went online.
+    /// Evening rundowns are nearly all SOT/短sot, so only SL needs naming.
+    #[serde(default = "default_evening_blocked_styles")]
+    pub blocked_styles: Vec<String>,
+    /// 專題 never runs in the 晚報 even when its style is SOT. It shows up as a slug
+    /// starting with 專 (`專ＯＯＯ`) or as 專 in the rundown's 組. Evening only: the
+    /// everyday compare is untouched.
+    #[serde(default = "default_evening_excluded_terms")]
+    pub excluded_terms: Vec<String>,
 }
 
 fn default_evening_anchors() -> Vec<String> {
@@ -285,8 +290,12 @@ fn default_no_online_markers() -> Vec<String> {
         .collect()
 }
 
-fn default_evening_styles() -> Vec<String> {
-    vec!["SOT".into(), "短sot".into()]
+fn default_evening_blocked_styles() -> Vec<String> {
+    vec!["SL".into()]
+}
+
+fn default_evening_excluded_terms() -> Vec<String> {
+    vec!["專".into()]
 }
 
 impl Default for EveningConfig {
@@ -294,7 +303,8 @@ impl Default for EveningConfig {
         Self {
             anchors: default_evening_anchors(),
             no_online_markers: default_no_online_markers(),
-            allowed_styles: default_evening_styles(),
+            blocked_styles: default_evening_blocked_styles(),
+            excluded_terms: default_evening_excluded_terms(),
         }
     }
 }

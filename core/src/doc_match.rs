@@ -88,6 +88,13 @@ pub fn match_all<'a>(
 // The evening list asks the opposite question from the everyday compare. There, a
 // slug *missing* from the doc is news to cut; here, only a story that is in the doc
 // under the chosen day *and* went online counts, so "not found" is a miss.
+//
+// A prefix alone does not keep a story off. The 1800 bulletin re-runs (possibly
+// revised) 1200 stories whose doc lines already carry an "uploaded" prefix such as
+// YH / 00 / UP, and those must stay selectable. Only a bracketed tag in front of the
+// slug -- (YT), (勿上網), (x/threads)... the tags that mean it never went online,
+// exactly as in the everyday compare -- or one of the configured markers (抓新)
+// keeps it off.
 
 /// Whether a line is a date divider (`========1017========`), returning its MMDD.
 ///
@@ -124,9 +131,11 @@ pub fn date_section(doc_text: &str, mmdd: &str) -> Option<String> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EveningStatus {
-    /// In the day's section with no do-not-publish marker before it.
+    /// In the day's section and online: nothing before the slug, or only an
+    /// "uploaded" code such as YH / 00 / UP.
     Hit,
-    /// In the day's section, but a marker before it says it never went online.
+    /// In the day's section, but a bracketed tag or a configured marker before it
+    /// says it never went online.
     NoOnline,
     /// Not in the day's section at all.
     NotFound,
@@ -136,6 +145,14 @@ pub enum EveningStatus {
 pub struct EveningMatch {
     pub status: EveningStatus,
     pub matched_line: Option<String>,
+}
+
+/// Whether an (already normalized) prefix holds a bracketed tag like `(YT)` or
+/// `【勿上網】`. Fullwidth `（）` has been folded to `()` by `normalize_for_match`.
+fn has_bracket_tag(prefix: &str) -> bool {
+    static RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\([^()]*\)|【[^【】]*】").unwrap());
+    RE.is_match(prefix)
 }
 
 /// Classify one evening-rundown slug against one day's section of the doc.
@@ -159,7 +176,7 @@ pub fn match_evening(slug: &str, section_text: &str, no_online_markers: &[String
         let hay = normalize_for_match(line);
         if let Some(idx) = hay.find(&needle) {
             let prefix = &hay[..idx];
-            let status = if markers.iter().any(|m| prefix.contains(m.as_str())) {
+            let status = if has_bracket_tag(prefix) || markers.iter().any(|m| prefix.contains(m.as_str())) {
                 EveningStatus::NoOnline
             } else {
                 EveningStatus::Hit
@@ -229,9 +246,31 @@ YH 合成已上傳新聞1200 SOT 12:20:00
     }
 
     #[test]
-    fn already_uploaded_prefixes_count_as_online() {
-        // The everyday compare drops these; for the evening list they are online.
+    fn uploaded_codes_stay_selectable_for_a_rerun() {
+        // A 1200 story re-run at 1800 already carries its uploaded prefix.
         assert_eq!(match_evening("合成已上傳新聞1200", &section(), &markers()).status, EveningStatus::Hit);
+        for line in [
+            "00 合成重播新聞1200 SOT",
+            "UP 合成重播新聞1200 SOT",
+            "03 合成重播新聞1200 SOT",
+            "**合成重播新聞1200 SOT",
+            "** 合成重播新聞1200 SOT",
+            "＊＊合成重播新聞1200 SOT",
+        ] {
+            assert_eq!(match_evening("合成重播新聞1200", line, &markers()).status, EveningStatus::Hit, "{line}");
+        }
+    }
+
+    #[test]
+    fn any_bracketed_tag_means_it_never_went_online() {
+        for line in [
+            "(YT)合成平台新聞1800 SOT",
+            "（ＹＴ）合成平台新聞1800 SOT",
+            "(x/threads) 合成平台新聞1800 SOT",
+            "【勿上網】合成平台新聞1800 SOT",
+        ] {
+            assert_eq!(match_evening("合成平台新聞1800", line, &markers()).status, EveningStatus::NoOnline, "{line}");
+        }
     }
 
     #[test]

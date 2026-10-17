@@ -21,6 +21,7 @@ const {
   eveningItemFromDto,
   isEveningHit,
   isEveningStyle,
+  isEveningExcluded,
   sortByTime: sortEvening,
   groupKey,
   groupTagLine,
@@ -1102,8 +1103,9 @@ function settingsModalHtml(config, apiStatus) {
             <h3>晚報</h3>
             ${styleField("主播名單", "evening.anchors", config.evening.anchors)}
             ${styleField("協作文件中代表「不上網」的標記", "evening.no_online_markers", config.evening.no_online_markers)}
-            ${styleField("可以上晚報的樣式", "evening.allowed_styles", config.evening.allowed_styles ?? ["SOT", "短sot"])}
-            <div class="muted">晚報只認當天日期區塊裡找得到的 slug。slug 前面有上面這些標記的算不上網；<code>YH</code>、<code>00</code>、<code>UP</code> 這類「已有人上傳」的標記算可以上網；有「抓新」的一律略過。標記比對不分全形半形括號。樣式不在「可以上晚報的樣式」裡的（例如專題、SL）會標成「樣式不上晚報」、不自動勾選，仍可手動勾「列入」；樣式比對不分大小寫與全形半形，清單留空則不檢查樣式。</div>
+            ${styleField("不上晚報的樣式", "evening.blocked_styles", config.evening.blocked_styles ?? ["SL"])}
+            ${styleField("不上晚報的專題標記（slug 開頭或組別）", "evening.excluded_terms", config.evening.excluded_terms ?? ["專"])}
+            <div class="muted">晚報只收當天日期區塊裡找得到、而且有上網的稿件。slug 前面是 <code>YH</code>、<code>00</code>、<code>UP</code> 這類已上傳的處理標記照樣可選（1800 會重播修過的 1200 新聞）；前面有括號標記（例如 <code>(YT)</code>、<code>(勿上網)</code>、<code>(x/threads)</code>，不分全形半形）或上面這些標記（例如抓新）的算沒上網。樣式在「不上晚報的樣式」裡的（預設 SL）標成「樣式不上晚報」；slug 開頭是「專」或組別含「專」的標成「專題不上晚報」。都不會自動勾選，仍可手動勾「列入」。這些規則只用在晚報，不影響一般文稿。</div>
           </section>
 
           <section class="settings-section">
@@ -1163,7 +1165,8 @@ const LIST_FIELDS = new Set([
   "annotations.latest_styles",
   "evening.anchors",
   "evening.no_online_markers",
-  "evening.allowed_styles",
+  "evening.blocked_styles",
+  "evening.excluded_terms",
 ]);
 
 function readConfigFromForm(base) {
@@ -1294,7 +1297,8 @@ let evGroupTags = {};
  *  between imports of the same day. */
 let evItemsDate = "";
 let eveningOpts = { exclusivePrefix: "獨家》", latestPrefix: "最新》" };
-let eveningStyles = ["SOT", "短sot"];
+let eveningBlockedStyles = ["SL"];
+let eveningExcluded = ["專"];
 let evSaveTimer = null;
 let evStateLoaded = false;
 /** True while a 產生關鍵字 run over the groups is in flight. */
@@ -1329,7 +1333,8 @@ function applyEveningConfig(config) {
     exclusivePrefix: config.annotations?.exclusive_prefix ?? "獨家》",
     latestPrefix: config.annotations?.latest_prefix ?? "最新》",
   };
-  eveningStyles = config.evening?.allowed_styles ?? eveningStyles;
+  eveningBlockedStyles = config.evening?.blocked_styles ?? eveningBlockedStyles;
+  eveningExcluded = config.evening?.excluded_terms ?? eveningExcluded;
   const select = el("evAnchor");
   const current = select.value;
   const anchors = config.evening?.anchors ?? [];
@@ -1433,11 +1438,12 @@ async function compareEvening({ silent = false } = {}) {
       const r = bySlug.get(item.slug);
       if (!r) continue;
       const online = isEveningHit(r.status, item, noUploadLabel);
-      const styleOk = isEveningStyle(item.style, eveningStyles);
-      const hit = online && styleOk;
+      const styleOk = isEveningStyle(item.style, eveningBlockedStyles);
+      const special = isEveningExcluded(item, eveningExcluded);
+      const hit = online && styleOk && !special;
       // A doc hit vetoed by the story's own 勿上網 note or by its style gets its own
       // label, or it would read as a hit that mysteriously stayed unticked.
-      item.status = r.status !== "hit" ? r.status : !online ? "note_no_upload" : !styleOk ? "style_excluded" : "hit";
+      item.status = r.status !== "hit" ? r.status : !online ? "note_no_upload" : special ? "special_excluded" : !styleOk ? "style_excluded" : "hit";
       item.matchedLine = r.matched_line;
       item.included = hit;
     }
@@ -1506,6 +1512,7 @@ const EV_STATUS_LABEL = {
   not_found: "當天區塊沒有",
   note_no_upload: "備註勿上網",
   style_excluded: "樣式不上晚報",
+  special_excluded: "專題不上晚報",
 };
 
 /// 晚報 產生關鍵字: one Gemini request per group, sending the group exactly as it
@@ -1556,7 +1563,7 @@ async function generateEveningGroupKeywords() {
 function eveningCardHtml(item) {
   const statusLabel = item.status ? EV_STATUS_LABEL[item.status] : "尚未比對";
   const statusClass =
-    item.status === "note_no_upload" || item.status === "style_excluded" ? "no_online" : item.status ?? "pending";
+    ["note_no_upload", "style_excluded", "special_excluded"].includes(item.status) ? "no_online" : item.status ?? "pending";
   const marker = (item.marker ?? "").trim();
   return `
     <div class="card ${item.included ? "ev-hit" : "ev-miss"} ${item.collapsed === false ? "" : "collapsed"}" data-id="${item.id}">
