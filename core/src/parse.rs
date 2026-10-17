@@ -62,6 +62,9 @@ pub enum BodyParse {
         /// Whether a title tag (primary or fallback) was found at all. With a tag but
         /// no filled-in T2 the script is real and only its title is missing.
         title_tag_found: bool,
+        /// The tag line, when the title came from the fallback pattern rather than
+        /// the normal `[BAR_..大]` -- so the caller can ask a human to check it.
+        fallback_tag: Option<String>,
     },
 }
 
@@ -143,9 +146,13 @@ pub fn parse_body(
     let after = &text_after_header[close_idx + 2..];
 
     let block_lines: Vec<&str> = block.lines().collect();
-    let tag_idx = find_tag_line(&block_lines, &title_tag_re)
-        .or_else(|| find_tag_line(&block_lines, &fallback_re));
+    let primary_idx = find_tag_line(&block_lines, &title_tag_re);
+    let tag_idx = primary_idx.or_else(|| find_tag_line(&block_lines, &fallback_re));
     let title = tag_idx.and_then(|idx| scan_window_for_t2(&block_lines, idx));
+    let fallback_tag = match (primary_idx, tag_idx) {
+        (None, Some(idx)) => Some(block_lines[idx].trim().to_string()),
+        _ => None,
+    };
     // block_lines[0] is always the "[<" marker line itself; anything real starts
     // after it.
     let has_content = block_lines[1..].iter().any(|l| !l.trim().is_empty());
@@ -153,15 +160,41 @@ pub fn parse_body(
     let body_raw = after.trim();
     let body = strip_inline_dividers(body_raw).trim().to_string();
 
-    BodyParse::Extracted { title, body, has_content, title_tag_found: tag_idx.is_some() }
+    BodyParse::Extracted { title, body, has_content, title_tag_found: tag_idx.is_some(), fallback_tag }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_script_with_only_bar_latest_cards_takes_the_first_ones_title() {
+        // Shape of a real live story: a [天標_LIVE大] sky banner (not BAR family, so
+        // not a title) and four [BAR_最新] cards, no [BAR_..大] anywhere.
+        let text = "[<\n[天標_LIVE大]\n\n[雙框_記者右]\nT1主播\nT2記者\n[BAR_最新]\nT2第一張標題\n[BAR_最新]\nT2第二張標題\n>]\n內文";
+        match parse_body(text, TITLE_PATTERN) {
+            BodyParse::Extracted { title, fallback_tag, .. } => {
+                assert_eq!(title.as_deref(), Some("第一張標題"));
+                assert_eq!(fallback_tag.as_deref(), Some("[BAR_最新]"));
+            }
+            other => panic!("expected Extracted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_normal_big_bar_title_is_not_flagged_as_fallback() {
+        let text = "[<\n[BAR_最新]\nT2分段字卡\n[BAR_最新大]\nT2真正標題\n>]\n內文";
+        match parse_body(text, TITLE_PATTERN) {
+            BodyParse::Extracted { title, fallback_tag, .. } => {
+                assert_eq!(title.as_deref(), Some("真正標題"));
+                assert_eq!(fallback_tag, None);
+            }
+            other => panic!("expected Extracted, got {other:?}"),
+        }
+    }
+
     const TITLE_PATTERN: &str = r"^\[BAR_.*大\]$";
-    const FALLBACK_PATTERN: &str = r"^\[BAR\]$";
+    const FALLBACK_PATTERN: &str = r"^\[BAR(_[^\]]*)?\]$";
 
     fn parse_body(text: &str, title_pattern: &str) -> BodyParse {
         super::parse_body(text, title_pattern, FALLBACK_PATTERN)

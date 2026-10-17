@@ -11,8 +11,9 @@ pub struct FilterConfig {
     /// Second-pass title-tag pattern, used only when `title_tag_pattern` matches
     /// nothing anywhere in the production block.
     ///
-    /// Some scripts (weather rundowns in particular) carry only plain `[BAR]` cards,
-    /// never a `[BAR_..大]`. Without a fallback those files parse to no title at all.
+    /// Some scripts carry only plain `[BAR]` cards (weather rundowns) or only
+    /// `[BAR_最新]` cards (some live stories), never a `[BAR_..大]`. Without a fallback
+    /// those files parse to no title at all. The first such card's T2 is taken.
     /// Deliberately still BAR-family only, not "any T2 in the block" — `[雙框_記者右]`
     /// blocks carry a `T2主播姓名` line that must never be mistaken for a headline.
     #[serde(default = "default_title_tag_fallback_pattern")]
@@ -46,8 +47,11 @@ fn default_slug_style_terms() -> Vec<String> {
     vec!["推播".into()]
 }
 
+/// The fallback shipped before v0.2.4, which only knew plain `[BAR]`.
+const LEGACY_TITLE_TAG_FALLBACK_PATTERN: &str = r"^\[BAR\]$";
+
 fn default_title_tag_fallback_pattern() -> String {
-    r"^\[BAR\]$".into()
+    r"^\[BAR(_[^\]]*)?\]$".into()
 }
 
 impl Default for FilterConfig {
@@ -247,9 +251,44 @@ impl Default for UiConfig {
     }
 }
 
+/// 晚報 (evening-bulletin) list settings.
+///
+/// Every field carries its own default so a config.toml written before this section
+/// existed -- or one where someone deleted a single key -- still loads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EveningConfig {
+    /// Anchors offered in the 主播 picker; the name lands in `【{name}晚報】`.
+    #[serde(default = "default_evening_anchors")]
+    pub anchors: Vec<String>,
+    /// Prefixes in the shared doc that mean "this story did not go online".
+    ///
+    /// Deliberately *not* the everyday rule ("any prefix = drop"): there, `YH` / `00`
+    /// / `UP` mean someone already uploaded it, which for the 晚報 list is exactly a
+    /// story that *is* online. Only these markers keep a story off the list.
+    #[serde(default = "default_no_online_markers")]
+    pub no_online_markers: Vec<String>,
+}
+
+fn default_evening_anchors() -> Vec<String> {
+    vec!["吳宇舒".into(), "房業涵".into()]
+}
+
+fn default_no_online_markers() -> Vec<String> {
+    ["(勿上網)", "(不上網)", "(版權問題)", "(X)", "(國際)", "(偷拍)", "(官方要求下下)"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+impl Default for EveningConfig {
+    fn default() -> Self {
+        Self { anchors: default_evening_anchors(), no_online_markers: default_no_online_markers() }
+    }
+}
+
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 3;
+pub const CURRENT_CONFIG_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -274,6 +313,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub annotations: AnnotationsConfig,
+    #[serde(default)]
+    pub evening: EveningConfig,
 }
 
 /// Bring a config written by an older version up to date.
@@ -318,6 +359,12 @@ pub fn migrate(cfg: &mut Config) -> bool {
         &mut cfg.annotations.allowed_upload_label,
         "【可上網】",
         &defaults.annotations.allowed_upload_label,
+    );
+    // v0.2.4 widened the title fallback from `[BAR]` to `[BAR]`/`[BAR_xxx]`.
+    retag(
+        &mut cfg.filter.title_tag_fallback_pattern,
+        LEGACY_TITLE_TAG_FALLBACK_PATTERN,
+        &defaults.filter.title_tag_fallback_pattern,
     );
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
@@ -447,6 +494,19 @@ theme = "warm"
     }
 
     #[test]
+    fn the_old_bar_only_title_fallback_is_widened_but_a_custom_one_is_kept() {
+        let mut cfg = load_from_str(legacy_toml()).unwrap();
+        cfg.filter.title_tag_fallback_pattern = LEGACY_TITLE_TAG_FALLBACK_PATTERN.into();
+        migrate(&mut cfg);
+        assert_eq!(cfg.filter.title_tag_fallback_pattern, default_title_tag_fallback_pattern());
+
+        let mut custom = load_from_str(legacy_toml()).unwrap();
+        custom.filter.title_tag_fallback_pattern = r"^\[自訂\]$".into();
+        migrate(&mut custom);
+        assert_eq!(custom.filter.title_tag_fallback_pattern, r"^\[自訂\]$");
+    }
+
+    #[test]
     fn a_hand_typed_marker_label_survives_migration() {
         let mut cfg = load_from_str(legacy_toml()).unwrap();
         cfg.annotations.no_upload_label = "★禁上網★".into();
@@ -459,6 +519,13 @@ theme = "warm"
         let mut cfg = Config::default();
         cfg.config_version = CURRENT_CONFIG_VERSION;
         assert!(!migrate(&mut cfg));
+    }
+
+    #[test]
+    fn a_config_file_predating_the_evening_section_gets_its_defaults() {
+        let cfg = load_from_str(legacy_toml()).unwrap();
+        assert_eq!(cfg.evening.anchors, vec!["吳宇舒".to_string(), "房業涵".to_string()]);
+        assert!(cfg.evening.no_online_markers.iter().any(|m| m == "(勿上網)"));
     }
 
     #[test]

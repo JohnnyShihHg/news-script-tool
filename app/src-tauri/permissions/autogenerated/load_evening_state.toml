@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-evening-state"
+description = "Enables the load_evening_state command without any pre-configured scope."
+commands.allow = ["load_evening_state"]
+
+[[permission]]
+identifier = "deny-load-evening-state"
+description = "Denies the load_evening_state command without any pre-configured scope."
+commands.deny = ["load_evening_state"]

@@ -195,6 +195,12 @@
           "markdownDescription": "Enables the clear_folder command without any pre-configured scope."
         },
         {
+          "description": "Enables the compare_evening command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-compare-evening",
+          "markdownDescription": "Enables the compare_evening command without any pre-configured scope."
+        },
+        {
           "description": "Enables the compare_with_collab_doc command without any pre-configured scope.",
           "type": "string",
           "const": "allow-compare-with-collab-doc",
@@ -243,6 +249,12 @@
           "markdownDescription": "Enables the import_folder command without any pre-configured scope."
         },
         {
+          "description": "Enables the load_evening_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-load-evening-state",
+          "markdownDescription": "Enables the load_evening_state command without any pre-configured scope."
+        },
+        {
           "description": "Enables the normalize_text command without any pre-configured scope.",
           "type": "string",
           "const": "allow-normalize-text",
@@ -279,6 +291,12 @@
           "markdownDescription": "Enables the save_config command without any pre-configured scope."
         },
         {
+          "description": "Enables the save_evening_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-evening-state",
+          "markdownDescription": "Enables the save_evening_state command without any pre-configured scope."
+        },
+        {
           "description": "Enables the save_text_file command without any pre-configured scope.",
           "type": "string",
           "const": "allow-save-text-file",
@@ -307,6 +325,12 @@
           "type": "string",
           "const": "deny-clear-folder",
           "markdownDescription": "Denies the clear_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the compare_evening command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-compare-evening",
+          "markdownDescription": "Denies the compare_evening command without any pre-configured scope."
         },
         {
           "description": "Denies the compare_with_collab_doc command without any pre-configured scope.",
@@ -357,6 +381,12 @@
           "markdownDescription": "Denies the import_folder command without any pre-configured scope."
         },
         {
+          "description": "Denies the load_evening_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-load-evening-state",
+          "markdownDescription": "Denies the load_evening_state command without any pre-configured scope."
+        },
+        {
           "description": "Denies the normalize_text command without any pre-configured scope.",
           "type": "string",
           "const": "deny-normalize-text",
@@ -391,6 +421,12 @@
           "type": "string",
           "const": "deny-save-config",
           "markdownDescription": "Denies the save_config command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_evening_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-evening-state",
+          "markdownDescription": "Denies the save_evening_state command without any pre-configured scope."
         },
         {
           "description": "Denies the save_text_file command without any pre-configured scope.",

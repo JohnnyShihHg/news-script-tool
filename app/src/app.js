@@ -18,6 +18,15 @@ const {
   computeFunnel,
   outgoingItems: outgoingOf,
   buildOutputText,
+  eveningItemFromDto,
+  isEveningHit,
+  sortByTime: sortEvening,
+  autoHashtag,
+  mmddOf,
+  buildEveningText,
+  buildEveningSlugList,
+  buildEveningExport,
+  mergeEveningEdits,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -56,15 +65,37 @@ function renderDiff(before, after) {
   return `<div class="diff-box"><span class="diff-old">${escapeHtml(before)}</span>\n<span class="diff-new">${escapeHtml(after)}</span></div>`;
 }
 
-async function pickAndImport() {
-  const folder = await invoke("pick_folder", { startDir: currentFolder || null });
-  if (!folder) return;
+/// 匯入資料夾 always reads the folder bound in settings (預設匯入資料夾) -- there is
+/// deliberately no second "pick a folder" path, so which folder gets imported is
+/// decided in exactly one place. With nothing bound yet it opens settings to bind one.
+async function importConfiguredFolder() {
+  if (!currentFolder) {
+    await openSettings();
+    el("settingsStatus").textContent = "請先設定「預設匯入資料夾」並儲存，之後按「匯入資料夾」就會直接匯入。";
+    el("defaultFolderInput")?.focus();
+    return;
+  }
+  await importFolder(currentFolder);
+}
+
+/// The one import path shared by startup and 匯入資料夾. A folder that has since been
+/// deleted/renamed only surfaces on the label, so it can be re-bound in settings.
+async function importFolder(folder) {
+  setCurrentFolder(folder);
+  try {
+    const summary = await invoke("import_folder", { folder });
+    loadSummary(summary);
+    await runAutoPipeline();
+  } catch (err) {
+    el("folderLabel").textContent = `${folder}（匯入失敗：${err}）`;
+  }
+}
+
+function setCurrentFolder(folder) {
   currentFolder = folder;
   el("folderLabel").textContent = folder;
-  el("clearFolderBtn").disabled = false;
-  const summary = await invoke("import_folder", { folder });
-  loadSummary(summary);
-  await runAutoPipeline();
+  el("clearFolderBtn").disabled = !folder;
+  el("importBtn").title = folder ? `匯入：${folder}` : "請先到設定綁定預設匯入資料夾";
 }
 
 /// Clears the on-screen cards only. Deliberately separate from 清空資料夾, which
@@ -121,8 +152,8 @@ function applyTheme(theme) {
 
 /// Applies the saved theme, then loads the configured default folder and imports it
 /// straight away so the usual flow (open app -> cards are already there) needs no
-/// clicking. A folder that has since been deleted/renamed must not block startup, so
-/// an import failure only surfaces on the label rather than throwing.
+/// clicking. A folder that has since been deleted/renamed must not block startup;
+/// importFolder only surfaces the failure on the label.
 async function initFromConfig() {
   let config;
   try {
@@ -137,17 +168,7 @@ async function initFromConfig() {
   const folder = config.import?.default_folder ?? "";
   if (!folder) return;
 
-  currentFolder = folder;
-  el("folderLabel").textContent = folder;
-  el("clearFolderBtn").disabled = false;
-
-  try {
-    const summary = await invoke("import_folder", { folder });
-    loadSummary(summary);
-    await runAutoPipeline();
-  } catch (err) {
-    el("folderLabel").textContent = `${folder}（自動匯入失敗：${err}）`;
-  }
+  await importFolder(folder);
 }
 
 // --- Progress bar (driven by the backend's per-item "keyword-progress" event; it
@@ -650,14 +671,14 @@ async function saveAll() {
   await invoke("save_text_file", { defaultName: "新聞文稿.txt", content: text });
 }
 
-el("importBtn").addEventListener("click", pickAndImport);
+el("importBtn").addEventListener("click", importConfiguredFolder);
 el("clearFolderBtn").addEventListener("click", clearFolder);
 el("clearCardsBtn").addEventListener("click", clearCards);
 el("copyBtn").addEventListener("click", copyAll);
 el("saveBtn").addEventListener("click", saveAll);
 el("genAllKeywordsBtn").addEventListener("click", generateKeywordsForAllIncluded);
 el("settingsBtn").addEventListener("click", openSettings);
-el("openCollabBtn").addEventListener("click", openCollab);
+el("openCollabBtn").addEventListener("click", () => openCollab());
 el("compareBtn").addEventListener("click", compareWithCollabDoc);
 el("writeBackBtn").addEventListener("click", writeBackToCollab);
 
@@ -763,8 +784,7 @@ async function diagnoseCollab() {
   }
 }
 
-async function openCollab() {
-  const status = el("compareStatus");
+async function openCollab(status = el("compareStatus")) {
   try {
     await invoke("open_collab_window");
   } catch (err) {
@@ -829,6 +849,7 @@ async function refreshApiKeyStatus() {
   const status = await invoke("get_api_key_status");
   hasApiKey = status.has_key;
   updateKeywordButton();
+  renderEvening();
   return status;
 }
 
@@ -906,6 +927,9 @@ async function checkForUpdate({ silent }) {
 document.addEventListener("keydown", (e) => {
   if (!e.ctrlKey || e.altKey || e.shiftKey) return;
   if (el("settingsBackdrop")) return;
+  // Both shortcuts drive the 文稿 screen; firing them from 晚報 would write into the
+  // shared doc from a screen that is meant to be read-only.
+  if (viewMode !== "script") return;
 
   if (e.key === "Enter") {
     if (el("writeBackBtn").disabled) return;
@@ -986,10 +1010,10 @@ function settingsModalHtml(config, apiStatus) {
             <div class="field">
               <label>預設匯入資料夾</label>
               <div class="keywords-row">
-                <input type="text" id="defaultFolderInput" data-cfg="import.default_folder" value="${escapeHtml(config.import.default_folder)}" placeholder="（未設定，每次需手動選擇）" />
+                <input type="text" id="defaultFolderInput" data-cfg="import.default_folder" value="${escapeHtml(config.import.default_folder)}" placeholder="（未設定）" />
                 <button id="browseDefaultFolderBtn" type="button">瀏覽</button>
               </div>
-              <div class="muted">設定後每次開啟工具會自動匯入這個資料夾的 txt，不必再手動點「匯入資料夾」。</div>
+              <div class="muted">「匯入資料夾」一律匯入這個資料夾的 txt；開啟工具時也會自動匯入一次。要換資料夾就改這裡。</div>
             </div>
           </section>
 
@@ -1042,7 +1066,7 @@ function settingsModalHtml(config, apiStatus) {
               <label>標題標記備援樣式（regex，找不到上面那個才用）</label>
               <input type="text" data-cfg="filter.title_tag_fallback_pattern" value="${escapeHtml(config.filter.title_tag_fallback_pattern)}" />
             </div>
-            <div class="muted">氣象稿這類只有 [BAR]、沒有 [BAR_..大] 的稿件會用這個標記找標題。只在上面的標記整份稿子都找不到時才啟用，不會搶在正常標記前面。</div>
+            <div class="muted">氣象稿（只有 [BAR]）、部分 LIVE 稿（只有 [BAR_最新]）這類沒有 [BAR_..大] 的稿件會用這個標記，取第一張字卡的標題。只在上面的標記整份稿子都找不到時才啟用，不會搶在正常標記前面。</div>
             ${styleField("樣式空白時改看 slug slug_style_terms", "filter.slug_style_terms", config.filter.slug_style_terms)}
             <div class="muted">有些稿件不填「樣式」，直接把類型寫在新聞名稱裡（例：心喻14推播）。樣式欄真的空白時才會用這裡的詞去比對 slug，比中就當成該樣式處理並在該則標上提醒；樣式欄有填就一律以樣式欄為準。同樣只比對完整詞。</div>
             ${styleField("編輯備註含這些詞就濾除 blocked_note_terms", "filter.blocked_note_terms", config.filter.blocked_note_terms)}
@@ -1067,6 +1091,13 @@ function settingsModalHtml(config, apiStatus) {
             ${styleField("判定最新的樣式", "annotations.latest_styles", config.annotations.latest_styles)}
             <div class="field"><label>最新前綴</label><input type="text" data-cfg="annotations.latest_prefix" value="${escapeHtml(config.annotations.latest_prefix)}" /></div>
             <div class="muted">兩者同時成立時只加獨家。標題若已經有前綴就不會重複加。</div>
+          </section>
+
+          <section class="settings-section">
+            <h3>晚報</h3>
+            ${styleField("主播名單", "evening.anchors", config.evening.anchors)}
+            ${styleField("協作文件中代表「不上網」的標記", "evening.no_online_markers", config.evening.no_online_markers)}
+            <div class="muted">晚報只認當天日期區塊裡找得到的 slug。slug 前面有上面這些標記的算不上網；<code>YH</code>、<code>00</code>、<code>UP</code> 這類「已有人上傳」的標記算可以上網。標記比對不分全形半形括號。</div>
           </section>
 
           <section class="settings-section">
@@ -1124,6 +1155,8 @@ const LIST_FIELDS = new Set([
   "annotations.allowed_upload_terms",
   "annotations.exclusive_terms",
   "annotations.latest_styles",
+  "evening.anchors",
+  "evening.no_online_markers",
 ]);
 
 function readConfigFromForm(base) {
@@ -1222,7 +1255,13 @@ async function openSettings() {
         noUploadLabel = updated.annotations.no_upload_label;
         updateKeywordButton();
       }
+      // First binding imports straight away, like a normal startup. Re-binding only
+      // switches the target: importing here would silently replace cards the user may
+      // have been editing, so the next 匯入資料夾 picks up the new folder instead.
+      const newFolder = updated.import?.default_folder ?? "";
+      applyEveningConfig(updated);
       if (!currentFolder) await initFromConfig();
+      else if (newFolder !== currentFolder) setCurrentFolder(newFolder);
       status.textContent = "已儲存";
       status.style.color = "var(--ok)";
     } catch (err) {
@@ -1231,3 +1270,385 @@ async function openSettings() {
     }
   });
 }
+
+// --- 晚報 (evening bulletin) list ---
+//
+// A second, read-only screen: import the evening anchor's rundown from the same
+// folder, compare it against the chosen day's block of the shared doc, and turn the
+// stories that went online into the title list. Nothing here writes to the doc; the
+// cards and edits are kept on disk (evening.json) so a restart loses nothing.
+
+let viewMode = "script";
+/** @type {Array<any>} */
+let evItems = [];
+/** Date the current cards were imported/compared for, so edits only carry over
+ *  between imports of the same day. */
+let evItemsDate = "";
+let eveningOpts = { exclusivePrefix: "獨家》", latestPrefix: "最新》" };
+let evSaveTimer = null;
+let evStateLoaded = false;
+
+function todayIso() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function setMode(mode) {
+  viewMode = mode;
+  const evening = mode === "evening";
+  el("scriptToolbar").classList.toggle("hidden", evening);
+  el("eveningToolbar").classList.toggle("hidden", !evening);
+  el("scriptView").classList.toggle("hidden", evening);
+  el("eveningView").classList.toggle("hidden", !evening);
+  el("modeScriptBtn").classList.toggle("active", !evening);
+  el("modeEveningBtn").classList.toggle("active", evening);
+}
+
+function evStatus(text, isError = false) {
+  const node = el("evStatus");
+  node.classList.remove("hidden");
+  node.className = isError ? "compare-status error" : "compare-status";
+  node.textContent = text;
+}
+
+function applyEveningConfig(config) {
+  eveningOpts = {
+    exclusivePrefix: config.annotations?.exclusive_prefix ?? "獨家》",
+    latestPrefix: config.annotations?.latest_prefix ?? "最新》",
+  };
+  const select = el("evAnchor");
+  const current = select.value;
+  const anchors = config.evening?.anchors ?? [];
+  select.innerHTML = anchors.map((a) => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join("");
+  if (anchors.includes(current)) select.value = current;
+  renderEveningOutput();
+}
+
+function evOutputOpts() {
+  return { date: el("evDate").value, anchor: el("evAnchor").value, ...eveningOpts };
+}
+
+// Debounced so typing in a title does not write the file on every keystroke.
+function saveEveningSoon() {
+  if (!evStateLoaded) return;
+  clearTimeout(evSaveTimer);
+  evSaveTimer = setTimeout(saveEveningNow, 400);
+}
+
+async function saveEveningNow() {
+  clearTimeout(evSaveTimer);
+  const state = {
+    version: 1,
+    date: el("evDate").value,
+    anchor: el("evAnchor").value,
+    itemsDate: evItemsDate,
+    items: evItems.map(({ keywordStatus, keywordError, ...rest }) => rest),
+  };
+  try {
+    await invoke("save_evening_state", { json: JSON.stringify(state) });
+  } catch (err) {
+    evStatus(`⚠ 晚報內容儲存失敗：${err}`, true);
+  }
+}
+
+/// Restores the saved cards only when they are for today: the date defaults to today,
+/// and yesterday's list sitting under today's date would be compared against the
+/// wrong block of the doc. The anchor is always restored.
+async function loadEvening() {
+  el("evDate").value = todayIso();
+  try {
+    const raw = await invoke("load_evening_state");
+    if (raw) {
+      const state = JSON.parse(raw);
+      if (state.anchor && [...el("evAnchor").options].some((o) => o.value === state.anchor)) {
+        el("evAnchor").value = state.anchor;
+      }
+      if (state.date === todayIso() && Array.isArray(state.items)) {
+        evItems = state.items.map((i) => ({ ...i, keywordStatus: "idle", keywordError: "" }));
+        evItemsDate = state.itemsDate ?? state.date;
+      }
+    }
+  } catch (err) {
+    console.error("讀取晚報內容失敗", err);
+  }
+  evStateLoaded = true;
+  renderEvening();
+}
+
+async function importEvening() {
+  if (!currentFolder) {
+    await importConfiguredFolder(); // opens settings with the same hint as 文稿
+    return;
+  }
+  const date = el("evDate").value;
+  evStatus("匯入中…");
+  let summary;
+  try {
+    summary = await invoke("import_folder", { folder: currentFolder });
+  } catch (err) {
+    evStatus(`⚠ 匯入失敗：${err}`, true);
+    return;
+  }
+  const fresh = sortEvening(summary.entries.map(eveningItemFromDto).filter(Boolean));
+  // Same day: keep titles/hashtags already edited. Another day: start clean.
+  evItems = evItemsDate === date ? mergeEveningEdits(fresh, evItems) : fresh;
+  evItemsDate = date;
+  renderEvening();
+  saveEveningSoon();
+  evStatus(`已匯入 ${evItems.length} 則。比對中…`);
+  await compareEvening({ silent: true });
+}
+
+async function compareEvening({ silent = false } = {}) {
+  const date = el("evDate").value;
+  const mmdd = mmddOf(date);
+  if (!mmdd) {
+    evStatus("⚠ 請先選擇日期。", true);
+    return;
+  }
+  if (evItems.length === 0) return;
+  evStatus(`比對協作文件 ${mmdd} 的區塊中…`);
+  try {
+    const results = await invoke("compare_evening", { slugs: evItems.map((i) => i.slug), mmdd });
+    const bySlug = new Map(results.map((r) => [r.slug, r]));
+    for (const item of evItems) {
+      const r = bySlug.get(item.slug);
+      if (!r) continue;
+      const hit = isEveningHit(r.status, item, noUploadLabel);
+      // A doc hit vetoed by the story's own 勿上網 note gets its own label, or it
+      // would read as a hit that mysteriously stayed unticked.
+      item.status = r.status === "hit" && !hit ? "note_no_upload" : r.status;
+      item.matchedLine = r.matched_line;
+      item.included = hit;
+    }
+    evItemsDate = date;
+    const hits = evItems.filter((i) => i.included).length;
+    evStatus(
+      `比對完成（${mmdd}）：命中 ${hits} 則，未命中 ${evItems.length - hits} 則。` +
+        (hits > 0 && hasApiKey && evItems.some((i) => i.included && !i.keywords.trim())
+          ? "按「產生關鍵字」補上 hashtag 用的關鍵字。"
+          : "")
+    );
+    renderEvening();
+    saveEveningSoon();
+  } catch (err) {
+    const msg = String(err);
+    evStatus(
+      msg.includes("找不到") && msg.includes("日期分隔線")
+        ? `⚠ ${msg}`
+        : `⚠ 比對失敗：${msg}${silent ? "（請先「開啟協作工具」再按「比對當天」）" : ""}`,
+      true
+    );
+  }
+}
+
+function eveningKeywordTargets() {
+  return evItems.filter((i) => i.included && !i.keywords.trim() && (i.title.trim() || i.body.trim()));
+}
+
+async function generateEveningKeywords(targets) {
+  if (targets.length === 0) return;
+  const { batch, remaining } = splitKeywordRun(targets, keywordMaxPerRun);
+  batch.forEach((i) => { i.keywordStatus = "loading"; });
+  renderEvening();
+  showProgress(0, batch.length, `產生關鍵字 0 / ${batch.length}`);
+  try {
+    const results = await invoke("generate_keywords_batch", {
+      items: batch.map((i) => ({ id: i.id, title: i.title, body: i.body })),
+      count: KEYWORD_COUNT,
+    });
+    for (const r of results) {
+      const item = evItems.find((i) => i.id === r.id);
+      if (!item) continue;
+      if (r.keywords) {
+        item.keywords = r.keywords.join(" ");
+        item.keywordStatus = "idle";
+        item.keywordError = "";
+      } else {
+        item.keywordStatus = "error";
+        item.keywordError = r.error ?? "未知錯誤";
+      }
+    }
+    const failed = results.filter((r) => !r.keywords);
+    if (failed.some((r) => isRateLimitError(r.error))) {
+      evStatus(`⚠ 已達 Gemini 每分鐘請求上限：${failed.length} 則沒產生成功，請等約一分鐘後再按一次。`, true);
+    } else if (remaining > 0) {
+      evStatus(`本次已送出 ${batch.length} 則，還有 ${remaining} 則，請等約一分鐘後再按一次「產生關鍵字」。`);
+    }
+  } catch (err) {
+    batch.forEach((i) => { i.keywordStatus = "error"; i.keywordError = String(err); });
+    hideProgress();
+    evStatus(`⚠ 產生關鍵字失敗：${err}`, true);
+  }
+  renderEvening();
+  saveEveningSoon();
+}
+
+const EV_STATUS_LABEL = {
+  hit: "命中",
+  no_online: "標記不上網",
+  not_found: "當天區塊沒有",
+  note_no_upload: "備註勿上網",
+};
+
+function eveningCardHtml(item) {
+  const statusLabel = item.status ? EV_STATUS_LABEL[item.status] : "尚未比對";
+  const statusClass = item.status === "note_no_upload" ? "no_online" : item.status ?? "pending";
+  const auto = autoHashtag(item.title, item.keywords);
+  const marker = (item.marker ?? "").trim();
+  return `
+    <div class="card ${item.included ? "ev-hit" : "ev-miss"} ${item.collapsed === false ? "" : "collapsed"}" data-id="${item.id}">
+      <div class="card-head">
+        <button class="collapse-toggle ev-collapse" data-id="${item.id}" title="展開／收合">${item.collapsed === false ? "▼" : "▶"}</button>
+        <label class="include-toggle">
+          <input type="checkbox" class="ev-include" data-id="${item.id}" ${item.included ? "checked" : ""} />
+          列入
+        </label>
+        <span class="slug">${escapeHtml(item.slug)}</span>
+        <span class="badge ${statusClass}" title="${escapeHtml(item.matchedLine ?? "")}">${statusLabel}</span>
+        ${marker ? `<span class="badge marker">${escapeHtml(marker)}</span>` : ""}
+        <span>${escapeHtml(item.style)}</span>
+        <span>${escapeHtml(item.time)}</span>
+        ${item.collapsed === false ? "" : `<span class="peek">${escapeHtml(item.title)}</span>`}
+        <span class="file-name">${escapeHtml(item.fileName)}</span>
+      </div>
+      <div class="card-body">
+        <div class="field">
+          <label>標題</label>
+          <input type="text" class="ev-title" data-id="${item.id}" value="${escapeHtml(item.title)}" />
+        </div>
+        <div class="field">
+          <label>關鍵字（空格分隔）</label>
+          <div class="keywords-row">
+            <input type="text" class="ev-keywords" data-id="${item.id}" value="${escapeHtml(item.keywords)}" placeholder="#關鍵字1 #關鍵字2 #關鍵字3 #關鍵字4" />
+            <button class="ev-gen-one" data-id="${item.id}" ${!hasApiKey || item.keywordStatus === "loading" ? "disabled" : ""}>
+              ${item.keywordStatus === "loading" ? "產生中…" : "產生關鍵字"}
+            </button>
+          </div>
+          ${item.keywordStatus === "error" ? `<div class="w">⚠ 產生失敗：${escapeHtml(item.keywordError)}</div>` : ""}
+        </div>
+        <div class="field">
+          <label>Hashtag（留空＝自動：取第一個出現在標題裡的關鍵字）</label>
+          <input type="text" class="ev-hashtag" data-id="${item.id}" value="${escapeHtml(item.hashtagManual ? item.hashtag : "")}" placeholder="${escapeHtml(auto ? `自動：#${auto}` : "（尚無關鍵字）")}" />
+        </div>
+        ${item.matchedLine ? `<div class="muted">協作文件：${escapeHtml(item.matchedLine)}</div>` : ""}
+      </div>
+    </div>`;
+}
+
+function renderEveningOutput() {
+  const opts = evOutputOpts();
+  const text = buildEveningText(evItems, opts);
+  el("evPreview").textContent = text;
+  el("evSlugs").textContent = buildEveningSlugList(evItems);
+  el("evOutput").classList.toggle("hidden", !text);
+  el("evCopyBtn").disabled = !text;
+  el("evSaveBtn").disabled = !text;
+  const targets = eveningKeywordTargets();
+  const btn = el("evGenKeywordsBtn");
+  btn.disabled = !hasApiKey || targets.length === 0;
+  btn.textContent = targets.length ? `產生關鍵字（${Math.min(targets.length, keywordMaxPerRun > 0 ? keywordMaxPerRun : targets.length)}）` : "產生關鍵字";
+  btn.title = hasApiKey ? "替列入清單、還沒有關鍵字的稿件產生關鍵字" : "尚未設定 Gemini API key，請到設定頁輸入";
+}
+
+function renderEvening() {
+  const ordered = sortEvening(evItems);
+  const visible = [...ordered.filter((i) => i.included), ...ordered.filter((i) => !i.included)];
+  el("evList").innerHTML = visible.map(eveningCardHtml).join("");
+  el("evEmptyState").classList.toggle("hidden", evItems.length > 0);
+  el("evClearBtn").disabled = evItems.length === 0;
+  el("evCompareBtn").disabled = evItems.length === 0;
+
+  const find = (e) => evItems.find((i) => i.id === e.target.dataset.id);
+  // Text edits refresh only the preview, not the cards, so the caret stays put.
+  const onEdit = (cls, apply) =>
+    document.querySelectorAll(cls).forEach((elm) =>
+      elm.addEventListener("input", (e) => {
+        const item = find(e);
+        if (!item) return;
+        apply(item, e.target.value);
+        renderEveningOutput();
+        saveEveningSoon();
+      })
+    );
+  onEdit(".ev-title", (item, v) => { item.title = v; });
+  onEdit(".ev-keywords", (item, v) => { item.keywords = v; });
+  onEdit(".ev-hashtag", (item, v) => {
+    item.hashtag = v;
+    item.hashtagManual = v.trim() !== "";
+  });
+  document.querySelectorAll(".ev-include").forEach((elm) =>
+    elm.addEventListener("change", (e) => {
+      const item = find(e);
+      if (item) item.included = e.target.checked;
+      renderEvening();
+      saveEveningSoon();
+    })
+  );
+  document.querySelectorAll(".ev-collapse").forEach((elm) =>
+    elm.addEventListener("click", (e) => {
+      const item = find(e);
+      if (!item) return;
+      item.collapsed = item.collapsed === false;
+      renderEvening();
+    })
+  );
+  document.querySelectorAll(".ev-gen-one").forEach((elm) =>
+    elm.addEventListener("click", (e) => {
+      const item = find(e);
+      if (item) generateEveningKeywords([item]);
+    })
+  );
+  renderEveningOutput();
+}
+
+el("modeScriptBtn").addEventListener("click", () => setMode("script"));
+el("modeEveningBtn").addEventListener("click", () => setMode("evening"));
+el("evImportBtn").addEventListener("click", importEvening);
+el("evOpenCollabBtn").addEventListener("click", () => openCollab(el("evStatus")));
+el("evCompareBtn").addEventListener("click", () => compareEvening());
+el("evGenKeywordsBtn").addEventListener("click", () => generateEveningKeywords(eveningKeywordTargets()));
+el("evClearBtn").addEventListener("click", () => {
+  evItems = [];
+  el("evStatus").classList.add("hidden");
+  renderEvening();
+  saveEveningSoon();
+});
+el("evAnchor").addEventListener("change", () => { renderEveningOutput(); saveEveningSoon(); });
+el("evDate").addEventListener("change", () => {
+  // The old hits belong to another day's block; keep the cards but make the user
+  // compare again rather than print them under a date they were never checked for.
+  if (evItems.length > 0 && el("evDate").value !== evItemsDate) {
+    evItems.forEach((i) => { i.status = null; i.matchedLine = null; i.included = false; });
+    evStatus(`日期已改為 ${el("evDate").value}，請按「比對當天」重新比對。`);
+    renderEvening();
+  } else {
+    renderEveningOutput();
+  }
+  saveEveningSoon();
+});
+el("evCopyBtn").addEventListener("click", async () => {
+  await navigator.clipboard.writeText(buildEveningText(evItems, evOutputOpts()));
+  const btn = el("evCopyBtn");
+  btn.textContent = "已複製！";
+  setTimeout(() => { btn.textContent = "複製清單"; }, 1200);
+});
+el("evSaveBtn").addEventListener("click", async () => {
+  const opts = evOutputOpts();
+  await invoke("save_text_file", {
+    defaultName: `${opts.anchor}晚報_${mmddOf(opts.date)}.txt`,
+    content: buildEveningExport(evItems, opts),
+  });
+});
+// Last write before the window goes away, so a debounce in flight is not lost.
+window.addEventListener("beforeunload", () => { if (evSaveTimer) saveEveningNow(); });
+
+(async () => {
+  try {
+    applyEveningConfig(await invoke("get_config"));
+  } catch (err) {
+    console.error("讀取晚報設定失敗", err);
+  }
+  await loadEvening();
+})();

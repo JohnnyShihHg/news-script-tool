@@ -9,6 +9,14 @@
   <header>
     <h1>新聞文稿整理工具</h1>
     <div class="toolbar">
+      <span class="toolbar-group mode-switch">
+        <button id="modeScriptBtn" class="active">文稿</button>
+        <button id="modeEveningBtn">晚報</button>
+      </span>
+
+      <span class="toolbar-sep"></span>
+
+      <span id="scriptToolbar" class="mode-pane">
       <span class="toolbar-group">
         <button id="importBtn">匯入資料夾</button>
         <button id="clearCardsBtn" disabled title="只清掉畫面上的卡片，不會刪除任何檔案">清空卡片</button>
@@ -30,6 +38,36 @@
         <button id="copyBtn" class="ghost" disabled>複製全部</button>
         <button id="saveBtn" class="ghost" disabled>存成 txt</button>
       </span>
+      </span>
+
+      <span id="eveningToolbar" class="mode-pane hidden">
+      <span class="toolbar-group">
+        <label class="section-label">日期 <input type="date" id="evDate" /></label>
+        <label class="section-label">主播 <select id="evAnchor"></select></label>
+      </span>
+
+      <span class="toolbar-sep"></span>
+
+      <span class="toolbar-group">
+        <button id="evImportBtn">匯入資料夾</button>
+        <button id="evClearBtn" disabled title="只清掉晚報卡片，不會刪除任何檔案">清空卡片</button>
+      </span>
+
+      <span class="toolbar-sep"></span>
+
+      <span class="toolbar-group">
+        <button id="evOpenCollabBtn">開啟協作工具</button>
+        <button id="evCompareBtn" disabled title="請先匯入並開啟協作工具">比對當天</button>
+        <button id="evGenKeywordsBtn" disabled>產生關鍵字</button>
+      </span>
+
+      <span class="toolbar-sep"></span>
+
+      <span class="toolbar-group">
+        <button id="evCopyBtn" class="primary" disabled>複製清單</button>
+        <button id="evSaveBtn" class="ghost" disabled>存成 txt</button>
+      </span>
+      </span>
 
       <span class="spacer"></span>
       <span id="folderLabel" class="muted"></span>
@@ -37,14 +75,15 @@
     </div>
   </header>
 
-  <div id="funnel" class="funnel hidden"></div>
-
-  <div id="compareStatus" class="compare-status hidden"></div>
-
   <div id="progressWrap" class="progress-wrap hidden">
     <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
     <span id="progressLabel" class="progress-label"></span>
   </div>
+
+  <div id="scriptView" class="view">
+  <div id="funnel" class="funnel hidden"></div>
+
+  <div id="compareStatus" class="compare-status hidden"></div>
 
   <section id="summary" class="summary hidden">
     <button class="stat stat-passed" data-filter="passed">通過 <span id="statPassed">0</span></button>
@@ -58,8 +97,30 @@
   <main id="list"></main>
 
   <footer id="emptyState" class="empty-state">
-    尚未匯入任何檔案。點左上角「匯入資料夾」選擇存放 iNews txt 的資料夾。
+    尚未匯入任何檔案。先到「設定」綁定存放 iNews txt 的預設匯入資料夾，再點左上角「匯入資料夾」。
   </footer>
+  </div>
+
+  <div id="eveningView" class="view hidden">
+    <div id="evStatus" class="compare-status hidden"></div>
+
+    <section id="evOutput" class="ev-output hidden">
+      <div class="ev-output-col">
+        <div class="ev-output-head">清單（複製的內容）</div>
+        <pre id="evPreview" class="ev-pre"></pre>
+      </div>
+      <div class="ev-output-col ev-slugs">
+        <div class="ev-output-head">slug（方便查找，不會複製；存成 txt 時附在最下面）</div>
+        <pre id="evSlugs" class="ev-pre"></pre>
+      </div>
+    </section>
+
+    <main id="evList"></main>
+
+    <footer id="evEmptyState" class="empty-state">
+      尚未匯入晚報稿件。選好日期與主播，按「匯入資料夾」，再開啟協作工具按「比對當天」。
+    </footer>
+  </div>
 
   <script src="logic.js"></script>
   <script src="app.js"></script>

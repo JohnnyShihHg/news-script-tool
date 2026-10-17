@@ -93,7 +93,7 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
         &cfg.filter.title_tag_fallback_pattern,
     );
 
-    let (title_raw, body_raw, has_content, title_tag_found) = match body_parse {
+    let (title_raw, body_raw, has_content, title_tag_found, fallback_tag) = match body_parse {
         parse::BodyParse::NoProductionBlock => {
             if style.eq_ignore_ascii_case("TEL") {
                 let entry = NewsEntry {
@@ -124,8 +124,8 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
                 reason: "製作區缺少結尾 >]".to_string(),
             };
         }
-        parse::BodyParse::Extracted { title, body, has_content, title_tag_found } => {
-            (title, body, has_content, title_tag_found)
+        parse::BodyParse::Extracted { title, body, has_content, title_tag_found, fallback_tag } => {
+            (title, body, has_content, title_tag_found, fallback_tag)
         }
     };
 
@@ -141,6 +141,11 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
         }
         if let Some(ref t) = note_style_hint {
             warnings.push(format!("樣式空白，編輯備註含「{}」，未自動判定樣式，請人工確認", t));
+        }
+        // Plain [BAR] is the long-standing weather-rundown case and needs no nagging;
+        // a [BAR_xxx] segment card standing in for the headline is a guess to check.
+        if let Some(tag) = fallback_tag.as_deref().filter(|t| !t.eq_ignore_ascii_case("[BAR]")) {
+            warnings.push(format!("找不到 [BAR_..大] 標題標記，標題取自第一張 {tag} 字卡，請確認"));
         }
     };
 

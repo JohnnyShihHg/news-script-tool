@@ -484,3 +484,109 @@ test("a DTO with no slug_marker at all maps to an empty string, not undefined", 
   assert.equal(item.included, false);
   assert.equal(item.id, "entry-3");
 });
+
+// --- 晚報 (evening bulletin) list ---
+
+const ev = (n, over = {}) => ({
+  id: `ev-${n}`,
+  slug: `合成稿${n}1200`,
+  time: `18:${String(n).padStart(2, "0")}:00`,
+  title: `合成標題${n}`,
+  keywords: "",
+  hashtag: "",
+  hashtagManual: false,
+  included: true,
+  ...over,
+});
+
+test("evening groups: up to 8 stay together, from 9 split evenly with extras last", () => {
+  assert.deepEqual(L.eveningGroupSizes(0), []);
+  assert.deepEqual(L.eveningGroupSizes(4), [4]);
+  assert.deepEqual(L.eveningGroupSizes(8), [8]);
+  assert.deepEqual(L.eveningGroupSizes(9), [4, 5]);
+  assert.deepEqual(L.eveningGroupSizes(10), [5, 5]);
+  assert.deepEqual(L.eveningGroupSizes(13), [6, 7]);
+  assert.deepEqual(L.eveningGroupSizes(20), [10, 10]);
+  assert.deepEqual(L.eveningGroupSizes(21), [7, 7, 7]);
+  assert.deepEqual(L.eveningGroupSizes(25), [8, 8, 9]);
+  for (let n = 1; n <= 60; n++) {
+    const sizes = L.eveningGroupSizes(n);
+    assert.equal(sizes.reduce((a, b) => a + b, 0), n);
+    assert.ok(Math.max(...sizes) <= 10 || n <= 8);
+  }
+});
+
+test("headline prefers 獨家, then 最新, then the first story", () => {
+  const a = ev(1), b = ev(2, { title: "最新》合成快訊" }), c = ev(3, { title: "獨家》合成獨家" });
+  assert.equal(L.pickHeadline([a, b, c]), c);
+  assert.equal(L.pickHeadline([a, b]), b);
+  assert.equal(L.pickHeadline([a]), a);
+});
+
+test("hashtag is the first keyword that appears in the title, else the first keyword", () => {
+  assert.equal(L.autoHashtag("轎車甩尾 烏龜翻 駕駛落跑", "#轎車失控 #烏龜翻 #燈桿 #追撞"), "烏龜翻");
+  assert.equal(L.autoHashtag("合成標題", "#甲 #乙"), "甲");
+  assert.equal(L.autoHashtag("合成標題", ""), "");
+  // A hand-typed hashtag sticks and loses any leading #.
+  assert.equal(L.hashtagOf(ev(1, { hashtag: "#自訂", hashtagManual: true, keywords: "#甲" })), "自訂");
+});
+
+test("evening text: header, blank, titles, hashtags; only ticked stories in running order", () => {
+  const items = [
+    ev(2, { title: "獨家》合成牛肉麵", keywords: "#牛肉麵 #湯底" }),
+    ev(1, { title: "合成烏龜翻落跑", keywords: "#轎車 #烏龜翻" }),
+    ev(3, { included: false }),
+  ];
+  const text = L.buildEveningText(items, { date: "2026-10-17", anchor: "吳宇舒" });
+  assert.equal(
+    text,
+    "獨家》合成牛肉麵  2026/10/17【吳宇舒晚報】\n\n合成烏龜翻落跑\n獨家》合成牛肉麵\n#烏龜翻#牛肉麵"
+  );
+});
+
+test("evening text: each group gets its own header and hashtag line", () => {
+  const items = Array.from({ length: 10 }, (_, k) => ev(k + 1, { keywords: `#詞${k + 1}` }));
+  const text = L.buildEveningText(items, { date: "2026-10-17", anchor: "房業涵" });
+  assert.equal((text.match(/【房業涵晚報】/g) || []).length, 2);
+  assert.ok(text.includes("#詞1#詞2#詞3#詞4#詞5\n\n合成標題6  2026/10/17"));
+});
+
+test("evening export puts the slugs at the bottom; copy text has none", () => {
+  const items = [ev(1), ev(2)];
+  const opts = { date: "2026-10-17", anchor: "吳宇舒" };
+  assert.ok(!L.buildEveningText(items, opts).includes("合成稿11200"));
+  const out = L.buildEveningExport(items, opts);
+  assert.ok(out.endsWith("----- slug -----\n合成稿11200\n合成稿21200\n"));
+  assert.equal(L.buildEveningExport([], opts), "");
+});
+
+test("evening hit needs a doc hit and no 勿上網 note of its own", () => {
+  assert.equal(L.isEveningHit("hit", { marker: "" }, "(勿上網)"), true);
+  assert.equal(L.isEveningHit("hit", { marker: "(勿上網)" }, "(勿上網)"), false);
+  assert.equal(L.isEveningHit("not_found", { marker: "" }, "(勿上網)"), false);
+  assert.equal(L.isEveningHit("no_online", { marker: "" }, "(勿上網)"), false);
+});
+
+test("re-importing keeps edits by slug and takes fresh fields from the new import", () => {
+  const prev = [ev(1, { title: "改過的標題", hashtag: "手打", hashtagManual: true, status: "hit", included: true })];
+  const fresh = [ev(1, { title: "原標題", time: "19:00:00", included: false }), ev(2)];
+  const merged = L.mergeEveningEdits(fresh, prev);
+  assert.equal(merged[0].title, "改過的標題");
+  assert.equal(merged[0].hashtag, "手打");
+  assert.equal(merged[0].time, "19:00:00");
+  assert.equal(merged[0].included, true);
+  assert.equal(merged[1].title, "合成標題2");
+});
+
+test("date helpers", () => {
+  assert.equal(L.mmddOf("2026-10-17"), "1017");
+  assert.equal(L.mmddOf("bad"), "");
+  assert.equal(L.slashDate("2026-10-17"), "2026/10/17");
+});
+
+test("evening card from a parse failure is null", () => {
+  assert.equal(L.eveningItemFromDto({ kind: "ParseFailed", ParseFailed: { file_name: "x", reason: "y" } }, 0), null);
+  const item = L.eveningItemFromDto({ kind: "FilteredByStyle", FilteredByStyle: { slug: "合成BS1800", title: "t" } }, 2);
+  assert.equal(item.slug, "合成BS1800");
+  assert.equal(item.id, "ev-2");
+});

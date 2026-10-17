@@ -271,7 +271,190 @@
     };
   }
 
+  // --- 晚報 (evening bulletin) list -------------------------------------------
+
+  /**
+   * One evening card from a backend entry DTO, or null for a file that failed to
+   * parse (it has no slug to match). Every bucket is kept, 已濾除 included: whether a
+   * story counts is decided by the shared doc, not by its rundown style.
+   */
+  function eveningItemFromDto(dto, index) {
+    const kind = kindOf(dto);
+    if (kind === "ParseFailed") return null;
+    const f = dto[kind] ?? dto;
+    return {
+      id: `ev-${index}`,
+      slug: f.slug ?? "",
+      fileName: f.file_name ?? "",
+      style: f.style ?? "",
+      time: f.time ?? "",
+      group: f.group ?? "",
+      marker: f.slug_marker ?? "",
+      title: f.title ?? "",
+      body: f.body ?? "",
+      keywords: "",
+      hashtag: "",
+      /** Once someone types a hashtag it stops following the keywords. */
+      hashtagManual: false,
+      status: null, // null | "hit" | "no_online" | "not_found"
+      matchedLine: null,
+      included: false,
+      keywordStatus: "idle",
+      keywordError: "",
+    };
+  }
+
+  /**
+   * Whether a compare result puts a story on the list: in the day's block, online,
+   * and not marked 勿上網 by its own 編輯備註.
+   */
+  function isEveningHit(status, item, noUploadLabel) {
+    return status === "hit" && !isNoUpload({ slug_marker: item.marker }, noUploadLabel);
+  }
+
+  /**
+   * Group sizes for `n` stories. Up to 8 stay as one group; from 9 the list is split
+   * into at least two, at most 10 per group, as evenly as possible with any extra
+   * one going to the later groups (13 -> 6/7).
+   */
+  function eveningGroupSizes(n) {
+    if (n <= 0) return [];
+    if (n <= 8) return [n];
+    const groups = Math.max(2, Math.ceil(n / 10));
+    const base = Math.floor(n / groups);
+    const extra = n % groups;
+    return Array.from({ length: groups }, (_, g) => base + (g >= groups - extra ? 1 : 0));
+  }
+
+  function splitIntoGroups(list) {
+    const out = [];
+    let at = 0;
+    for (const size of eveningGroupSizes(list.length)) {
+      out.push(list.slice(at, at + size));
+      at += size;
+    }
+    return out;
+  }
+
+  /** 獨家 first, then 最新, then simply the first story in running order. */
+  function pickHeadline(group, { exclusivePrefix = "獨家》", latestPrefix = "最新》" } = {}) {
+    const starts = (p) => p && group.find((i) => (i.title ?? "").trim().startsWith(p));
+    return starts(exclusivePrefix) || starts(latestPrefix) || group[0] || null;
+  }
+
+  function keywordWords(keywords) {
+    return String(keywords ?? "")
+      .split(/[\s#]+/)
+      .map((w) => w.trim())
+      .filter(Boolean);
+  }
+
+  /**
+   * The one word that stands for a story: the first of its keywords that actually
+   * appears in its title (烏龜翻 in 「…烏龜翻 駕駛爬出落跑…」), else the first keyword.
+   */
+  function autoHashtag(title, keywords) {
+    const words = keywordWords(keywords);
+    const t = title ?? "";
+    return words.find((w) => t.includes(w)) ?? words[0] ?? "";
+  }
+
+  /** The hashtag that will be printed, without the leading `#`. */
+  function hashtagOf(item) {
+    const raw = item.hashtagManual ? item.hashtag : autoHashtag(item.title, item.keywords);
+    return String(raw ?? "").replace(/^[\s#]+/, "").trim();
+  }
+
+  /** The stories that go out, in running order. */
+  function eveningOutgoing(items) {
+    return sortByTime((items ?? []).filter((i) => i.included));
+  }
+
+  /** `2026-10-17` -> `2026/10/17`, the form printed in the header line. */
+  function slashDate(isoDate) {
+    return String(isoDate ?? "").replace(/-/g, "/");
+  }
+
+  /** `2026-10-17` -> `1017`, the form of the doc's date divider. */
+  function mmddOf(isoDate) {
+    const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(isoDate ?? ""));
+    return m ? m[1] + m[2] : "";
+  }
+
+  /**
+   * The list to copy: one complete block per group --
+   *   {headline}  {yyyy/mm/dd}【{anchor}晚報】
+   *   (blank)
+   *   {title per story}
+   *   #{word}#{word}...
+   * -- with a blank line between groups. Stories without a hashtag are just left
+   * out of the hashtag line rather than printing a bare `#`.
+   */
+  function buildEveningText(items, { date, anchor, exclusivePrefix, latestPrefix } = {}) {
+    return splitIntoGroups(eveningOutgoing(items))
+      .map((group) => {
+        const head = pickHeadline(group, { exclusivePrefix, latestPrefix });
+        const lines = [`${head.title}  ${slashDate(date)}【${anchor ?? ""}晚報】`, ""];
+        lines.push(...group.map((i) => i.title));
+        const tags = group.map(hashtagOf).filter(Boolean);
+        if (tags.length) lines.push(tags.map((t) => `#${t}`).join(""));
+        return lines.join("\n");
+      })
+      .join("\n\n");
+  }
+
+  /** Slugs in the same groups and order, for looking stories up afterwards. */
+  function buildEveningSlugList(items) {
+    return splitIntoGroups(eveningOutgoing(items))
+      .map((group) => group.map((i) => i.slug).join("\n"))
+      .join("\n\n");
+  }
+
+  /** The saved txt: the list as copied, then the slugs at the bottom. */
+  function buildEveningExport(items, opts) {
+    const text = buildEveningText(items, opts);
+    if (!text) return "";
+    return `${text}\n\n----- slug -----\n${buildEveningSlugList(items)}\n`;
+  }
+
+  /**
+   * Re-importing the same day must not throw away what was already edited. Cards are
+   * matched by slug and keep their title, keywords, hashtag and tick; everything
+   * else (time, style, marker) comes fresh from the new import.
+   */
+  function mergeEveningEdits(fresh, previous) {
+    const bySlug = new Map((previous ?? []).map((p) => [p.slug, p]));
+    return fresh.map((item) => {
+      const p = bySlug.get(item.slug);
+      if (!p) return item;
+      return {
+        ...item,
+        title: p.title,
+        keywords: p.keywords,
+        hashtag: p.hashtag,
+        hashtagManual: p.hashtagManual,
+        status: p.status,
+        matchedLine: p.matchedLine,
+        included: p.included,
+      };
+    });
+  }
+
   return {
+    eveningItemFromDto,
+    isEveningHit,
+    eveningGroupSizes,
+    splitIntoGroups,
+    pickHeadline,
+    autoHashtag,
+    hashtagOf,
+    eveningOutgoing,
+    slashDate,
+    mmddOf,
+    buildEveningText,
+    buildEveningSlugList,
+    buildEveningExport,
+    mergeEveningEdits,
     kindOf,
     bucketOf,
     itemFromDto,

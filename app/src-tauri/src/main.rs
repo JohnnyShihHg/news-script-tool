@@ -776,6 +776,78 @@ async fn compare_with_collab_doc(
         .collect())
 }
 
+// --- 晚報 (evening bulletin) list ---
+
+#[derive(Serialize)]
+struct EveningMatchDto {
+    slug: String,
+    status: String, // "hit" | "no_online" | "not_found"
+    matched_line: Option<String>,
+}
+
+/// Matches evening-rundown slugs against one day's block of the shared doc. Read-only:
+/// the evening list is never written anywhere, it is only copied or saved as txt.
+#[tauri::command]
+async fn compare_evening(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    slugs: Vec<String>,
+    mmdd: String,
+) -> Result<Vec<EveningMatchDto>, String> {
+    use news_script_core::doc_match::{date_section, match_evening, EveningStatus};
+    require_main_window(&window)?;
+    let doc_text = scrape_collab_text(&app, &state).await?;
+    let section = date_section(&doc_text, &mmdd)
+        .ok_or_else(|| format!("協作文件裡找不到 {mmdd} 的日期分隔線（========{mmdd}========），請確認日期。"))?;
+    let markers = state.config.lock().unwrap().evening.no_online_markers.clone();
+    Ok(slugs
+        .into_iter()
+        .map(|slug| {
+            let r = match_evening(&slug, &section, &markers);
+            EveningMatchDto {
+                slug,
+                status: match r.status {
+                    EveningStatus::Hit => "hit",
+                    EveningStatus::NoOnline => "no_online",
+                    EveningStatus::NotFound => "not_found",
+                }
+                .to_string(),
+                matched_line: r.matched_line,
+            }
+        })
+        .collect())
+}
+
+/// The evening cards and edits, kept beside config.toml so they survive a restart.
+/// Stored as the front end's own JSON: only the front end reads it, and keeping it
+/// opaque here means a new card field never needs a matching Rust change.
+fn evening_state_path() -> Option<std::path::PathBuf> {
+    config_path().map(|p| p.with_file_name("evening.json"))
+}
+
+#[tauri::command]
+fn load_evening_state(window: tauri::Window) -> Result<Option<String>, String> {
+    require_main_window(&window)?;
+    match evening_state_path() {
+        Some(p) if p.exists() => std::fs::read_to_string(p).map(Some).map_err(|e| e.to_string()),
+        _ => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn save_evening_state(window: tauri::Window, json: String) -> Result<(), String> {
+    require_main_window(&window)?;
+    let path = evening_state_path().ok_or_else(|| "找不到設定檔存放路徑".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // Write-then-rename so a crash mid-write can't leave a truncated file behind.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -804,7 +876,10 @@ fn main() {
             compare_with_collab_doc,
             diagnose_collab_bridge,
             export_collab_text,
-            append_to_collab_doc
+            append_to_collab_doc,
+            compare_evening,
+            load_evening_state,
+            save_evening_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

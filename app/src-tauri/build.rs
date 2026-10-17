@@ -28,6 +28,9 @@ fn main() {
             "diagnose_collab_bridge",
             "export_collab_text",
             "append_to_collab_doc",
+            "compare_evening",
+            "load_evening_state",
+            "save_evening_state",
         ])),
     )
     .expect("failed to run tauri-build");
