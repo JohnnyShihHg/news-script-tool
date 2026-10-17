@@ -175,7 +175,7 @@ mod evening_tests {
     use super::*;
 
     fn markers() -> Vec<String> {
-        ["(勿上網)", "(不上網)", "(版權問題)", "(X)", "(國際)"].iter().map(|s| s.to_string()).collect()
+        crate::config::EveningConfig::default().no_online_markers
     }
 
     // Synthetic doc: two days, slot dividers, a messy fullwidth/tab divider, and the
@@ -232,7 +232,13 @@ YH 合成已上傳新聞1200 SOT 12:20:00
     fn already_uploaded_prefixes_count_as_online() {
         // The everyday compare drops these; for the evening list they are online.
         assert_eq!(match_evening("合成已上傳新聞1200", &section(), &markers()).status, EveningStatus::Hit);
-        assert_eq!(match_evening("合成重貼新聞1200", &section(), &markers()).status, EveningStatus::Hit);
+    }
+
+    #[test]
+    fn a_grab_new_line_is_skipped_even_though_it_is_online() {
+        assert_eq!(match_evening("合成重貼新聞1200", &section(), &markers()).status, EveningStatus::NoOnline);
+        let fullwidth = "（抓新）合成重貼新聞1200 SOT";
+        assert_eq!(match_evening("合成重貼新聞1200", fullwidth, &markers()).status, EveningStatus::NoOnline);
     }
 
     #[test]

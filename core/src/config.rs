@@ -267,6 +267,10 @@ pub struct EveningConfig {
     /// story that *is* online. Only these markers keep a story off the list.
     #[serde(default = "default_no_online_markers")]
     pub no_online_markers: Vec<String>,
+    /// Rundown styles (樣式) that may go on the list. Packages such as 專題 or SL
+    /// are online but never run in the 晚報, so only SOT and 短sot qualify by default.
+    #[serde(default = "default_evening_styles")]
+    pub allowed_styles: Vec<String>,
 }
 
 fn default_evening_anchors() -> Vec<String> {
@@ -274,21 +278,30 @@ fn default_evening_anchors() -> Vec<String> {
 }
 
 fn default_no_online_markers() -> Vec<String> {
-    ["(勿上網)", "(不上網)", "(版權問題)", "(X)", "(國際)", "(偷拍)", "(官方要求下下)"]
+    // 抓新 has no brackets on purpose: any line with it in front of the slug is skipped.
+    ["(勿上網)", "(不上網)", "(版權問題)", "(X)", "(國際)", "(偷拍)", "(官方要求下下)", "抓新"]
         .iter()
         .map(|s| s.to_string())
         .collect()
 }
 
+fn default_evening_styles() -> Vec<String> {
+    vec!["SOT".into(), "短sot".into()]
+}
+
 impl Default for EveningConfig {
     fn default() -> Self {
-        Self { anchors: default_evening_anchors(), no_online_markers: default_no_online_markers() }
+        Self {
+            anchors: default_evening_anchors(),
+            no_online_markers: default_no_online_markers(),
+            allowed_styles: default_evening_styles(),
+        }
     }
 }
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 4;
+pub const CURRENT_CONFIG_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -344,6 +357,7 @@ pub fn migrate(cfg: &mut Config) -> bool {
     union(&mut cfg.filter.allowed_styles, &defaults.filter.allowed_styles);
     union(&mut cfg.markers.refresh_keywords, &defaults.markers.refresh_keywords);
     union(&mut cfg.filter.slug_style_terms, &defaults.filter.slug_style_terms);
+    union(&mut cfg.evening.no_online_markers, &defaults.evening.no_online_markers);
 
     // v0.1.9 switched the slug-line markers from 【】 to half-width (). These are
     // scalar fields, so `union` cannot reach them: rewrite only a label still holding

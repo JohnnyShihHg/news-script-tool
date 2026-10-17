@@ -311,6 +311,25 @@
     return status === "hit" && !isNoUpload({ slug_marker: item.marker }, noUploadLabel);
   }
 
+  /** Fullwidth ASCII folded to halfwidth and case dropped, so `ＳＯＴ` and `sot` read as `SOT`. */
+  function foldStyle(s) {
+    return String(s ?? "")
+      .replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+      .trim()
+      .toUpperCase();
+  }
+
+  /**
+   * Whether a story's rundown style may run in the 晚報 at all. Online is not enough:
+   * 專題, SL and the like are online but never go on the list. An empty `allowed`
+   * list switches the check off.
+   */
+  function isEveningStyle(style, allowed) {
+    if (!allowed || allowed.length === 0) return true;
+    const s = foldStyle(style);
+    return allowed.some((a) => foldStyle(a) === s);
+  }
+
   /**
    * Group sizes for `n` stories. Up to 8 stay as one group; from 9 the list is split
    * into at least two, at most 10 per group, as evenly as possible with any extra
@@ -453,6 +472,7 @@
   return {
     eveningItemFromDto,
     isEveningHit,
+    isEveningStyle,
     eveningGroupSizes,
     splitIntoGroups,
     pickHeadline,
