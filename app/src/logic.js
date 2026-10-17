@@ -390,17 +390,32 @@
    * -- with a blank line between groups. Stories without a hashtag are just left
    * out of the hashtag line rather than printing a bare `#`.
    */
-  function buildEveningText(items, { date, anchor, exclusivePrefix, latestPrefix } = {}) {
-    return splitIntoGroups(eveningOutgoing(items))
-      .map((group) => {
-        const head = pickHeadline(group, { exclusivePrefix, latestPrefix });
-        const lines = [`${head.title}  ${slashDate(date)}【${anchor ?? ""}晚報】`, ""];
-        lines.push(...group.map((i) => i.title));
-        const tags = group.map(hashtagOf).filter(Boolean);
-        if (tags.length) lines.push(tags.map((t) => `#${t}`).join(""));
-        return lines.join("\n");
-      })
-      .join("\n\n");
+  function buildEveningText(items, opts = {}) {
+    return eveningGroups(items).map((group) => buildEveningGroupText(group, opts)).join("\n\n");
+  }
+
+  /** The stories that go out, already split into their groups. */
+  function eveningGroups(items) {
+    return splitIntoGroups(eveningOutgoing(items));
+  }
+
+  function buildEveningGroupText(group, { date, anchor, exclusivePrefix, latestPrefix } = {}) {
+    const head = pickHeadline(group, { exclusivePrefix, latestPrefix });
+    if (!head) return "";
+    const lines = [`${head.title}  ${slashDate(date)}【${anchor ?? ""}晚報】`, ""];
+    lines.push(...group.map((i) => i.title));
+    const tags = group.map(hashtagOf).filter(Boolean);
+    if (tags.length) lines.push(tags.map((t) => `#${t}`).join(""));
+    return lines.join("\n");
+  }
+
+  /**
+   * Stories in one group still waiting for keywords. Keyword runs are per group on
+   * purpose: one press covers exactly the block about to be copied, instead of
+   * spending quota on every hit of the night at once.
+   */
+  function groupKeywordTargets(group) {
+    return group.filter((i) => !(i.keywords ?? "").trim() && ((i.title ?? "").trim() || (i.body ?? "").trim()));
   }
 
   /** Slugs in the same groups and order, for looking stories up afterwards. */
@@ -452,6 +467,9 @@
     slashDate,
     mmddOf,
     buildEveningText,
+    eveningGroups,
+    buildEveningGroupText,
+    groupKeywordTargets,
     buildEveningSlugList,
     buildEveningExport,
     mergeEveningEdits,

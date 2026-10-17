@@ -590,3 +590,11 @@ test("evening card from a parse failure is null", () => {
   assert.equal(item.slug, "合成BS1800");
   assert.equal(item.id, "ev-2");
 });
+
+test("group keyword targets cover only that group's stories still missing keywords", () => {
+  const items = Array.from({ length: 10 }, (_, k) => ev(k + 1, { keywords: k === 0 ? "#已有" : "" }));
+  const [first, second] = L.eveningGroups(items);
+  assert.deepEqual(L.groupKeywordTargets(first).map((i) => i.id), ["ev-2", "ev-3", "ev-4", "ev-5"]);
+  assert.equal(L.groupKeywordTargets(second).length, 5);
+  assert.ok(L.groupKeywordTargets(second).every((i) => !first.includes(i)));
+});

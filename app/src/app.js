@@ -24,6 +24,9 @@ const {
   autoHashtag,
   mmddOf,
   buildEveningText,
+  eveningGroups,
+  buildEveningGroupText,
+  groupKeywordTargets,
   buildEveningSlugList,
   buildEveningExport,
   mergeEveningEdits,
@@ -1427,7 +1430,7 @@ async function compareEvening({ silent = false } = {}) {
     evStatus(
       `比對完成（${mmdd}）：命中 ${hits} 則，未命中 ${evItems.length - hits} 則。` +
         (hits > 0 && hasApiKey && evItems.some((i) => i.included && !i.keywords.trim())
-          ? "按「產生關鍵字」補上 hashtag 用的關鍵字。"
+          ? "在上方清單各組按「產生本組關鍵字」補上 hashtag 用的關鍵字。"
           : "")
     );
     renderEvening();
@@ -1441,10 +1444,6 @@ async function compareEvening({ silent = false } = {}) {
       true
     );
   }
-}
-
-function eveningKeywordTargets() {
-  return evItems.filter((i) => i.included && !i.keywords.trim() && (i.title.trim() || i.body.trim()));
 }
 
 async function generateEveningKeywords(targets) {
@@ -1540,16 +1539,37 @@ function eveningCardHtml(item) {
 function renderEveningOutput() {
   const opts = evOutputOpts();
   const text = buildEveningText(evItems, opts);
-  el("evPreview").textContent = text;
+  const groups = eveningGroups(evItems);
+  el("evPreview").innerHTML = groups
+    .map((group, g) => {
+      const pending = groupKeywordTargets(group);
+      const loading = group.some((i) => i.keywordStatus === "loading");
+      const label = loading
+        ? "產生中…"
+        : pending.length
+          ? `產生本組關鍵字（${pending.length}）`
+          : "本組已有關鍵字";
+      return `
+        <div class="ev-group">
+          <div class="ev-group-head">
+            ${groups.length > 1 ? `<span>第 ${g + 1} 組・${group.length} 則</span>` : `<span>${group.length} 則</span>`}
+            <button class="ev-gen-group" data-group="${g}" ${!hasApiKey || loading || pending.length === 0 ? "disabled" : ""}
+              title="${hasApiKey ? "只替這一組還沒有關鍵字的稿件產生" : "尚未設定 Gemini API key，請到設定頁輸入"}">${label}</button>
+          </div>
+          <pre class="ev-pre">${escapeHtml(buildEveningGroupText(group, opts))}</pre>
+        </div>`;
+    })
+    .join("");
+  document.querySelectorAll(".ev-gen-group").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const group = eveningGroups(evItems)[Number(btn.dataset.group)];
+      if (group) generateEveningKeywords(groupKeywordTargets(group));
+    })
+  );
   el("evSlugs").textContent = buildEveningSlugList(evItems);
   el("evOutput").classList.toggle("hidden", !text);
   el("evCopyBtn").disabled = !text;
   el("evSaveBtn").disabled = !text;
-  const targets = eveningKeywordTargets();
-  const btn = el("evGenKeywordsBtn");
-  btn.disabled = !hasApiKey || targets.length === 0;
-  btn.textContent = targets.length ? `產生關鍵字（${Math.min(targets.length, keywordMaxPerRun > 0 ? keywordMaxPerRun : targets.length)}）` : "產生關鍵字";
-  btn.title = hasApiKey ? "替列入清單、還沒有關鍵字的稿件產生關鍵字" : "尚未設定 Gemini API key，請到設定頁輸入";
 }
 
 function renderEvening() {
@@ -1608,7 +1628,6 @@ el("modeEveningBtn").addEventListener("click", () => setMode("evening"));
 el("evImportBtn").addEventListener("click", importEvening);
 el("evOpenCollabBtn").addEventListener("click", () => openCollab(el("evStatus")));
 el("evCompareBtn").addEventListener("click", () => compareEvening());
-el("evGenKeywordsBtn").addEventListener("click", () => generateEveningKeywords(eveningKeywordTargets()));
 el("evClearBtn").addEventListener("click", () => {
   evItems = [];
   el("evStatus").classList.add("hidden");

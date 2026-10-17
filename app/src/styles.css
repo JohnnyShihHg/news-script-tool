@@ -437,6 +437,9 @@ select {
 .ev-output-col { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; }
 .ev-output-head { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .ev-pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 14px; line-height: 1.7; color: var(--text); }
+.ev-group + .ev-group { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.ev-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; font-size: 12px; color: var(--muted); }
+.ev-group-head button { font-size: 12px; padding: 4px 10px; }
 .ev-slugs .ev-pre { color: var(--muted); font-size: 13px; }
 .card.ev-hit { border-left: 4px solid var(--ok); }
 .card.ev-miss { border-left: 4px solid var(--border); opacity: .75; }
