@@ -219,6 +219,12 @@
           "markdownDescription": "Enables the export_collab_text command without any pre-configured scope."
         },
         {
+          "description": "Enables the generate_group_keywords command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-generate-group-keywords",
+          "markdownDescription": "Enables the generate_group_keywords command without any pre-configured scope."
+        },
+        {
           "description": "Enables the generate_keywords command without any pre-configured scope.",
           "type": "string",
           "const": "allow-generate-keywords",
@@ -349,6 +355,12 @@
           "type": "string",
           "const": "deny-export-collab-text",
           "markdownDescription": "Denies the export_collab_text command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the generate_group_keywords command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-generate-group-keywords",
+          "markdownDescription": "Denies the generate_group_keywords command without any pre-configured scope."
         },
         {
           "description": "Denies the generate_keywords command without any pre-configured scope.",

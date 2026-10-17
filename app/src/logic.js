@@ -292,10 +292,9 @@
       marker: f.slug_marker ?? "",
       title: f.title ?? "",
       body: f.body ?? "",
+      // Per-card keywords are an aid only; the list's hashtag line comes from the
+      // group (see groupTagLine), not from these.
       keywords: "",
-      hashtag: "",
-      /** Once someone types a hashtag it stops following the keywords. */
-      hashtagManual: false,
       status: null, // null | "hit" | "no_online" | "not_found"
       matchedLine: null,
       included: false,
@@ -342,27 +341,30 @@
     return starts(exclusivePrefix) || starts(latestPrefix) || group[0] || null;
   }
 
-  function keywordWords(keywords) {
-    return String(keywords ?? "")
+  function tagWords(text) {
+    return String(text ?? "")
       .split(/[\s#]+/)
       .map((w) => w.trim())
       .filter(Boolean);
   }
 
   /**
-   * The one word that stands for a story: the first of its keywords that actually
-   * appears in its title (烏龜翻 in 「…烏龜翻 駕駛爬出落跑…」), else the first keyword.
+   * Identity of a group for its stored hashtag line: the slugs it holds. Groups are
+   * recomputed from the ticks every time, so an index would hand one group's tags to
+   * another as soon as a story is ticked or unticked.
    */
-  function autoHashtag(title, keywords) {
-    const words = keywordWords(keywords);
-    const t = title ?? "";
-    return words.find((w) => t.includes(w)) ?? words[0] ?? "";
+  function groupKey(group) {
+    return group.map((i) => i.slug).join("|");
   }
 
-  /** The hashtag that will be printed, without the leading `#`. */
-  function hashtagOf(item) {
-    const raw = item.hashtagManual ? item.hashtag : autoHashtag(item.title, item.keywords);
-    return String(raw ?? "").replace(/^[\s#]+/, "").trim();
+  /**
+   * A group's hashtag line, `#a#b#c#d`. What was typed by hand wins; otherwise the
+   * group's generated keywords. `entry` is `{ auto: string[], manual: string|null }`.
+   */
+  function groupTagLine(entry) {
+    const manual = entry?.manual;
+    const words = manual != null && manual.trim() !== "" ? tagWords(manual) : tagWords((entry?.auto ?? []).join(" "));
+    return words.map((w) => `#${w}`).join("");
   }
 
   /** The stories that go out, in running order. */
@@ -386,9 +388,9 @@
    *   {headline}  {yyyy/mm/dd}【{anchor}晚報】
    *   (blank)
    *   {title per story}
-   *   #{word}#{word}...
-   * -- with a blank line between groups. Stories without a hashtag are just left
-   * out of the hashtag line rather than printing a bare `#`.
+   *   #{word}#{word}...   (the group's own keywords, one request per group)
+   * -- with a blank line between groups. A group with no keywords yet simply has
+   * no hashtag line. `opts.groupTags` maps groupKey -> { auto, manual }.
    */
   function buildEveningText(items, opts = {}) {
     return eveningGroups(items).map((group) => buildEveningGroupText(group, opts)).join("\n\n");
@@ -399,24 +401,19 @@
     return splitIntoGroups(eveningOutgoing(items));
   }
 
-  function buildEveningGroupText(group, { date, anchor, exclusivePrefix, latestPrefix } = {}) {
+  function buildEveningGroupHead(group, { date, anchor, exclusivePrefix, latestPrefix } = {}) {
     const head = pickHeadline(group, { exclusivePrefix, latestPrefix });
     if (!head) return "";
-    const lines = [`${head.title}  ${slashDate(date)}【${anchor ?? ""}晚報】`, ""];
-    lines.push(...group.map((i) => i.title));
-    const tags = group.map(hashtagOf).filter(Boolean);
-    if (tags.length) lines.push(tags.map((t) => `#${t}`).join(""));
-    return lines.join("\n");
+    return [`${head.title}  ${slashDate(date)}【${anchor ?? ""}晚報】`, "", ...group.map((i) => i.title)].join("\n");
   }
 
-  /**
-   * Stories in one group still waiting for keywords. Keyword runs are per group on
-   * purpose: one press covers exactly the block about to be copied, instead of
-   * spending quota on every hit of the night at once.
-   */
-  function groupKeywordTargets(group) {
-    return group.filter((i) => !(i.keywords ?? "").trim() && ((i.title ?? "").trim() || (i.body ?? "").trim()));
+  function buildEveningGroupText(group, opts = {}) {
+    const head = buildEveningGroupHead(group, opts);
+    if (!head) return "";
+    const tags = groupTagLine(opts.groupTags?.[groupKey(group)]);
+    return tags ? `${head}\n${tags}` : head;
   }
+
 
   /** Slugs in the same groups and order, for looking stories up afterwards. */
   function buildEveningSlugList(items) {
@@ -434,7 +431,7 @@
 
   /**
    * Re-importing the same day must not throw away what was already edited. Cards are
-   * matched by slug and keep their title, keywords, hashtag and tick; everything
+   * matched by slug and keep their title, keywords and tick; everything
    * else (time, style, marker) comes fresh from the new import.
    */
   function mergeEveningEdits(fresh, previous) {
@@ -446,8 +443,6 @@
         ...item,
         title: p.title,
         keywords: p.keywords,
-        hashtag: p.hashtag,
-        hashtagManual: p.hashtagManual,
         status: p.status,
         matchedLine: p.matchedLine,
         included: p.included,
@@ -461,15 +456,15 @@
     eveningGroupSizes,
     splitIntoGroups,
     pickHeadline,
-    autoHashtag,
-    hashtagOf,
+    groupKey,
+    groupTagLine,
     eveningOutgoing,
     slashDate,
     mmddOf,
     buildEveningText,
     eveningGroups,
+    buildEveningGroupHead,
     buildEveningGroupText,
-    groupKeywordTargets,
     buildEveningSlugList,
     buildEveningExport,
     mergeEveningEdits,

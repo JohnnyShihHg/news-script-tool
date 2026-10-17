@@ -29,6 +29,7 @@
     "allow-export-collab-text",
     "allow-append-to-collab-doc",
     "allow-compare-evening",
+    "allow-generate-group-keywords",
     "allow-load-evening-state",
     "allow-save-evening-state"
   ]

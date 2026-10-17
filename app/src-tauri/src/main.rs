@@ -444,6 +444,52 @@ async fn generate_keywords_batch(
     Ok(results)
 }
 
+#[derive(Deserialize)]
+struct GroupKeywordRequest {
+    id: String,
+    header: String,
+    titles: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct GroupKeywordResult {
+    id: String,
+    keywords: Option<Vec<String>>,
+    error: Option<String>,
+}
+
+/// 晚報: one request per group, each returning `count` keywords for the whole group
+/// (its hashtag line) -- 9 stories in 2 groups cost 2 requests. Sequential for
+/// the same rate-limit reason as `generate_keywords_batch`; one group failing does
+/// not stop the others.
+#[tauri::command]
+async fn generate_group_keywords(
+    window: tauri::Window,
+    state: tauri::State<'_, AppState>,
+    groups: Vec<GroupKeywordRequest>,
+    count: usize,
+) -> Result<Vec<GroupKeywordResult>, String> {
+    require_main_window(&window)?;
+    let gemini_cfg = resolve_gemini_config(&state)?;
+    let client = build_gemini_client();
+    let total = groups.len();
+    let mut results = Vec::with_capacity(total);
+    for (idx, group) in groups.into_iter().enumerate() {
+        let _ = window.emit(
+            "keyword-progress",
+            KeywordProgress { done: idx, total, current: format!("第 {} 組", idx + 1) },
+        );
+        let outcome =
+            gemini::generate_group_keywords(&client, &gemini_cfg, &group.header, &group.titles, count).await;
+        results.push(match outcome {
+            Ok(words) => GroupKeywordResult { id: group.id, keywords: Some(words), error: None },
+            Err(e) => GroupKeywordResult { id: group.id, keywords: None, error: Some(e.to_string()) },
+        });
+    }
+    let _ = window.emit("keyword-progress", KeywordProgress { done: total, total, current: String::new() });
+    Ok(results)
+}
+
 // --- Phase 5: collaboration-tool webview + slug matching ---
 
 #[derive(Serialize)]
@@ -878,6 +924,7 @@ fn main() {
             export_collab_text,
             append_to_collab_doc,
             compare_evening,
+            generate_group_keywords,
             load_evening_state,
             save_evening_state
         ])

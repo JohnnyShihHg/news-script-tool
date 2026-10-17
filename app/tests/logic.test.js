@@ -493,8 +493,6 @@ const ev = (n, over = {}) => ({
   time: `18:${String(n).padStart(2, "0")}:00`,
   title: `合成標題${n}`,
   keywords: "",
-  hashtag: "",
-  hashtagManual: false,
   included: true,
   ...over,
 });
@@ -523,32 +521,49 @@ test("headline prefers 獨家, then 最新, then the first story", () => {
   assert.equal(L.pickHeadline([a]), a);
 });
 
-test("hashtag is the first keyword that appears in the title, else the first keyword", () => {
-  assert.equal(L.autoHashtag("轎車甩尾 烏龜翻 駕駛落跑", "#轎車失控 #烏龜翻 #燈桿 #追撞"), "烏龜翻");
-  assert.equal(L.autoHashtag("合成標題", "#甲 #乙"), "甲");
-  assert.equal(L.autoHashtag("合成標題", ""), "");
-  // A hand-typed hashtag sticks and loses any leading #.
-  assert.equal(L.hashtagOf(ev(1, { hashtag: "#自訂", hashtagManual: true, keywords: "#甲" })), "自訂");
+test("group hashtag line: generated keywords, unless something was typed by hand", () => {
+  assert.equal(L.groupTagLine({ auto: ["#烏龜翻", "#牛肉麵", "#西勢水庫", "#闖泳池"], manual: null }), "#烏龜翻#牛肉麵#西勢水庫#闖泳池");
+  assert.equal(L.groupTagLine({ auto: ["#甲"], manual: "#自訂 乙" }), "#自訂#乙");
+  // Clearing the hand-typed line falls back to the generated one.
+  assert.equal(L.groupTagLine({ auto: ["#甲"], manual: "  " }), "#甲");
+  assert.equal(L.groupTagLine(undefined), "");
 });
 
-test("evening text: header, blank, titles, hashtags; only ticked stories in running order", () => {
+test("evening text: header, blank, titles, group hashtags; only ticked stories in running order", () => {
   const items = [
-    ev(2, { title: "獨家》合成牛肉麵", keywords: "#牛肉麵 #湯底" }),
-    ev(1, { title: "合成烏龜翻落跑", keywords: "#轎車 #烏龜翻" }),
+    ev(2, { title: "獨家》合成牛肉麵", keywords: "#與清單無關" }),
+    ev(1, { title: "合成烏龜翻落跑" }),
     ev(3, { included: false }),
   ];
-  const text = L.buildEveningText(items, { date: "2026-10-17", anchor: "吳宇舒" });
+  const key = L.groupKey(L.eveningGroups(items)[0]);
+  const groupTags = { [key]: { auto: ["#烏龜翻", "#牛肉麵", "#甲", "#乙"], manual: null } };
+  const text = L.buildEveningText(items, { date: "2026-10-17", anchor: "吳宇舒", groupTags });
   assert.equal(
     text,
-    "獨家》合成牛肉麵  2026/10/17【吳宇舒晚報】\n\n合成烏龜翻落跑\n獨家》合成牛肉麵\n#烏龜翻#牛肉麵"
+    "獨家》合成牛肉麵  2026/10/17【吳宇舒晚報】\n\n合成烏龜翻落跑\n獨家》合成牛肉麵\n#烏龜翻#牛肉麵#甲#乙"
   );
+  // Per-card keywords never leak into the list, and no tags yet means no tag line.
+  assert.ok(!L.buildEveningText(items, { date: "2026-10-17", anchor: "吳宇舒" }).includes("#"));
 });
 
-test("evening text: each group gets its own header and hashtag line", () => {
-  const items = Array.from({ length: 10 }, (_, k) => ev(k + 1, { keywords: `#詞${k + 1}` }));
-  const text = L.buildEveningText(items, { date: "2026-10-17", anchor: "房業涵" });
+test("evening text: each group gets its own header and its own hashtag line", () => {
+  const items = Array.from({ length: 10 }, (_, k) => ev(k + 1));
+  const [g1, g2] = L.eveningGroups(items);
+  const groupTags = {
+    [L.groupKey(g1)]: { auto: ["#一組"], manual: null },
+    [L.groupKey(g2)]: { auto: ["#二組"], manual: null },
+  };
+  const text = L.buildEveningText(items, { date: "2026-10-17", anchor: "房業涵", groupTags });
   assert.equal((text.match(/【房業涵晚報】/g) || []).length, 2);
-  assert.ok(text.includes("#詞1#詞2#詞3#詞4#詞5\n\n合成標題6  2026/10/17"));
+  assert.ok(text.includes("合成標題5\n#一組\n\n合成標題6  2026/10/17"));
+  assert.ok(text.endsWith("合成標題10\n#二組"));
+});
+
+test("a group's key follows its stories, not its position", () => {
+  const items = Array.from({ length: 10 }, (_, k) => ev(k + 1));
+  const before = L.groupKey(L.eveningGroups(items)[0]);
+  items[9].included = false; // 9 left -> 4/5, first group changes
+  assert.notEqual(L.groupKey(L.eveningGroups(items)[0]), before);
 });
 
 test("evening export puts the slugs at the bottom; copy text has none", () => {
@@ -568,11 +583,11 @@ test("evening hit needs a doc hit and no 勿上網 note of its own", () => {
 });
 
 test("re-importing keeps edits by slug and takes fresh fields from the new import", () => {
-  const prev = [ev(1, { title: "改過的標題", hashtag: "手打", hashtagManual: true, status: "hit", included: true })];
+  const prev = [ev(1, { title: "改過的標題", keywords: "#手打", status: "hit", included: true })];
   const fresh = [ev(1, { title: "原標題", time: "19:00:00", included: false }), ev(2)];
   const merged = L.mergeEveningEdits(fresh, prev);
   assert.equal(merged[0].title, "改過的標題");
-  assert.equal(merged[0].hashtag, "手打");
+  assert.equal(merged[0].keywords, "#手打");
   assert.equal(merged[0].time, "19:00:00");
   assert.equal(merged[0].included, true);
   assert.equal(merged[1].title, "合成標題2");
@@ -591,10 +606,10 @@ test("evening card from a parse failure is null", () => {
   assert.equal(item.id, "ev-2");
 });
 
-test("group keyword targets cover only that group's stories still missing keywords", () => {
-  const items = Array.from({ length: 10 }, (_, k) => ev(k + 1, { keywords: k === 0 ? "#已有" : "" }));
-  const [first, second] = L.eveningGroups(items);
-  assert.deepEqual(L.groupKeywordTargets(first).map((i) => i.id), ["ev-2", "ev-3", "ev-4", "ev-5"]);
-  assert.equal(L.groupKeywordTargets(second).length, 5);
-  assert.ok(L.groupKeywordTargets(second).every((i) => !first.includes(i)));
+test("evening groups match what the copied text is built from", () => {
+  const items = Array.from({ length: 10 }, (_, k) => ev(k + 1));
+  const groups = L.eveningGroups(items);
+  assert.deepEqual(groups.map((g) => g.length), [5, 5]);
+  const opts = { date: "2026-10-17", anchor: "吳宇舒" };
+  assert.equal(groups.map((g) => L.buildEveningGroupText(g, opts)).join("\n\n"), L.buildEveningText(items, opts));
 });

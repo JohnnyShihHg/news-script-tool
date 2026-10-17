@@ -21,12 +21,13 @@ const {
   eveningItemFromDto,
   isEveningHit,
   sortByTime: sortEvening,
-  autoHashtag,
+  groupKey,
+  groupTagLine,
+  buildEveningGroupHead,
   mmddOf,
   buildEveningText,
   eveningGroups,
   buildEveningGroupText,
-  groupKeywordTargets,
   buildEveningSlugList,
   buildEveningExport,
   mergeEveningEdits,
@@ -1284,12 +1285,16 @@ async function openSettings() {
 let viewMode = "script";
 /** @type {Array<any>} */
 let evItems = [];
+/** Each group's hashtag line, keyed by groupKey: { auto: ["#a", ...], manual: string|null }. */
+let evGroupTags = {};
 /** Date the current cards were imported/compared for, so edits only carry over
  *  between imports of the same day. */
 let evItemsDate = "";
 let eveningOpts = { exclusivePrefix: "獨家》", latestPrefix: "最新》" };
 let evSaveTimer = null;
 let evStateLoaded = false;
+/** True while a 產生關鍵字 run over the groups is in flight. */
+let evGroupRun = false;
 
 function todayIso() {
   const d = new Date();
@@ -1329,7 +1334,7 @@ function applyEveningConfig(config) {
 }
 
 function evOutputOpts() {
-  return { date: el("evDate").value, anchor: el("evAnchor").value, ...eveningOpts };
+  return { date: el("evDate").value, anchor: el("evAnchor").value, groupTags: evGroupTags, ...eveningOpts };
 }
 
 // Debounced so typing in a title does not write the file on every keystroke.
@@ -1347,6 +1352,7 @@ async function saveEveningNow() {
     anchor: el("evAnchor").value,
     itemsDate: evItemsDate,
     items: evItems.map(({ keywordStatus, keywordError, ...rest }) => rest),
+    groupTags: evGroupTags,
   };
   try {
     await invoke("save_evening_state", { json: JSON.stringify(state) });
@@ -1370,6 +1376,7 @@ async function loadEvening() {
       if (state.date === todayIso() && Array.isArray(state.items)) {
         evItems = state.items.map((i) => ({ ...i, keywordStatus: "idle", keywordError: "" }));
         evItemsDate = state.itemsDate ?? state.date;
+        evGroupTags = state.groupTags && typeof state.groupTags === "object" ? state.groupTags : {};
       }
     }
   } catch (err) {
@@ -1394,8 +1401,10 @@ async function importEvening() {
     return;
   }
   const fresh = sortEvening(summary.entries.map(eveningItemFromDto).filter(Boolean));
-  // Same day: keep titles/hashtags already edited. Another day: start clean.
-  evItems = evItemsDate === date ? mergeEveningEdits(fresh, evItems) : fresh;
+  // Same day: keep titles and hashtag lines already edited. Another day: start clean.
+  const sameDay = evItemsDate === date;
+  evItems = sameDay ? mergeEveningEdits(fresh, evItems) : fresh;
+  if (!sameDay) evGroupTags = {};
   evItemsDate = date;
   renderEvening();
   saveEveningSoon();
@@ -1429,8 +1438,8 @@ async function compareEvening({ silent = false } = {}) {
     const hits = evItems.filter((i) => i.included).length;
     evStatus(
       `比對完成（${mmdd}）：命中 ${hits} 則，未命中 ${evItems.length - hits} 則。` +
-        (hits > 0 && hasApiKey && evItems.some((i) => i.included && !i.keywords.trim())
-          ? "在上方清單各組按「產生本組關鍵字」補上 hashtag 用的關鍵字。"
+        (hits > 0 && hasApiKey
+          ? "按「產生關鍵字」替清單每一組產生 hashtag（一組送一次）。"
           : "")
     );
     renderEvening();
@@ -1491,10 +1500,54 @@ const EV_STATUS_LABEL = {
   note_no_upload: "備註勿上網",
 };
 
+/// 晚報 產生關鍵字: one Gemini request per group, sending the group exactly as it
+/// will be copied (header line + titles) and getting back 4 keywords for the group
+/// as a whole -- its hashtag line. 9 stories in 2 groups cost 2 requests, not 9.
+/// Every press regenerates every group; a hand-edited line is kept, since that is
+/// the one thing a person deliberately decided.
+async function generateEveningGroupKeywords() {
+  const opts = evOutputOpts();
+  const groups = eveningGroups(evItems);
+  if (groups.length === 0 || evGroupRun) return;
+  evGroupRun = true;
+  renderEveningOutput();
+  showProgress(0, groups.length, `產生關鍵字 第 1 / ${groups.length} 組`);
+  const requests = groups.map((group, g) => ({
+    id: `g${g}`,
+    header: buildEveningGroupHead(group, opts).split("\n")[0],
+    titles: group.map((i) => i.title),
+  }));
+  try {
+    const results = await invoke("generate_group_keywords", { groups: requests, count: KEYWORD_COUNT });
+    const failed = [];
+    results.forEach((r, g) => {
+      const group = groups[g];
+      if (!group) return;
+      if (r.keywords) {
+        const key = groupKey(group);
+        evGroupTags[key] = { auto: r.keywords, manual: evGroupTags[key]?.manual ?? null };
+      } else {
+        failed.push(`第 ${g + 1} 組：${r.error ?? "未知錯誤"}`);
+      }
+    });
+    evStatus(
+      failed.length
+        ? `⚠ ${groups.length} 組中有 ${failed.length} 組沒產生成功，請再按一次「產生關鍵字」。\n${failed.join("\n")}`
+        : `✅ 已替 ${groups.length} 組產生關鍵字（共送出 ${groups.length} 次請求）。`,
+      failed.length > 0
+    );
+  } catch (err) {
+    hideProgress();
+    evStatus(`⚠ 產生關鍵字失敗：${err}`, true);
+  }
+  evGroupRun = false;
+  renderEveningOutput();
+  saveEveningSoon();
+}
+
 function eveningCardHtml(item) {
   const statusLabel = item.status ? EV_STATUS_LABEL[item.status] : "尚未比對";
   const statusClass = item.status === "note_no_upload" ? "no_online" : item.status ?? "pending";
-  const auto = autoHashtag(item.title, item.keywords);
   const marker = (item.marker ?? "").trim();
   return `
     <div class="card ${item.included ? "ev-hit" : "ev-miss"} ${item.collapsed === false ? "" : "collapsed"}" data-id="${item.id}">
@@ -1518,7 +1571,7 @@ function eveningCardHtml(item) {
           <input type="text" class="ev-title" data-id="${item.id}" value="${escapeHtml(item.title)}" />
         </div>
         <div class="field">
-          <label>關鍵字（空格分隔）</label>
+          <label>關鍵字（輔助用，不會進清單；清單的 hashtag 行由「產生關鍵字」逐組產生）</label>
           <div class="keywords-row">
             <input type="text" class="ev-keywords" data-id="${item.id}" value="${escapeHtml(item.keywords)}" placeholder="#關鍵字1 #關鍵字2 #關鍵字3 #關鍵字4" />
             <button class="ev-gen-one" data-id="${item.id}" ${!hasApiKey || item.keywordStatus === "loading" ? "disabled" : ""}>
@@ -1527,13 +1580,17 @@ function eveningCardHtml(item) {
           </div>
           ${item.keywordStatus === "error" ? `<div class="w">⚠ 產生失敗：${escapeHtml(item.keywordError)}</div>` : ""}
         </div>
-        <div class="field">
-          <label>Hashtag（留空＝自動：取第一個出現在標題裡的關鍵字）</label>
-          <input type="text" class="ev-hashtag" data-id="${item.id}" value="${escapeHtml(item.hashtagManual ? item.hashtag : "")}" placeholder="${escapeHtml(auto ? `自動：#${auto}` : "（尚無關鍵字）")}" />
-        </div>
         ${item.matchedLine ? `<div class="muted">協作文件：${escapeHtml(item.matchedLine)}</div>` : ""}
       </div>
     </div>`;
+}
+
+function groupTagInputHtml(group) {
+  const key = groupKey(group);
+  const entry = evGroupTags[key];
+  const value = entry?.manual ?? groupTagLine(entry);
+  return `<input type="text" class="ev-tagline" data-key="${escapeHtml(key)}" value="${escapeHtml(value)}"
+    placeholder="按「產生關鍵字」產生這組的 hashtag，或直接輸入（例：#烏龜翻#牛肉麵）" />`;
 }
 
 function renderEveningOutput() {
@@ -1541,31 +1598,35 @@ function renderEveningOutput() {
   const text = buildEveningText(evItems, opts);
   const groups = eveningGroups(evItems);
   el("evPreview").innerHTML = groups
-    .map((group, g) => {
-      const pending = groupKeywordTargets(group);
-      const loading = group.some((i) => i.keywordStatus === "loading");
-      const label = loading
-        ? "產生中…"
-        : pending.length
-          ? `產生本組關鍵字（${pending.length}）`
-          : "本組已有關鍵字";
-      return `
+    .map((group, g) => `
         <div class="ev-group">
           <div class="ev-group-head">
-            ${groups.length > 1 ? `<span>第 ${g + 1} 組・${group.length} 則</span>` : `<span>${group.length} 則</span>`}
-            <button class="ev-gen-group" data-group="${g}" ${!hasApiKey || loading || pending.length === 0 ? "disabled" : ""}
-              title="${hasApiKey ? "只替這一組還沒有關鍵字的稿件產生" : "尚未設定 Gemini API key，請到設定頁輸入"}">${label}</button>
+            <span>${groups.length > 1 ? `第 ${g + 1} 組・` : ""}${group.length} 則</span>
           </div>
-          <pre class="ev-pre">${escapeHtml(buildEveningGroupText(group, opts))}</pre>
-        </div>`;
-    })
+          <pre class="ev-pre">${escapeHtml(buildEveningGroupHead(group, opts))}</pre>
+          ${groupTagInputHtml(group)}
+        </div>`)
     .join("");
-  document.querySelectorAll(".ev-gen-group").forEach((btn) =>
-    btn.addEventListener("click", () => {
-      const group = eveningGroups(evItems)[Number(btn.dataset.group)];
-      if (group) generateEveningKeywords(groupKeywordTargets(group));
+  // Typing in a hashtag line only stores it -- re-rendering here would drop the caret.
+  document.querySelectorAll(".ev-tagline").forEach((input) =>
+    input.addEventListener("input", (e) => {
+      const key = e.target.dataset.key;
+      const entry = evGroupTags[key] ?? { auto: [], manual: null };
+      // Emptying the line hands it back to the generated keywords.
+      entry.manual = e.target.value.trim() === "" ? null : e.target.value;
+      evGroupTags[key] = entry;
+      const copyable = buildEveningText(evItems, evOutputOpts());
+      el("evCopyBtn").disabled = !copyable;
+      el("evSaveBtn").disabled = !copyable;
+      saveEveningSoon();
     })
   );
+  const btn = el("evGenKeywordsBtn");
+  btn.disabled = !hasApiKey || evGroupRun || groups.length === 0;
+  btn.textContent = evGroupRun ? "產生中…" : groups.length > 1 ? `產生關鍵字（${groups.length} 組）` : "產生關鍵字";
+  btn.title = hasApiKey
+    ? "替清單每一組產生關鍵字：一組送一次請求，整組的標題一起送"
+    : "尚未設定 Gemini API key，請到設定頁輸入";
   el("evSlugs").textContent = buildEveningSlugList(evItems);
   el("evOutput").classList.toggle("hidden", !text);
   el("evCopyBtn").disabled = !text;
@@ -1594,10 +1655,6 @@ function renderEvening() {
     );
   onEdit(".ev-title", (item, v) => { item.title = v; });
   onEdit(".ev-keywords", (item, v) => { item.keywords = v; });
-  onEdit(".ev-hashtag", (item, v) => {
-    item.hashtag = v;
-    item.hashtagManual = v.trim() !== "";
-  });
   document.querySelectorAll(".ev-include").forEach((elm) =>
     elm.addEventListener("change", (e) => {
       const item = find(e);
@@ -1628,8 +1685,10 @@ el("modeEveningBtn").addEventListener("click", () => setMode("evening"));
 el("evImportBtn").addEventListener("click", importEvening);
 el("evOpenCollabBtn").addEventListener("click", () => openCollab(el("evStatus")));
 el("evCompareBtn").addEventListener("click", () => compareEvening());
+el("evGenKeywordsBtn").addEventListener("click", generateEveningGroupKeywords);
 el("evClearBtn").addEventListener("click", () => {
   evItems = [];
+  evGroupTags = {};
   el("evStatus").classList.add("hidden");
   renderEvening();
   saveEveningSoon();

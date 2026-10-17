@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-generate-group-keywords"
+description = "Enables the generate_group_keywords command without any pre-configured scope."
+commands.allow = ["generate_group_keywords"]
+
+[[permission]]
+identifier = "deny-generate-group-keywords"
+description = "Denies the generate_group_keywords command without any pre-configured scope."
+commands.deny = ["generate_group_keywords"]

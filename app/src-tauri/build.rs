@@ -29,6 +29,7 @@ fn main() {
             "export_collab_text",
             "append_to_collab_doc",
             "compare_evening",
+            "generate_group_keywords",
             "load_evening_state",
             "save_evening_state",
         ])),

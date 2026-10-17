@@ -165,15 +165,77 @@ pub async fn generate_keywords(
     body: &str,
     count: usize,
 ) -> Result<Vec<String>, GeminiError> {
+    let text = request_json_text(
+        client,
+        cfg,
+        &keyword_prompt(title, body, count + SPARE_KEYWORDS),
+        keyword_response_schema(count + SPARE_KEYWORDS),
+    )
+    .await?;
+    let words = parse_keywords_json(&text)?;
+    let words = drop_reporter_names(words, &format!("{title}\n{body}"), count);
+    if words.is_empty() {
+        return Err(GeminiError::Parse("產生的關鍵字都是記者姓名，請重試".to_string()));
+    }
+    Ok(words)
+}
+
+fn group_keyword_prompt(header: &str, titles: &[String], count: usize) -> String {
+    let list: String = titles.iter().map(|t| format!("{t}\n")).collect();
+    let n = titles.len();
+    format!(
+        "你是新聞編輯。以下是一節晚報的標題清單，共 {n} 則。\n\
+         請替這整組清單產生正好 {count} 個繁體中文關鍵字，會放在清單最後一行當作這組的 hashtag。\n\n\
+         規則：\n\
+         1. 正好 {count} 個，代表這組裡最重要、最有辨識度的新聞；盡量取自不同則，不要 {count} 個都出自同一則。\n\
+         2. 每個關鍵字必須是標題裡原本就有的連續文字，例如「烏龜翻」「牛肉麵」「西勢水庫」「闖泳池」；不可改寫、不可杜撰。\n\
+         3. 避免純數字、金額、時間，也避免「獨家」「最新」這類標題前綴，以及主播、記者姓名。\n\
+         4. 每個關鍵字精簡（通常 2-5 字），不要加 # 號。\n\
+         5. 依清單中出現的順序排列。\n\
+         6. 直接輸出 JSON 字串陣列，不要加任何說明文字或 markdown 標記。\n\n\
+         {header}\n\n{list}"
+    )
+}
+
+/// `count` keywords for a whole 晚報 group -- its hashtag line -- in a single
+/// request, however many stories the group holds.
+pub async fn generate_group_keywords(
+    client: &reqwest::Client,
+    cfg: &GeminiConfig,
+    header: &str,
+    titles: &[String],
+    count: usize,
+) -> Result<Vec<String>, GeminiError> {
+    if titles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let text = request_json_text(
+        client,
+        cfg,
+        &group_keyword_prompt(header, titles, count),
+        keyword_response_schema(count),
+    )
+    .await?;
+    Ok(parse_keywords_json(&text)?.into_iter().take(count).collect())
+}
+
+/// POST one prompt expecting a JSON response and return the model's text. Retries
+/// 429/5xx up to 3 times with exponential backoff; other errors return immediately.
+async fn request_json_text(
+    client: &reqwest::Client,
+    cfg: &GeminiConfig,
+    prompt: &str,
+    schema: serde_json::Value,
+) -> Result<String, GeminiError> {
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         cfg.model, cfg.api_key
     );
     let payload = serde_json::json!({
-        "contents": [{ "parts": [{ "text": keyword_prompt(title, body, count + SPARE_KEYWORDS) }] }],
+        "contents": [{ "parts": [{ "text": prompt }] }],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": keyword_response_schema(count + SPARE_KEYWORDS),
+            "responseSchema": schema,
         }
     });
 
@@ -199,15 +261,9 @@ pub async fn generate_keywords(
                 Ok(p) => p,
                 Err(e) => return Err(GeminiError::Parse(e.to_string())),
             };
-            let text = parsed
+            return parsed
                 .first_text()
-                .ok_or_else(|| GeminiError::Parse("回應中沒有內容".to_string()))?;
-            let words = parse_keywords_json(&text)?;
-            let words = drop_reporter_names(words, &format!("{title}\n{body}"), count);
-            if words.is_empty() {
-                return Err(GeminiError::Parse("產生的關鍵字都是記者姓名，請重試".to_string()));
-            }
-            return Ok(words);
+                .ok_or_else(|| GeminiError::Parse("回應中沒有內容".to_string()));
         }
 
         let retryable = status.as_u16() == 429 || status.is_server_error();
@@ -313,6 +369,15 @@ mod tests {
     #[test]
     fn empty_array_is_an_error_not_a_silent_empty_result() {
         assert!(parse_keywords_json("[]").is_err());
+    }
+
+    #[test]
+    fn group_prompt_sends_the_whole_group_and_asks_for_count_in_total() {
+        let titles = vec!["合成甲標題".to_string(), "合成乙標題".to_string()];
+        let prompt = group_keyword_prompt("合成甲標題  2026/10/17【合成晚報】", &titles, 4);
+        assert!(prompt.contains("合成甲標題\n合成乙標題"));
+        assert!(prompt.contains("共 2 則") && prompt.contains("這整組清單產生正好 4 個"));
+        assert!(prompt.contains("【合成晚報】"));
     }
 
     #[test]
