@@ -37,6 +37,24 @@ pub struct FilterConfig {
     /// the entry is fully parsed and can be ticked back on.
     #[serde(default = "default_blocked_note_terms")]
     pub blocked_note_terms: Vec<String>,
+    /// Terms in the slug that keep a blank-樣式 row out of 解析失敗 without setting a
+    /// style. `專` names a 專題, which can run in any format, so it is not a style --
+    /// it only means "this is a story", leaving 未知樣式 for a human to call.
+    #[serde(default = "default_slug_keep_terms")]
+    pub slug_keep_terms: Vec<String>,
+    /// `尾碼=樣式` pairs read off the last `-` segment of 影像編號, used only when 樣式
+    /// is blank and the slug names no style. `X5` is the camera code for an SL fake
+    /// live hit (`20261023-585-X5`), which producers often leave 樣式 blank on.
+    #[serde(default = "default_video_id_styles")]
+    pub video_id_styles: Vec<String>,
+}
+
+fn default_video_id_styles() -> Vec<String> {
+    vec!["X5=SL".into()]
+}
+
+fn default_slug_keep_terms() -> Vec<String> {
+    vec!["專".into()]
 }
 
 fn default_blocked_note_terms() -> Vec<String> {
@@ -44,7 +62,8 @@ fn default_blocked_note_terms() -> Vec<String> {
 }
 
 fn default_slug_style_terms() -> Vec<String> {
-    vec!["推播".into()]
+    // SLIVE before SL: the first match wins, and every SLIVE slug also contains SL.
+    vec!["推播".into(), "SLIVE".into(), "SL".into(), "連線".into()]
 }
 
 /// The fallback shipped before v0.2.4, which only knew plain `[BAR]`.
@@ -69,6 +88,8 @@ impl Default for FilterConfig {
             title_tag_fallback_pattern: default_title_tag_fallback_pattern(),
             slug_style_terms: default_slug_style_terms(),
             blocked_note_terms: default_blocked_note_terms(),
+            slug_keep_terms: default_slug_keep_terms(),
+            video_id_styles: default_video_id_styles(),
         }
     }
 }
@@ -311,7 +332,7 @@ impl Default for EveningConfig {
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 5;
+pub const CURRENT_CONFIG_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -367,6 +388,8 @@ pub fn migrate(cfg: &mut Config) -> bool {
     union(&mut cfg.filter.allowed_styles, &defaults.filter.allowed_styles);
     union(&mut cfg.markers.refresh_keywords, &defaults.markers.refresh_keywords);
     union(&mut cfg.filter.slug_style_terms, &defaults.filter.slug_style_terms);
+    union(&mut cfg.filter.slug_keep_terms, &defaults.filter.slug_keep_terms);
+    union(&mut cfg.filter.video_id_styles, &defaults.filter.video_id_styles);
     union(&mut cfg.evening.no_online_markers, &defaults.evening.no_online_markers);
 
     // v0.1.9 switched the slug-line markers from 【】 to half-width (). These are
@@ -477,7 +500,7 @@ theme = "warm"
         // field without its own default would make every existing config.toml fail
         // to parse — the app would come up with factory settings.
         let cfg = load_from_str(legacy_toml()).unwrap();
-        assert_eq!(cfg.filter.slug_style_terms, vec!["推播".to_string()]);
+        assert_eq!(cfg.filter.slug_style_terms, vec!["推播".to_string(), "SLIVE".to_string(), "SL".to_string(), "連線".to_string()]);
         assert_eq!(cfg.filter.blocked_note_terms, vec!["預告".to_string()]);
     }
 

@@ -109,7 +109,7 @@ async fn main() {
 
     report.push_str("\n=== 解析失敗（需回頭檢查原始檔）===\n");
     for o in &summary.failed {
-        if let Outcome::ParseFailed { file_name, reason } = o {
+        if let Outcome::ParseFailed { file_name, reason, .. } = o {
             report.push_str(&format!("  {}　-- {}\n", file_name, reason));
         }
     }

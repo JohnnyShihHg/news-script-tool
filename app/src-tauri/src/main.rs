@@ -56,7 +56,9 @@ enum EntryDto {
     UnknownStyle(EntryFields),
     NeedsManualContent(EntryFields),
     FilteredByStyle(EntryFields),
-    ParseFailed { file_name: String, reason: String },
+    /// Carries the full entry like every other bucket (reason first in `warnings`),
+    /// so it can be ticked for output.
+    ParseFailed(EntryFields),
 }
 
 #[derive(Serialize, Clone)]
@@ -127,7 +129,8 @@ fn read_txt_files(folder: &str) -> std::io::Result<Vec<(String, String)>> {
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("txt") {
+        // Case-insensitive: an export saved as `.TXT` used to be skipped without a word.
+        if path.is_file() && path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             let bytes = std::fs::read(&path)?;
             let text = parse::decode_and_normalize(&bytes);
@@ -167,11 +170,8 @@ async fn import_folder(window: tauri::Window, state: tauri::State<'_, AppState>,
         }
     }
     for o in &summary.failed {
-        if let Outcome::ParseFailed { file_name, reason } = o {
-            entries.push(EntryDto::ParseFailed {
-                file_name: file_name.clone(),
-                reason: reason.clone(),
-            });
+        if let Outcome::ParseFailed { entry, .. } = o {
+            entries.push(EntryDto::ParseFailed(entry.as_ref().into()));
         }
     }
 
@@ -790,19 +790,28 @@ async fn append_to_collab_doc(
     eval_in_collab_and_wait(&app, &state, &script).await
 }
 
+#[derive(Deserialize)]
+struct CompareEntry {
+    slug: String,
+    #[serde(default)]
+    time: String,
+}
+
 #[tauri::command]
 async fn compare_with_collab_doc(
     window: tauri::Window,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    slugs: Vec<String>,
+    entries: Vec<CompareEntry>,
 ) -> Result<Vec<MatchResultDto>, String> {
     require_main_window(&window)?;
     let doc_text = scrape_collab_text(&app, &state).await?;
 
     let refresh_keywords = state.config.lock().unwrap().markers.refresh_keywords.clone();
+    // Results come back in the order sent: the UI pairs them by position, since two
+    // versions of one slug (different 累積時間) can now get different answers.
     let results = news_script_core::doc_match::match_all(
-        slugs.iter().map(|s| s.as_str()),
+        entries.iter().map(|e| (e.slug.as_str(), e.time.as_str())),
         &doc_text,
         &refresh_keywords,
     );

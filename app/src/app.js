@@ -306,17 +306,6 @@ function cardHtml(item) {
   const { dto, kind, bucket, id } = item;
   const fields = dto[kind] ?? dto;
 
-  if (kind === "ParseFailed") {
-    return `
-      <div class="card failed" data-bucket="${bucket}">
-        <div class="card-head">
-          <span class="badge failed">解析失敗</span>
-          <span class="file-name">${escapeHtml(fields.file_name)}</span>
-        </div>
-        <div class="reason">${escapeHtml(fields.reason)}</div>
-      </div>`;
-  }
-
   const badgeLabel = {
     Passed: "通過",
     UnknownStyle: "未知樣式",
@@ -325,6 +314,9 @@ function cardHtml(item) {
     // slug and body are there so a BS story that unexpectedly needs to go out can be
     // ticked on the spot rather than requiring a blocklist edit and a re-import.
     FilteredByStyle: "已濾除",
+    // Also a full card, unticked: the reason is the first warning, and whatever could
+    // be parsed is already in the fields so a wrongly judged row is one tick away.
+    ParseFailed: "解析失敗",
   }[kind];
   const titleDiff = renderDiff(fields.raw_title, fields.raw_title !== undefined ? item.title : "");
   const bodyDiff = renderDiff(fields.raw_body, fields.raw_body !== undefined ? item.body : "");
@@ -810,15 +802,18 @@ async function compareWithCollabDoc({ silent = false } = {}) {
   // written out has to be checked against the doc like any other, or the duplicate
   // guard would have nothing to go on for exactly the entries a human picked by hand.
   const targets = items.filter((i) => canOutputBucket(i.bucket));
-  const slugs = targets.map((i) => (i.dto[i.kind] ?? i.dto).slug);
+  // 累積時間 goes along so a (抓新) line is only a re-grab for a *different* version.
+  const entries = targets.map((i) => {
+    const f = i.dto[i.kind] ?? i.dto;
+    return { slug: f.slug, time: f.time ?? "" };
+  });
 
   try {
-    const results = await invoke("compare_with_collab_doc", { slugs });
-    const bySlug = new Map(results.map((r) => [r.slug, r]));
+    const results = await invoke("compare_with_collab_doc", { entries });
     const matched = [];
-    for (const item of targets) {
-      const slug = (item.dto[item.kind] ?? item.dto).slug;
-      const r = bySlug.get(slug);
+    // Paired by position, not slug: two versions of one slug can now differ.
+    for (const [n, item] of targets.entries()) {
+      const r = results[n];
       if (!r) continue;
       item.matchStatus = r.status;
       item.matchedLine = r.matched_line;
@@ -1075,6 +1070,10 @@ function settingsModalHtml(config, apiStatus) {
             <div class="muted">氣象稿（只有 [BAR]）、部分 LIVE 稿（只有 [BAR_最新]）這類沒有 [BAR_..大] 的稿件會用這個標記，取第一張字卡的標題。只在上面的標記整份稿子都找不到時才啟用，不會搶在正常標記前面。</div>
             ${styleField("樣式空白時改看 slug slug_style_terms", "filter.slug_style_terms", config.filter.slug_style_terms)}
             <div class="muted">有些稿件不填「樣式」，直接把類型寫在新聞名稱裡（例：心喻14推播）。樣式欄真的空白時才會用這裡的詞去比對 slug，比中就當成該樣式處理並在該則標上提醒；樣式欄有填就一律以樣式欄為準。同樣只比對完整詞。</div>
+            ${styleField("樣式空白時看影像編號尾碼 video_id_styles（尾碼=樣式）", "filter.video_id_styles", config.filter.video_id_styles)}
+            <div class="muted">樣式空白、slug 也判斷不出來時，看影像編號最後一段（例：20261023-585-X5 的 X5）。格式「尾碼=樣式」，例：X5=SL。</div>
+            ${styleField("樣式空白時 slug 含這些詞就保留 slug_keep_terms", "filter.slug_keep_terms", config.filter.slug_keep_terms)}
+            <div class="muted">樣式空白、slug 又判斷不出樣式時，slug 含這裡的詞（例：專）就不丟進「解析失敗」，改放「未知樣式」讓你決定；樣式欄維持空白。</div>
             ${styleField("編輯備註含這些詞就濾除 blocked_note_terms", "filter.blocked_note_terms", config.filter.blocked_note_terms)}
             <div class="muted">編輯備註裡出現這裡的詞（例：預告），不管樣式是什麼都直接放進「已濾除」，需要時仍可在已濾除勾回來。</div>
           </section>
@@ -1156,6 +1155,8 @@ const LIST_FIELDS = new Set([
   "filter.excluded_slug_suffixes",
   "filter.flag_styles",
   "filter.slug_style_terms",
+  "filter.slug_keep_terms",
+  "filter.video_id_styles",
   "filter.blocked_note_terms",
   "markers.refresh_keywords",
   "annotations.no_upload_terms",

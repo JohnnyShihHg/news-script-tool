@@ -224,6 +224,29 @@ pub fn note_style_term(editor_note: &str, cfg: &FilterConfig) -> Option<String> 
     style_term_in(editor_note, cfg)
 }
 
+/// Style from the 影像編號 suffix (`20261023-585-X5` → `SL` under `X5=SL`). Only the
+/// whole last `-` segment counts, so `X15` never reads as `X5`.
+pub fn style_from_video_id(video_id: &str, cfg: &FilterConfig) -> Option<String> {
+    let last = video_id.trim().rsplit('-').next().unwrap_or("");
+    if last.is_empty() {
+        return None;
+    }
+    cfg.video_id_styles.iter().find_map(|pair| {
+        let pair = pair.replace('＝', "=");
+        let (suffix, style) = pair.split_once('=')?;
+        (eq_ci(suffix.trim(), last) && !style.trim().is_empty()).then(|| style.trim().to_string())
+    })
+}
+
+/// A slug term that marks a blank-樣式 row as a story without naming its format
+/// (`專`), so it lands in 未知樣式 instead of 解析失敗.
+pub fn slug_keep_term(slug: &str, cfg: &FilterConfig) -> Option<String> {
+    cfg.slug_keep_terms
+        .iter()
+        .find(|t| !t.trim().is_empty() && fold(slug).contains(&fold(t)))
+        .map(|t| t.trim().to_string())
+}
+
 fn style_term_in(text: &str, cfg: &FilterConfig) -> Option<String> {
     cfg.slug_style_terms
         .iter()

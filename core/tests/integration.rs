@@ -34,6 +34,19 @@ fn fixture<'a>(files: &'a [(String, String)], name: &str) -> (&'a str, &'a str) 
         .unwrap_or_else(|| panic!("fixture {name} present"))
 }
 
+/// A former silent skip: in 解析失敗, still carrying its parsed entry with the
+/// reason as the first warning, so it can be ticked on by hand.
+fn assert_demoted(outcome: Outcome, why: &str) -> news_script_core::model::NewsEntry {
+    match outcome {
+        Outcome::ParseFailed { reason, entry, .. } => {
+            assert!(reason.contains(why), "reason was {reason:?}");
+            assert_eq!(entry.warnings.first(), Some(&reason));
+            *entry
+        }
+        other => panic!("expected ParseFailed, got {other:?}"),
+    }
+}
+
 #[test]
 fn sample_folder_classifies_every_file_without_panicking() {
     let files = load_fixtures();
@@ -41,7 +54,8 @@ fn sample_folder_classifies_every_file_without_panicking() {
     let cfg = Config::default();
     let summary = import_files(&files, &cfg);
 
-    // Every file must land in exactly one bucket or be silently Skipped; running the
+    // Every file must land in exactly one bucket -- nothing is dropped silently any
+    // more. Running the
     // whole set through without panicking round-trips the entire pipeline.
     assert!(summary.passed.len() >= 5, "expected several SOT/短sot entries to pass");
     assert!(!summary.filtered.is_empty(), "expected BS/SO to be filtered");
@@ -151,11 +165,11 @@ fn so_style_is_filtered() {
 }
 
 #[test]
-fn sou_suffix_files_are_silently_skipped() {
+fn sou_suffix_files_go_to_parse_failed_instead_of_vanishing() {
     let files = load_fixtures();
     let (name, text) = fixture(&files, "合成連線報導sou.txt");
     let cfg = Config::default();
-    assert_eq!(process_text(name, text, &cfg), Outcome::Skipped);
+    assert_demoted(process_text(name, text, &cfg), "SOU");
 }
 
 #[test]
@@ -170,23 +184,24 @@ fn tel_file_with_no_content_needs_manual_content_and_gets_prefixed_slug() {
 }
 
 #[test]
-fn empty_rundown_placeholder_is_silently_skipped() {
+fn empty_rundown_placeholder_goes_to_parse_failed_instead_of_vanishing() {
     let files = load_fixtures();
     let cfg = Config::default();
     for placeholder in ["TMP.txt", "=====CM1=======.txt", "下節預告1.txt", "話題人物.txt"] {
         let (name, text) = fixture(&files, placeholder);
-        assert_eq!(process_text(name, text, &cfg), Outcome::Skipped, "{placeholder} should be skipped");
+        assert_demoted(process_text(name, text, &cfg), "節目結構");
     }
 }
 
 #[test]
-fn blank_style_rows_are_silently_skipped_even_with_real_text_in_the_body() {
+fn blank_style_rows_keep_their_parsed_body_in_parse_failed() {
     let files = load_fixtures();
-    // Carries body text but an empty 樣式 field — per user decision, a blank style
-    // alone means "not a news script", regardless of what the body holds.
+    // Carries body text but an empty 樣式 field. A blank style still means "probably
+    // not a news script", but the body is kept so a wrong call costs one tick.
     let (name, text) = fixture(&files, "合成空白樣式0800.txt");
     let cfg = Config::default();
-    assert_eq!(process_text(name, text, &cfg), Outcome::Skipped);
+    let entry = assert_demoted(process_text(name, text, &cfg), "樣式空白");
+    assert!(!entry.body.is_empty(), "the parsed body must survive the demotion");
 }
 
 #[test]
@@ -307,14 +322,91 @@ fn blank_style_row_with_push_in_the_note_and_a_real_body_lands_in_unknown_style(
 }
 
 #[test]
-fn blank_style_row_with_no_hint_anywhere_is_still_silently_skipped() {
-    // The other half of the rule: genuine rundown structure (bumpers, sponsor spots)
-    // must keep vanishing, or every import fills up with noise.
+fn blank_style_row_with_no_hint_anywhere_is_parsed_into_parse_failed() {
+    // Genuine rundown structure (bumpers, sponsor spots) stays out of the normal
+    // buckets, but lands in 解析失敗 fully parsed rather than vanishing.
     let text = "編輯備註: 攝影小王\n新聞名稱(標題): 合成片頭\n樣式:\n累積時間: 15:10:00\n\
                 _______________________________________________________________\n\
                 [<\n[BAR_最新大]\nT2合成標題\n>]\n今天台北天氣炎熱。\n";
     let cfg = Config::default();
-    assert_eq!(process_text("bumper.txt", text, &cfg), Outcome::Skipped);
+    let entry = assert_demoted(process_text("bumper.txt", text, &cfg), "樣式空白");
+    assert_eq!(entry.slug, "合成片頭");
+    assert!(entry.title.contains("合成標題"));
+    assert_eq!(entry.body, "今天台北天氣炎熱。");
+}
+
+#[test]
+fn blank_style_with_sl_in_the_slug_is_recovered_as_sl() {
+    // `孟潔連宜蘭21SL` shape: 樣式 blank, the format only in the slug. Before SL was a
+    // slug term this vanished without a trace.
+    let text = "編輯備註: 攝助會塞半膜\n新聞名稱(標題): 合成連宜蘭21SL\n樣式:\n累積時間: 21:31:57\n組:\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成風雨持續有感\n>]\n合成颱風對台灣影響正是最明顯的時候。\n";
+    let cfg = Config::default();
+    match process_text("sl.txt", text, &cfg) {
+        Outcome::Passed(e) => assert_eq!(e.style, "SL"),
+        other => panic!("expected Passed, got {other:?}"),
+    }
+}
+
+#[test]
+fn blank_style_with_lianxian_in_the_slug_is_recovered_as_lianxian() {
+    let text = "新聞名稱(標題): 合成宜蘭連線21\n樣式:\n累積時間: 21:31:57\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成標題\n>]\n合成內文。\n";
+    let cfg = Config::default();
+    match process_text("lx.txt", text, &cfg) {
+        Outcome::Passed(e) => assert_eq!(e.style, "連線"),
+        other => panic!("expected Passed, got {other:?}"),
+    }
+}
+
+#[test]
+fn blank_style_with_zhuan_in_the_slug_is_kept_in_unknown_style() {
+    // 專 is not a format, so the style stays blank for a human to set -- but the row
+    // is a story and must not sink into 解析失敗.
+    let text = "新聞名稱(標題): 專合成長照調查\n樣式:\n累積時間: 18:10:00\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成標題\n>]\n合成內文。\n";
+    let cfg = Config::default();
+    match process_text("zhuan.txt", text, &cfg) {
+        Outcome::UnknownStyle(e) => {
+            assert_eq!(e.style, "");
+            assert!(e.warnings.iter().any(|w| w.contains("slug 含「專」")), "{:?}", e.warnings);
+        }
+        other => panic!("expected UnknownStyle, got {other:?}"),
+    }
+}
+
+#[test]
+fn blank_style_with_an_x5_video_id_is_recovered_as_sl() {
+    // X5 is the camera code for an SL fake live hit; the slug here names no style.
+    let text = "新聞名稱(標題): 合成宜蘭現場21\n樣式:\n累積時間: 21:31:57\n影像編號: 20261023-585-X5\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成標題\n>]\n合成內文。\n";
+    let cfg = Config::default();
+    match process_text("x5.txt", text, &cfg) {
+        Outcome::Passed(e) => {
+            assert_eq!(e.style, "SL");
+            assert!(e.warnings.iter().any(|w| w.contains("影像編號")), "{:?}", e.warnings);
+        }
+        other => panic!("expected Passed, got {other:?}"),
+    }
+    // Only the whole last segment counts.
+    let x15 = text.replace("-X5", "-X15");
+    assert!(matches!(process_text("x15.txt", &x15, &cfg), Outcome::ParseFailed { .. }));
+}
+
+#[test]
+fn slive_in_the_slug_is_not_mistaken_for_sl() {
+    let text = "新聞名稱(標題): 合成記者會SLIVE\n樣式:\n累積時間: 21:31:57\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成標題\n>]\n合成內文。\n";
+    let cfg = Config::default();
+    match process_text("slive.txt", text, &cfg) {
+        Outcome::Passed(e) => assert_eq!(e.style, "SLIVE"),
+        other => panic!("expected Passed, got {other:?}"),
+    }
 }
 
 #[test]

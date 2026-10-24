@@ -21,7 +21,7 @@ fn main() {
 
     println!("total files: {}", total);
     println!("loaded: {}", summary.loaded);
-    println!("skipped(silent): {}", skipped);
+    println!("skipped(silent, should be 0): {}", skipped);
     println!("passed: {}", summary.passed.len());
     for e in &summary.passed { println!("  PASS  {} [{}]", e.slug, e.style); }
     println!("filtered(style blocked): {}", summary.filtered.len());
@@ -44,7 +44,7 @@ fn main() {
     }
     println!("failed: {}", summary.failed.len());
     for o in &summary.failed {
-        if let news_script_core::model::Outcome::ParseFailed{file_name, reason} = o {
+        if let news_script_core::model::Outcome::ParseFailed{file_name, reason, ..} = o {
             println!("  FAIL  {} -- {}", file_name, reason);
         }
     }

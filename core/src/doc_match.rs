@@ -38,8 +38,29 @@ fn normalize_for_match(s: &str) -> String {
     folded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Classify one slug against the work-doc text (one entry per line, as pasted or
-/// scraped verbatim). See spec §6 for the "prefix before the slug" rule.
+/// `HH:MM:SS` zero-padded to 8 chars, or None if `s` is not a time.
+fn padded_time(s: &str) -> Option<String> {
+    static RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^\d{1,2}:\d{2}:\d{2}$").unwrap());
+    let s = s.trim();
+    RE.is_match(s).then(|| format!("{s:0>8}"))
+}
+
+/// The first `HH:MM:SS` on a doc line after the slug -- the 累積時間 this tool writes
+/// into its header line, which producers copy along when they tag it `(抓新)`.
+fn time_after(hay: &str) -> Option<String> {
+    static RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\d{1,2}:\d{2}:\d{2}").unwrap());
+    RE.find(hay).and_then(|m| padded_time(m.as_str()))
+}
+
+/// Classify one slug against the work-doc text, ignoring time. See `match_entry`.
+pub fn match_slug(slug: &str, doc_text: &str, refresh_keywords: &[String]) -> MatchResult {
+    match_entry(slug, "", doc_text, refresh_keywords)
+}
+
+/// Classify one entry (slug + 累積時間) against the work-doc text (one entry per line,
+/// as pasted or scraped verbatim). See spec §6 for the "prefix before the slug" rule.
 ///
 /// Takes the **last** matching line, not the first. The same slug legitimately
 /// appears more than once across a shift: a producer's original `(抓新) slug` request
@@ -49,11 +70,18 @@ fn normalize_for_match(s: &str) -> String {
 /// line is whatever is currently true about the story -- if someone adds a fresh
 /// `(抓新) slug` line below the plain one later, that also correctly asks for a
 /// re-paste again.
-pub fn match_slug(slug: &str, doc_text: &str, refresh_keywords: &[String]) -> MatchResult {
+///
+/// A `(抓新)` line carrying the same time as the entry is the version already in
+/// the doc, not a new one: it reads as already there. Without this, a stale scrape
+/// (the written-back line not in it yet) kept asking for the same version again --
+/// a re-grab only makes sense once iNews has a different 累積時間. Lines or entries
+/// without a time fall back to the slug-only rule.
+pub fn match_entry(slug: &str, time: &str, doc_text: &str, refresh_keywords: &[String]) -> MatchResult {
     let needle = normalize_for_match(slug);
     if needle.is_empty() {
         return MatchResult { status: MatchStatus::ToCut, matched_line: None };
     }
+    let entry_time = padded_time(time);
 
     let mut result = None;
     for line in doc_text.lines() {
@@ -63,7 +91,11 @@ pub fn match_slug(slug: &str, doc_text: &str, refresh_keywords: &[String]) -> Ma
             let status = if prefix.is_empty() {
                 MatchStatus::ToCut
             } else if refresh_keywords.iter().any(|k| prefix.contains(normalize_for_match(k).as_str())) {
-                MatchStatus::KeepRefresh
+                let line_time = time_after(&hay[idx + needle.len()..]);
+                match (&entry_time, line_time) {
+                    (Some(e), Some(l)) if *e == l => MatchStatus::ToCut,
+                    _ => MatchStatus::KeepRefresh,
+                }
             } else {
                 MatchStatus::Removed
             };
@@ -74,13 +106,16 @@ pub fn match_slug(slug: &str, doc_text: &str, refresh_keywords: &[String]) -> Ma
     result.unwrap_or(MatchResult { status: MatchStatus::ToCut, matched_line: None })
 }
 
-/// Classify every entry's slug against the work-doc text in one pass.
+/// Classify every (slug, 累積時間) entry against the work-doc text in one pass.
 pub fn match_all<'a>(
-    slugs: impl IntoIterator<Item = &'a str>,
+    entries: impl IntoIterator<Item = (&'a str, &'a str)>,
     doc_text: &str,
     refresh_keywords: &[String],
 ) -> Vec<(&'a str, MatchResult)> {
-    slugs.into_iter().map(|slug| (slug, match_slug(slug, doc_text, refresh_keywords))).collect()
+    entries
+        .into_iter()
+        .map(|(slug, time)| (slug, match_entry(slug, time, doc_text, refresh_keywords)))
+        .collect()
 }
 
 // --- 晚報 (evening bulletin) ---------------------------------------------------
@@ -420,6 +455,33 @@ YH 合成氣象 06：24：02
         let r = match_slug("重播新聞0900", doc, &refresh());
         assert_eq!(r.status, MatchStatus::Removed);
         assert_eq!(r.matched_line.as_deref(), Some("03 重播新聞0900 SOT 09:00:00"));
+    }
+
+    #[test]
+    fn a_grab_new_line_for_the_same_time_reads_as_already_in_the_doc() {
+        // Stale scrape: only the producer's request is there, not our written-back
+        // line. The entry still at 12:40:00 is the version that line is about.
+        let doc = "(抓新) 合成重貼新聞1200 SOT 12:40:00 生活\n";
+        let r = match_entry("合成重貼新聞1200", "12:40:00", doc, &refresh());
+        assert_eq!(r.status, MatchStatus::ToCut);
+        assert!(r.matched_line.is_some(), "must read as already in the doc, not as new");
+    }
+
+    #[test]
+    fn a_grab_new_line_for_a_different_time_still_asks_for_a_re_paste() {
+        let doc = "(抓新) 合成重貼新聞1200 SOT 12:40:00 生活\n";
+        let r = match_entry("合成重貼新聞1200", "13:05:10", doc, &refresh());
+        assert_eq!(r.status, MatchStatus::KeepRefresh);
+        // Single-digit hours and fullwidth colons still compare.
+        let doc = "(抓新) 合成重貼新聞0900 SOT 9：05：00\n";
+        assert_eq!(match_entry("合成重貼新聞0900", "09:05:00", doc, &refresh()).status, MatchStatus::ToCut);
+    }
+
+    #[test]
+    fn a_grab_new_line_without_a_time_keeps_the_slug_only_rule() {
+        let doc = "(抓新) 合成重貼新聞1200\n";
+        let r = match_entry("合成重貼新聞1200", "12:40:00", doc, &refresh());
+        assert_eq!(r.status, MatchStatus::KeepRefresh);
     }
 
     #[test]

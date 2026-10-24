@@ -55,8 +55,12 @@ pub enum Outcome {
     UnknownStyle(NewsEntry),
     /// TEL entry with no production block / no content — kept but needs manual script.
     NeedsManualContent(NewsEntry),
-    /// Structurally broken (missing `>]`, title tag present but no T2 line while body is non-empty, etc.)
-    ParseFailed { file_name: String, reason: String },
-    /// Empty rundown placeholder (CM break, promo slot, blank template) or `*SOU` filler — not real news.
-    Skipped,
+    /// Structurally broken (missing `>]`, no title tag while body is non-empty, etc.),
+    /// or judged not to be news at all (empty placeholder, `*SOU` filler, blank 樣式
+    /// with nothing to infer one from).
+    ///
+    /// Still carries an entry -- as much of it as could be parsed, `reason` first in
+    /// its warnings -- so a row the rules got wrong can be ticked on by hand. These
+    /// used to be dropped silently, which is how real stories went missing.
+    ParseFailed { file_name: String, reason: String, entry: Box<NewsEntry> },
 }

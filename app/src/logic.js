@@ -25,9 +25,15 @@
    * does occasionally turn out to be needed. Filtered entries start unticked, so this
    * changes nothing until someone deliberately ticks one — the alternative was
    * editing the blocklist in settings and re-importing just to rescue a single item.
+   *
+   * 解析失敗 likewise: it also holds rows the rules judged not to be news (blank 樣式,
+   * SOU, empty placeholders), which used to vanish silently and once took a real SL
+   * story with them. They start unticked and can be rescued the same way.
    */
+  const RESCUE_BUCKETS = ["filtered", "failed"];
+
   function canOutputBucket(bucket) {
-    return isOutputBucket(bucket) || bucket === "filtered";
+    return isOutputBucket(bucket) || RESCUE_BUCKETS.includes(bucket);
   }
 
   /**
@@ -149,7 +155,7 @@
     // unchanged — but a rescued one must show up in 寫入, or the funnel would under-
     // report what actually goes into the shared doc.
     const relevant = items.filter(
-      (i) => isOutputBucket(i.bucket) || (i.bucket === "filtered" && i.included)
+      (i) => isOutputBucket(i.bucket) || (RESCUE_BUCKETS.includes(i.bucket) && i.included)
     );
     const outgoing = relevant.filter((i) => i.included).length;
     return { pending: relevant.length, skipped: relevant.length - outgoing, outgoing };
@@ -274,9 +280,10 @@
   // --- 晚報 (evening bulletin) list -------------------------------------------
 
   /**
-   * One evening card from a backend entry DTO, or null for a file that failed to
-   * parse (it has no slug to match). Every bucket is kept, 已濾除 included: whether a
-   * story counts is decided by the shared doc, not by its rundown style.
+   * One evening card from a backend entry DTO, or null for 解析失敗. Every other
+   * bucket is kept, 已濾除 included: whether a story counts is decided by the shared
+   * doc, not by its rundown style. 解析失敗 stays out because it now holds the rundown
+   * structure rows that used to be dropped before they ever reached this list.
    */
   function eveningItemFromDto(dto, index) {
     const kind = kindOf(dto);

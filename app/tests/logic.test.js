@@ -93,9 +93,11 @@ test("unticked entries and empty bodies are skipped", () => {
   assert.equal(L.selectKeywordTargets(items).length, 1);
 });
 
-test("failed entries are never keyword targets", () => {
-  const items = [entry({ bucket: "failed" }), entry({ bucket: "manual" })];
+test("failed entries are keyword targets only once ticked", () => {
+  const items = [entry({ bucket: "failed", included: false }), entry({ bucket: "manual" })];
   assert.equal(L.selectKeywordTargets(items).length, 1);
+  items[0].included = true;
+  assert.equal(L.selectKeywordTargets(items).length, 2);
 });
 
 // --- 勿上網: kept out of batch keyword runs, but still written back ---
@@ -178,10 +180,11 @@ test("a rescued filtered entry is part of what 複製／存檔／寫入 send", (
     entry({ bucket: "unknown", included: true }),
     entry({ bucket: "manual", included: true }),
     entry({ bucket: "failed", included: true }),
+    entry({ bucket: "failed", included: false }),
   ];
   const out = L.outgoingItems(items);
-  assert.equal(out.length, 4);
-  assert.deepEqual(out.map((i) => i.bucket), ["passed", "filtered", "unknown", "manual"]);
+  assert.equal(out.length, 5);
+  assert.deepEqual(out.map((i) => i.bucket), ["passed", "filtered", "unknown", "manual", "failed"]);
 });
 
 test("outgoingItems agrees with what buildOutputText actually writes", () => {
@@ -193,9 +196,28 @@ test("outgoingItems agrees with what buildOutputText actually writes", () => {
   assert.equal(written.length, L.outgoingItems(items).length);
 });
 
-test("failed entries stay out of output even if somehow ticked", () => {
-  const items = [{ bucket: "failed", included: true, slug: "x", title: "t", body: "b", keywords: "" }];
-  assert.equal(L.buildOutputText(items), "");
+test("a ticked 解析失敗 entry is written out; an unticked one is not", () => {
+  // 解析失敗 now also holds rows that used to be dropped silently (a real SL story
+  // went missing that way), so it has to be rescuable like 已濾除.
+  const items = [
+    { bucket: "failed", included: true, slug: "孟潔連宜蘭21SL", style: "", time: "21:31:57", group: "", title: "t", body: "b", keywords: "" },
+    { bucket: "failed", included: false, slug: "CM1", title: "", body: "", keywords: "" },
+  ];
+  assert.equal(L.buildOutputText(items), "孟潔連宜蘭21SL 21:31:57\nt\nb\n");
+});
+
+test("a 解析失敗 entry from the backend starts unticked but carries its fields", () => {
+  const dto = {
+    kind: "ParseFailed",
+    file_name: "x.txt", slug: "合成片頭", style: "", time: "15:10:00", group: "",
+    title: "合成標題", slug_marker: "", body: "內文", raw_title: "", raw_body: "",
+    warnings: ["樣式空白，slug 與編輯備註也判斷不出樣式，判定為節目結構"],
+  };
+  const item = L.itemFromDto(dto, 0);
+  assert.equal(item.bucket, "failed");
+  assert.equal(item.included, false);
+  assert.equal(item.title, "合成標題");
+  assert.equal(item.body, "內文");
 });
 
 // --- splitKeywordRun: keeps a half-hour batch from hitting the per-minute cap ---
@@ -255,9 +277,9 @@ test("the funnel counts only output-eligible buckets", () => {
   const items = [
     entry(),
     entry({ included: false }),
-    // Filtered counts only once rescued (covered separately); failed never does.
+    // Filtered and failed count only once rescued.
     entry({ bucket: "filtered", included: false }),
-    entry({ bucket: "failed" }),
+    entry({ bucket: "failed", included: false }),
   ];
   assert.deepEqual(L.computeFunnel(items), { pending: 2, skipped: 1, outgoing: 1 });
 });
