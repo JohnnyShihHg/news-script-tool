@@ -489,7 +489,136 @@
     });
   }
 
+  // --- 從 iNEWS 自動匯入 ---------------------------------------------------------
+
+  /**
+   * UI items for an `import_inews` result. Same mapping as a folder import, but the
+   * id is the story's iNEWS key rather than its position, so the same story keeps
+   * its card -- and everything edited on it -- from one poll to the next.
+   */
+  function inewsItemsFromSummary(summary) {
+    const meta = summary.inews ?? { stories: [], show: "" };
+    const byFile = new Map((meta.stories ?? []).map((s) => [s.file_name, s]));
+    return (summary.entries ?? []).map((dto, index) => {
+      const item = itemFromDto(dto, index);
+      const fields = dto[item.kind] ?? dto;
+      const story = byFile.get(fields.file_name);
+      if (story) {
+        item.id = `inews-${story.key}`;
+        item.inews = { key: story.key, version: story.version, show: meta.show };
+      }
+      return item;
+    });
+  }
+
+  /** What a poll changed against the versions seen last time: new stories and edited ones. */
+  function diffInewsVersions(previous, stories) {
+    const added = [];
+    const changed = [];
+    for (const s of stories ?? []) {
+      const was = previous?.get(s.key);
+      if (was === undefined) added.push(s.key);
+      else if (was !== s.version) changed.push(s.key);
+    }
+    return { added, changed };
+  }
+
+  function writtenKey(item) {
+    return item.inews ? `${item.inews.key}|${item.inews.version}` : null;
+  }
+
+  /**
+   * Ticked, not handled in the doc, and this exact version not yet written. Covers
+   * both "waiting for keywords" and "waiting to be written".
+   */
+  function isPendingWrite(item, writtenKeys) {
+    if (!canOutputBucket(item.bucket) || !item.included) return false;
+    if (item.alreadyInDoc || item.matchStatus === "removed") return false;
+    const key = writtenKey(item);
+    return !(key && writtenKeys?.has(key));
+  }
+
+  /**
+   * Merge a fresh poll into the cards on screen.
+   *
+   * A story whose iNEWS version is unchanged keeps its card as it is -- keywords,
+   * edits, ticks, compare result. An edited story (new version) gets a fresh card,
+   * since its script changed under whatever was generated for it. A story gone from
+   * the fresh set is dropped, except one from an earlier show still waiting to be
+   * written: switching show must not silently lose it.
+   */
+  function mergeInewsItems(previous, fresh, writtenKeys) {
+    const prevById = new Map((previous ?? []).filter((p) => p.inews).map((p) => [p.id, p]));
+    const freshIds = new Set(fresh.map((f) => f.id));
+    const freshShow = fresh.find((f) => f.inews)?.inews.show;
+    const merged = fresh.map((f) => {
+      const p = prevById.get(f.id);
+      return p && f.inews && p.inews.version === f.inews.version ? p : f;
+    });
+    const carried = (previous ?? []).filter(
+      (p) => p.inews && !freshIds.has(p.id) && p.inews.show !== freshShow && isPendingWrite(p, writtenKeys)
+    );
+    return [...carried, ...merged];
+  }
+
+  /**
+   * Entries the automatic flow may write now: pending, compared against the doc, and
+   * done with keywords -- they have some, or need none (勿上網, no body).
+   */
+  function autoWriteCandidates(items, writtenKeys, noUploadLabel) {
+    return (items ?? []).filter(
+      (i) =>
+        isPendingWrite(i, writtenKeys) &&
+        i.matchStatus != null &&
+        i.keywordStatus !== "loading" &&
+        ((i.keywords ?? "").trim() !== "" || (i.body ?? "").trim() === "" || isNoUpload(i, noUploadLabel))
+    );
+  }
+
+  /** `==== {hh} ====` with `{hh}` = the show's hour (`0800` -> `08`) and `{show}` = its folder name. */
+  function formatDivider(format, show) {
+    const s = String(show ?? "");
+    return String(format ?? "").replaceAll("{hh}", s.slice(0, 2)).replaceAll("{show}", s);
+  }
+
+  /**
+   * The text one automatic write sends, show by show in the order given, with a
+   * divider wherever the show changes:
+   *   after  -- before the first entry of a new show, a divider naming the show that
+   *             just ended (only once something of that show was written);
+   *   before -- before the first entry of every show, naming that show.
+   * `toText(items)` renders one show's entries (buildOutputText in the app).
+   */
+  function composeInewsWrite(items, lastShow, { format, position }, toText) {
+    const groups = [];
+    for (const i of items) {
+      const show = i.inews?.show ?? "";
+      const g = groups[groups.length - 1];
+      if (g && g.show === show) g.items.push(i);
+      else groups.push({ show, items: [i] });
+    }
+    const parts = [];
+    let current = lastShow ?? "";
+    for (const g of groups) {
+      if (g.show && g.show !== current) {
+        if (position === "before") parts.push(formatDivider(format, g.show));
+        else if (current) parts.push(formatDivider(format, current));
+      }
+      parts.push(toText(g.items));
+      if (g.show) current = g.show;
+    }
+    return { text: parts.filter((p) => p.trim() !== "").join("\n\n"), lastShow: current };
+  }
+
   return {
+    inewsItemsFromSummary,
+    diffInewsVersions,
+    writtenKey,
+    isPendingWrite,
+    mergeInewsItems,
+    autoWriteCandidates,
+    formatDivider,
+    composeInewsWrite,
     eveningItemFromDto,
     isEveningHit,
     isEveningStyle,

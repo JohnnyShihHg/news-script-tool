@@ -31,6 +31,11 @@
     "allow-compare-evening",
     "allow-generate-group-keywords",
     "allow-load-evening-state",
-    "allow-save-evening-state"
+    "allow-save-evening-state",
+    "allow-import-inews",
+    "allow-test-inews-connection",
+    "allow-get-inews-credential-status",
+    "allow-set-inews-credentials",
+    "allow-clear-inews-credentials"
   ]
 }

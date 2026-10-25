@@ -33,6 +33,13 @@ const {
   buildEveningSlugList,
   buildEveningExport,
   mergeEveningEdits,
+  inewsItemsFromSummary,
+  diffInewsVersions,
+  writtenKey,
+  isPendingWrite,
+  mergeInewsItems,
+  autoWriteCandidates,
+  composeInewsWrite,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -109,6 +116,10 @@ function setCurrentFolder(folder) {
 function clearCards() {
   clearCooldown();
   items = [];
+  // The next iNEWS poll then sees every story as new again; writtenKeys stays, so
+  // nothing already written goes in twice.
+  inewsVersions = new Map();
+  hideInewsConfirm();
   hasCompared = false;
   el("summary").classList.add("hidden");
   el("emptyState").classList.remove("hidden");
@@ -171,6 +182,7 @@ async function initFromConfig() {
   applyTheme(config.ui?.theme);
   if (Number.isFinite(config.gemini?.max_per_run)) keywordMaxPerRun = config.gemini.max_per_run;
   noUploadLabel = config.annotations?.no_upload_label ?? noUploadLabel;
+  applyInewsConfig(config);
   const folder = config.import?.default_folder ?? "";
   if (!folder) return;
 
@@ -242,7 +254,8 @@ function loadSummary(summary) {
   // set's state was -- otherwise the write-back guard would trust a stale comparison.
   hasCompared = false;
   clearCooldown();
-  items = summary.entries.map(itemFromDto);
+  items = summary.inews ? inewsItemsFromSummary(summary) : summary.entries.map(itemFromDto);
+  rememberInewsVersions(summary);
   // Running order: earliest 累積時間 first, because that is the order tapes get cut
   // in. Sorting here means the card list and the written-back output share it.
   items = sortByTime(items);
@@ -394,7 +407,27 @@ function cardHtml(item) {
     </div>`;
 }
 
+/// True while an automatic iNEWS round is running. Re-rendering rebuilds every input,
+/// so a round must not do it under someone typing into a card -- see render().
+let inewsRoundActive = false;
+let renderDeferred = false;
+
+function isTypingInList() {
+  const a = document.activeElement;
+  return !!(a && el("list").contains(a) && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && a.type === "text")));
+}
+
+el("list").addEventListener("focusout", () => {
+  // Wait for focus to land: tabbing between two fields of one card is still typing.
+  setTimeout(() => { if (renderDeferred && !isTypingInList()) render(); }, 0);
+});
+
 function render() {
+  if (inewsRoundActive && isTypingInList()) {
+    renderDeferred = true;
+    return;
+  }
+  renderDeferred = false;
   const shown = activeFilter === "all" ? items : items.filter((i) => i.bucket === activeFilter);
   // Ticked cards first so they don't have to be scrolled for; display only -- `items`
   // itself stays in running order, which is what the output follows.
@@ -635,24 +668,24 @@ function reportRateLimit(errors, attempted) {
 
 /// Flattens each card's enum payload into the shape buildOutputText expects, so the
 /// formatting rule itself stays a pure, tested function.
+function outputFieldsOf(i) {
+  const fields = i.dto[i.kind] ?? i.dto;
+  return {
+    bucket: i.bucket,
+    included: i.included,
+    slug: fields.slug,
+    slug_marker: fields.slug_marker ?? "",
+    style: fields.style,
+    time: fields.time,
+    group: fields.group,
+    title: i.title,
+    body: i.body,
+    keywords: i.keywords,
+  };
+}
+
 function buildOutput() {
-  return buildOutputText(
-    items.map((i) => {
-      const fields = i.dto[i.kind] ?? i.dto;
-      return {
-        bucket: i.bucket,
-        included: i.included,
-        slug: fields.slug,
-        slug_marker: fields.slug_marker ?? "",
-        style: fields.style,
-        time: fields.time,
-        group: fields.group,
-        title: i.title,
-        body: i.body,
-        keywords: i.keywords,
-      };
-    })
-  );
+  return buildOutputText(items.map(outputFieldsOf));
 }
 
 async function copyAll() {
@@ -729,7 +762,11 @@ async function writeBackToCollab() {
   btn.disabled = true;
   try {
     const msg = await invoke("append_to_collab_doc", { text });
-    outgoing.forEach((i) => writtenSlugs.add(slugOf(i)));
+    outgoing.forEach((i) => {
+      writtenSlugs.add(slugOf(i));
+      const key = writtenKey(i);
+      if (key) writtenKeys.add(key);
+    });
     status.textContent = `✅ ${msg}`;
   } catch (err) {
     status.className = "compare-status error";
@@ -738,6 +775,273 @@ async function writeBackToCollab() {
     btn.disabled = false;
   }
 }
+// --- 從 iNEWS 匯入 / 自動刷新 ---
+//
+// 匯入本身跟資料夾匯入走同一條路（後端 import_inews → import_files）。自動刷新
+// 只是定時重跑，然後把現有的流程串起來：比對 → 產生關鍵字 → 寫入（或等確認）。
+// 判斷規則全在 logic.js（mergeInewsItems / autoWriteCandidates / composeInewsWrite）。
+
+let inewsCfg = {
+  poll_seconds: 10,
+  auto_write: false,
+  divider_format: "==== {hh} ====",
+  divider_position: "after",
+};
+/** story key -> iNEWS version of the cards on screen, for change detection. */
+let inewsVersions = new Map();
+/** Show of the cards on screen. */
+let inewsShow = "";
+/** Show of the last automatic write this session, so the divider goes in once. */
+let lastWrittenShow = "";
+/** `${key}|${version}` written this session: one version is never written twice. */
+const writtenKeys = new Set();
+let inewsTimer = null;
+let inewsBusy = false;
+/** Keyword runs that hit the per-minute cap (or left entries over) wait this long. */
+let keywordCooldownUntil = 0;
+
+function applyInewsConfig(config) {
+  inewsCfg = { ...inewsCfg, ...(config.inews ?? {}) };
+}
+
+function rememberInewsVersions(summary) {
+  const stories = summary.inews?.stories ?? [];
+  inewsVersions = new Map(stories.map((s) => [s.key, s.version]));
+  inewsShow = summary.inews?.show ?? "";
+}
+
+function inewsStatus(text, kind = "") {
+  const node = el("inewsStatus");
+  node.className = `compare-status ${kind}`;
+  node.textContent = text;
+}
+
+function describeInewsRound(meta) {
+  const lines = [
+    `iNEWS ${meta.show} 節（${meta.queue_path}，${meta.now}${meta.switched_early ? "，已提前換到下一節" : ""}）：` +
+      `已播出 ${meta.stories.length} 則、截止點以上尚未播出 ${meta.pending} 則；本輪讀取 ${meta.retrieved} / ${meta.list_count} 則。`,
+  ];
+  if (meta.cutoff_title) {
+    lines.push(`截止點：「${meta.cutoff_title}」以下不處理${meta.cutoff_rule === "last_prefixed" ? "（找不到預告後的廣告列，改用最後一個廣告列）" : ""}。`);
+  }
+  for (const w of meta.warnings ?? []) lines.push(`⚠ ${w}`);
+  return lines.join("\n");
+}
+
+function updateStatsFromItems() {
+  const count = (b) => items.filter((i) => i.bucket === b).length;
+  el("statPassed").textContent = count("passed");
+  el("statUnknown").textContent = count("unknown");
+  el("statManual").textContent = count("manual");
+  el("statFiltered").textContent = count("filtered");
+  el("statFailed").textContent = count("failed");
+  el("summary").classList.toggle("hidden", items.length === 0);
+  el("emptyState").classList.toggle("hidden", items.length > 0);
+  el("clearCardsBtn").disabled = items.length === 0;
+  el("compareBtn").disabled = items.length === 0;
+}
+
+/// 「從 iNEWS 匯入」按鈕：跟「匯入資料夾」一樣整批換掉卡片，然後只比對。
+async function importInewsOnce() {
+  if (inewsBusy) return;
+  inewsBusy = true;
+  el("importInewsBtn").disabled = true;
+  inewsStatus("讀取 iNEWS 中…");
+  try {
+    const summary = await invoke("import_inews");
+    loadSummary(summary);
+    inewsStatus(describeInewsRound(summary.inews), summary.inews.warnings?.length ? "warn" : "");
+    await runAutoPipeline();
+  } catch (err) {
+    inewsStatus(`⚠ 從 iNEWS 匯入失敗：${err}`, "error");
+  } finally {
+    inewsBusy = false;
+    el("importInewsBtn").disabled = false;
+  }
+}
+
+/// 自動刷新的一輪：合併卡片，有新的已播出稿或內容變動（或上一輪留下沒做完的）
+/// 才往下跑比對 → 關鍵字 → 寫入。
+async function inewsRound() {
+  if (inewsBusy) return;
+  inewsBusy = true;
+  inewsRoundActive = true;
+  try {
+    let summary;
+    try {
+      summary = await invoke("import_inews");
+    } catch (err) {
+      // 網路閃斷或伺服器重啟：下一輪後端會自動重連，所以不停下來。
+      inewsStatus(`⚠ 讀取 iNEWS 失敗（下一輪會自動重試）：${err}`, "error");
+      return;
+    }
+    const meta = summary.inews;
+    const showChanged = inewsShow !== "" && meta.show !== inewsShow;
+    const { added, changed } = diffInewsVersions(showChanged ? new Map() : inewsVersions, meta.stories);
+    const hadCards = items.some((i) => i.inews);
+    items = sortByTime(mergeInewsItems(hadCards ? items : [], inewsItemsFromSummary(summary), writtenKeys));
+    rememberInewsVersions(summary);
+    if (added.length || changed.length || !hadCards) hasCompared = false;
+    updateStatsFromItems();
+    renderFunnel();
+    render();
+    inewsStatus(
+      describeInewsRound(meta) +
+        (added.length || changed.length ? `\n本輪新增 ${added.length} 則、內容變動 ${changed.length} 則。` : ""),
+      meta.warnings?.length ? "warn" : ""
+    );
+
+    const pending = items.some((i) => isPendingWrite(i, writtenKeys));
+    if (added.length || changed.length || pending) await runInewsPipeline();
+  } finally {
+    inewsRoundActive = false;
+    inewsBusy = false;
+    if (renderDeferred && !isTypingInList()) render();
+  }
+}
+
+function stopInewsAuto(message) {
+  el("inewsAutoToggle").checked = false;
+  clearTimeout(inewsTimer);
+  inewsTimer = null;
+  if (message) inewsStatus(message, "error");
+}
+
+async function runInewsPipeline() {
+  // 1. 比對協作文件。視窗沒開或沒登入就停下來，絕不在沒比對的情況下寫入。
+  try {
+    await compareWithCollabDoc({ silent: false });
+  } catch (err) {
+    stopInewsAuto(`⚠ 無法比對協作文件，自動刷新已停止：${err}\n請先「開啟協作工具」並登入，再重新打開「自動刷新」。`);
+    return;
+  }
+
+  // 2. 待上傳和要重貼的稿產生關鍵字，遵守單次上限；超過的留到下一輪。
+  const targets = keywordTargets();
+  if (targets.length > 0) {
+    if (!hasApiKey) {
+      inewsStatus("⚠ 尚未設定 Gemini API key，自動流程無法產生關鍵字，稿件不會自動寫入。", "error");
+    } else if (Date.now() >= keywordCooldownUntil) {
+      const { batch, remaining } = splitKeywordRun(targets, keywordMaxPerRun);
+      const rateLimited = await generateKeywordsFor(batch);
+      if (remaining > 0 || rateLimited) keywordCooldownUntil = Date.now() + COOLDOWN_MS;
+    }
+  }
+
+  // 3. 寫入（或等確認）。
+  const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel);
+  if (ready.length === 0) {
+    hideInewsConfirm();
+    return;
+  }
+  if (inewsCfg.auto_write) await writeInewsItems(ready);
+  else showInewsConfirm(ready);
+}
+
+function inewsWriteText(ready) {
+  return composeInewsWrite(
+    ready,
+    lastWrittenShow,
+    { format: inewsCfg.divider_format, position: inewsCfg.divider_position },
+    (group) => buildOutputText(group.map(outputFieldsOf))
+  );
+}
+
+function showInewsConfirm(ready) {
+  const slugs = ready.map(slugOf);
+  el("inewsConfirmText").textContent =
+    `${ready.length} 則已產生關鍵字，等待寫入協作文件：` +
+    slugs.slice(0, 8).join("、") + (slugs.length > 8 ? ` 等 ${slugs.length} 則` : "");
+  el("inewsConfirm").classList.remove("hidden");
+}
+
+function hideInewsConfirm() {
+  el("inewsConfirm").classList.add("hidden");
+}
+
+async function writeInewsItems(ready) {
+  // 寫入前再擋一次：同一個版本（或這次 session 寫過的 slug）不重複寫入。
+  const fresh = ready.filter((i) => isPendingWrite(i, writtenKeys) && !writtenSlugs.has(`${slugOf(i)}|${i.inews?.version ?? ""}`));
+  if (fresh.length === 0) return;
+  const { text, lastShow } = inewsWriteText(fresh);
+  if (!text.trim()) return;
+  const status = el("compareStatus");
+  status.classList.remove("hidden");
+  status.className = "compare-status";
+  status.textContent = `寫入 ${fresh.length} 則到協作文件中…`;
+  try {
+    const msg = await invoke("append_to_collab_doc", { text });
+    for (const i of fresh) {
+      const key = writtenKey(i);
+      if (key) writtenKeys.add(key);
+      writtenSlugs.add(slugOf(i));
+      writtenSlugs.add(`${slugOf(i)}|${i.inews?.version ?? ""}`);
+      // 已經在文件裡了：取消勾選，下一輪比對也會得到同樣的結果。
+      i.included = false;
+      i.defaultIncluded = false;
+      i.alreadyInDoc = true;
+    }
+    lastWrittenShow = lastShow;
+    hideInewsConfirm();
+    status.textContent = `✅ 自動寫入 ${fresh.length} 則：${msg}`;
+    renderFunnel();
+    render();
+  } catch (err) {
+    stopInewsAuto(`⚠ 寫入協作文件失敗，自動刷新已停止：${err}\n請確認協作工具視窗已開啟並登入。`);
+  }
+}
+
+async function confirmInewsWrite() {
+  const btn = el("inewsConfirmBtn");
+  btn.disabled = true;
+  try {
+    // 用按下去這一刻的狀態重算，不用顯示時那份：中間可能比對過或改過勾選。
+    const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel);
+    if (ready.length === 0) {
+      hideInewsConfirm();
+      return;
+    }
+    await writeInewsItems(ready);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function scheduleInewsRound(delayMs) {
+  clearTimeout(inewsTimer);
+  if (!el("inewsAutoToggle").checked) return;
+  inewsTimer = setTimeout(async () => {
+    await inewsRound();
+    const secs = Math.max(3, Number(inewsCfg.poll_seconds) || 10);
+    scheduleInewsRound(secs * 1000);
+  }, delayMs);
+}
+
+async function toggleInewsAuto() {
+  if (!el("inewsAutoToggle").checked) {
+    stopInewsAuto();
+    inewsStatus("自動刷新已關閉。");
+    return;
+  }
+  try {
+    const cred = await invoke("get_inews_credential_status");
+    if (!cred.has_credentials) {
+      stopInewsAuto("⚠ 尚未設定 iNEWS 帳號密碼，請到「⚙ 設定 → iNEWS」輸入並按「測試連線」。");
+      return;
+    }
+  } catch (err) {
+    stopInewsAuto(`⚠ ${err}`);
+    return;
+  }
+  inewsStatus(`自動刷新已開啟，每 ${inewsCfg.poll_seconds} 秒讀一次 iNEWS。` +
+    (inewsCfg.auto_write ? "（全自動寫入）" : "（產生關鍵字後等你按「確認寫入」）"));
+  scheduleInewsRound(0);
+}
+
+el("importInewsBtn").addEventListener("click", importInewsOnce);
+el("inewsAutoToggle").addEventListener("change", toggleInewsAuto);
+el("inewsConfirmBtn").addEventListener("click", confirmInewsWrite);
+
 /// These two live in the settings modal, so their output has to land inside it --
 /// writing to the main compare banner would put the result behind the backdrop.
 function collabToolStatusEl() {
@@ -953,7 +1257,8 @@ checkForUpdate({ silent: true });
 
 const PUNCT_LABELS = { ",": "， (逗號)", ":": "： (冒號)", ";": "； (分號)", "?": "？ (問號)", "!": "！ (驚嘆號)", "(": "（ (左括號)", ")": "） (右括號)" };
 
-function settingsModalHtml(config, apiStatus) {
+function settingsModalHtml(config, apiStatus, inewsCred) {
+  const inewsSettings = config.inews ?? {};
   const styleField = (label, key, value) => `
     <div class="field">
       <label>${label}（逗號分隔）</label>
@@ -1015,6 +1320,48 @@ function settingsModalHtml(config, apiStatus) {
                 <button id="browseDefaultFolderBtn" type="button">瀏覽</button>
               </div>
               <div class="muted">「匯入資料夾」一律匯入這個資料夾的 txt；開啟工具時也會自動匯入一次。要換資料夾就改這裡。</div>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h3>iNEWS 自動匯入</h3>
+            <div class="field">
+              <label>
+                帳號密碼：
+                ${inewsCred.has_credentials
+                  ? `<span class="badge passed">已設定（${escapeHtml(inewsCred.username)}，存在系統憑證管理員）</span>`
+                  : `<span class="badge failed">尚未設定</span>`}
+              </label>
+              <div class="keywords-row">
+                <input type="text" id="inewsUserInput" placeholder="iNEWS 帳號" autocomplete="off" value="${escapeHtml(inewsCred.username)}" />
+                <input type="password" id="inewsPassInput" placeholder="iNEWS 密碼" autocomplete="off" />
+                <button id="saveInewsCredBtn" type="button">儲存</button>
+                <button id="clearInewsCredBtn" type="button">清除</button>
+                <button id="testInewsBtn" type="button">測試連線</button>
+              </div>
+              <div class="muted">帳號密碼存進系統憑證管理員（Windows Credential Manager），不會寫進設定檔。「測試連線」用的是下方已儲存的伺服器設定，改了伺服器請先按「儲存設定」。</div>
+              <div id="inewsCredStatus" class="muted"></div>
+            </div>
+            <div class="field"><label>伺服器</label><input type="text" data-cfg="inews.server" value="${escapeHtml(inewsSettings.server)}" /></div>
+            <div class="field"><label>連接埠</label><input type="number" min="1" data-cfg-num="inews.port" value="${inewsSettings.port}" /></div>
+            <div class="field"><label>節次所在路徑（點號串接）</label><input type="text" data-cfg="inews.root" value="${escapeHtml(inewsSettings.root)}" /></div>
+            <div class="field"><label>Queue</label><input type="text" data-cfg="inews.queue" value="${escapeHtml(inewsSettings.queue)}" /></div>
+            <div class="field"><label>自動刷新間隔（秒）</label><input type="number" min="3" data-cfg-num="inews.poll_seconds" value="${inewsSettings.poll_seconds}" /></div>
+            <div class="field"><label>下一節沒有硬時間時，整點前幾分鐘換節</label><input type="number" min="0" data-cfg-num="inews.lead_minutes" value="${inewsSettings.lead_minutes}" /></div>
+            <div class="muted">節目會在整點前開始：預設選已過整點的最近一節，但只要下一節 rundown 的第一個硬時間（＠）已經到了就提前換過去；下一節沒有硬時間才用這個分鐘數。</div>
+            <div class="field"><label>截止點：預告關鍵字</label><input type="text" data-cfg="inews.cutoff_preview_keyword" value="${escapeHtml(inewsSettings.cutoff_preview_keyword)}" /></div>
+            <div class="field"><label>截止點：廣告列序號開頭</label><input type="text" data-cfg="inews.cutoff_page_prefix" value="${escapeHtml(inewsSettings.cutoff_page_prefix)}" /></div>
+            <div class="muted">找最後一則標題含預告關鍵字的稿，再找它之後第一個序號以這個開頭的列（例：<code>=CM 3==</code>），從那一列開始以下是預備稿，不處理。找不到就改用最後一個這樣的列；再找不到就整節處理並顯示警告。</div>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.include_floated" ${inewsSettings.include_floated ? "checked" : ""} /> 也匯入 float 列（版型、框、SOU 這類 iNEWS 上 float 的稿）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.fill_computed_time" ${inewsSettings.fill_computed_time ? "checked" : ""} /> 累積時間空白時填入自動算出的時間（關掉就跟手動匯出完全相同）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_write" ${inewsSettings.auto_write ? "checked" : ""} /> 全自動寫入協作文件（不勾 = 產生關鍵字後等你按「確認寫入」）</label>
+            <div class="field"><label>節次分隔線格式（{hh} = 小時，{show} = 節次）</label><input type="text" data-cfg="inews.divider_format" value="${escapeHtml(inewsSettings.divider_format)}" /></div>
+            <div class="field">
+              <label>分隔線位置</label>
+              <select data-cfg="inews.divider_position">
+                <option value="after" ${inewsSettings.divider_position === "after" ? "selected" : ""}>節次結束後（標剛播完那節）</option>
+                <option value="before" ${inewsSettings.divider_position === "before" ? "selected" : ""}>節次開始前（標新的這一節）</option>
+              </select>
             </div>
           </section>
 
@@ -1197,8 +1544,12 @@ function readConfigFromForm(base) {
 }
 
 async function openSettings() {
-  const [config, apiStatus] = await Promise.all([invoke("get_config"), invoke("get_api_key_status")]);
-  document.body.insertAdjacentHTML("beforeend", settingsModalHtml(config, apiStatus));
+  const [config, apiStatus, inewsCred] = await Promise.all([
+    invoke("get_config"),
+    invoke("get_api_key_status"),
+    invoke("get_inews_credential_status").catch(() => ({ has_credentials: false, username: "" })),
+  ]);
+  document.body.insertAdjacentHTML("beforeend", settingsModalHtml(config, apiStatus, inewsCred));
 
   // Dismissing without saving must not leave an un-persisted theme applied.
   const close = () => {
@@ -1225,6 +1576,42 @@ async function openSettings() {
     await refreshApiKeyStatus();
     close();
     openSettings();
+  });
+
+  const inewsCredStatus = (text, isError) => {
+    el("inewsCredStatus").textContent = text;
+    el("inewsCredStatus").style.color = isError ? "var(--danger)" : "var(--muted)";
+  };
+  el("saveInewsCredBtn").addEventListener("click", async () => {
+    try {
+      await invoke("set_inews_credentials", {
+        username: el("inewsUserInput").value,
+        password: el("inewsPassInput").value,
+      });
+      close();
+      await openSettings();
+      el("inewsCredStatus").textContent = "已儲存。可以按「測試連線」確認。";
+    } catch (err) {
+      inewsCredStatus(`⚠ 儲存失敗：${err}`, true);
+    }
+  });
+  el("clearInewsCredBtn").addEventListener("click", async () => {
+    try {
+      await invoke("clear_inews_credentials");
+      stopInewsAuto();
+      close();
+      openSettings();
+    } catch (err) {
+      inewsCredStatus(`⚠ 清除失敗：${err}`, true);
+    }
+  });
+  el("testInewsBtn").addEventListener("click", async () => {
+    inewsCredStatus("連線中…", false);
+    try {
+      inewsCredStatus(`✅ ${await invoke("test_inews_connection")}`, false);
+    } catch (err) {
+      inewsCredStatus(`⚠ ${err}`, true);
+    }
   });
 
   el("diagnoseCollabBtn").addEventListener("click", diagnoseCollab);
@@ -1271,6 +1658,8 @@ async function openSettings() {
       // have been editing, so the next 匯入資料夾 picks up the new folder instead.
       const newFolder = updated.import?.default_folder ?? "";
       applyEveningConfig(updated);
+      // 新的間隔、寫入模式、分隔線馬上生效，不用重開自動刷新。
+      applyInewsConfig(updated);
       if (!currentFolder) await initFromConfig();
       else if (newFolder !== currentFolder) setCurrentFolder(newFolder);
       status.textContent = "已儲存";

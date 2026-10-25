@@ -1,0 +1,19 @@
+<nsml version="-//AVID//DTD NSML 1.0//EN">
+<head>
+<storyid>0000ABCD:00001235:6ADD2F00</storyid>
+</head>
+<story>
+<fields>
+<string id="page-number"></string>
+<string id="title">合成空欄位框</string>
+<duration id="audio-time">0</duration>
+<duration id="tape-time"></duration>
+<duration id="total-time">0</duration>
+<string id="cume-time"></string>
+<date id="create-date"></date>
+</fields>
+<body>
+<p></p>
+</body>
+</story>
+</nsml>

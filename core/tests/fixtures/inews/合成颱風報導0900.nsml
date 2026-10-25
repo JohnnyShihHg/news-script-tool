@@ -1,0 +1,52 @@
+<nsml version="-//AVID//DTD NSML 1.0//EN">
+<head>
+<meta words="58" rate="180" wire="f" mail="f" locked="f" words-locked="f" rate-locked="f"/>
+<wgroup number="51"/>
+<storyid>0000ABCD:00001234:6ADD2EE7</storyid>
+<formname>51-SYNTH</formname>
+</head>
+<story>
+<fields>
+<string id="page-number">A3</string>
+<string id="v-editnote">勿上網</string>
+<string id="title">合成颱風報導0900</string>
+<string id="v-style">SOT</string>
+<duration id="audio-time">25</duration>
+<duration id="tape-time">116</duration>
+<duration id="total-time">141</duration>
+<string id="cume-time">＠26932</string>
+<string id="v-group1">生</string>
+<string id="v-reporter">
+合成記者
+</string>
+<string id="v-affair"></string>
+<string id="video-id">20261025-001-X1</string>
+<string id="event-status"/>
+<boolean id="ready">READY</boolean>
+<string id="v-caution">合成 &amp; 說明</string>
+<string id="v-comx1">生.合成甲</string>
+<string id="v-comx2"></string>
+<string id="sng-directed"></string>
+<string id="create-by">合成撰稿</string>
+<date id="create-date">1775436877</date>
+<string id="modify-by">合成修改</string>
+<date id="modify-date">1775440000</date>
+</fields>
+<body>
+<p><a idref="0"/></p>
+<p>這是合成測試用的颱風稿內文第一段，風雨&lt;持續&gt;增強。</p>
+<p>第二段內文，
+接在同一段。</p>
+<p></p>
+</body>
+<aeset>
+<ae id="0">
+<ap>[BAR_最新大]</ap>
+<ap>T2合成颱風標題 風雨增強</ap>
+<ap></ap>
+<ap>[雙框_記者右]</ap>
+<ap>T1合成主播</ap>
+</ae>
+</aeset>
+</story>
+</nsml>
