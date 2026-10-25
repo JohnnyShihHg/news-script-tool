@@ -219,24 +219,68 @@ fn inews_credentials() -> Result<inews::Credentials, String> {
     }
 }
 
-/// 從 iNEWS FTP 讀當節次的 rundown，把已播出、截止點以上的稿件轉成跟手動「匯出
-/// 延伸文稿」相同的 txt，再走跟 `import_folder` 完全相同的流程。
+/// 決策紀錄資料夾：`%APPDATA%\\ebc\\news-script-tool\\logs`（設定檔在同一層的 `config`）。
+fn inews_log_dir() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("tw", "ebc", "news-script-tool")
+        .and_then(|d| d.config_dir().parent().map(|p| p.join("logs")))
+}
+
+/// 從 iNEWS FTP 讀當節次的 rundown，把已播出、有效範圍內的稿件轉成跟手動「匯出
+/// 延伸文稿」相同的 txt，再走跟 `import_folder` 完全相同的流程。`auto` = 自動刷新
+/// 的一輪（會做換節最後同步與延遲補掃）；`session_start` = 剛打開自動刷新。
+/// 每一輪（含失敗）都附加一行到決策紀錄。
 #[tauri::command]
-async fn import_inews(window: tauri::Window, state: tauri::State<'_, AppState>) -> Result<ImportSummaryDto, String> {
+async fn import_inews(
+    window: tauri::Window,
+    state: tauri::State<'_, AppState>,
+    auto: Option<bool>,
+    session_start: Option<bool>,
+) -> Result<ImportSummaryDto, String> {
     require_main_window(&window)?;
     let cfg = state.config.lock().unwrap().clone();
     let creds = inews_credentials()?;
     let shared = state.inews.clone();
     let inews_cfg = cfg.inews.clone();
+    let mode = if auto.unwrap_or(false) {
+        inews::FetchMode::Auto { session_start: session_start.unwrap_or(false) }
+    } else {
+        inews::FetchMode::Manual
+    };
+    let log_dir = inews_log_dir();
     let fetched = tauri::async_runtime::spawn_blocking(move || {
         let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
-        st.fetch(&inews_cfg, &creds, inews::taipei_seconds_of_day())
+        let r = st.fetch(&inews_cfg, &creds, inews::taipei_seconds_of_day(), mode);
+        if let Some(dir) = &log_dir {
+            let tag = if mode == inews::FetchMode::Manual { "[手動]" } else { "[自動]" };
+            match &r {
+                Ok(f) => inews::append_log(dir, &format!("{tag} {}", f.log_line)),
+                Err(e) => inews::append_log(dir, &format!("{tag} 錯誤：{e}")),
+            }
+        }
+        r
     })
     .await
     .map_err(|e| e.to_string())??;
     let mut dto = import_texts(&fetched.files, &cfg).await;
     dto.inews = Some(fetched.meta);
     Ok(dto)
+}
+
+/// 「開啟紀錄資料夾」：在檔案總管打開決策紀錄所在的資料夾（沒有就先建立）。
+#[tauri::command]
+fn open_inews_log_folder(window: tauri::Window) -> Result<String, String> {
+    require_main_window(&window)?;
+    let dir = inews_log_dir().ok_or_else(|| "找不到紀錄資料夾路徑".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建立紀錄資料夾失敗：{e}"))?;
+    let opener = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener).arg(&dir).spawn().map_err(|e| format!("開啟資料夾失敗：{e}"))?;
+    Ok(dir.display().to_string())
 }
 
 #[tauri::command]
@@ -375,6 +419,11 @@ fn save_config_inner(state: &tauri::State<AppState>, config: Config) -> Result<(
     }
     if config.inews.poll_seconds < 3 {
         return Err("iNEWS 自動刷新間隔至少 3 秒".to_string());
+    }
+    for (from, to) in &config.inews.slot_spans {
+        if news_script_core::inews::show_start(from).is_none() || news_script_core::inews::show_start(to).is_none() {
+            return Err(format!("跨節合併「{from}={to}」格式錯誤，要寫成 4 位數節次，例：1200=1400"));
+        }
     }
 
     let path = config_path().ok_or_else(|| "找不到設定檔存放路徑".to_string())?;
@@ -1052,7 +1101,8 @@ fn main() {
             test_inews_connection,
             get_inews_credential_status,
             set_inews_credentials,
-            clear_inews_credentials
+            clear_inews_credentials,
+            open_inews_log_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -248,7 +248,11 @@ struct CachedStory {
     story: NsmlStory,
 }
 
-/// 自動匯入在兩輪之間保留的東西：控制連線、節次清單、已經 RETR 過的稿件。
+/// 一個 queue 讀回來的樣子：rundown 順序的 (LIST 項目, 稿件)。
+type Rundown = Vec<(ListEntry, NsmlStory)>;
+
+/// 自動匯入在兩輪之間保留的東西：控制連線、節次清單、已經 RETR 過的稿件，以及
+/// 換節／補掃要記得的上一輪狀態。
 #[derive(Default)]
 pub struct InewsState {
     session: Option<FtpSession>,
@@ -257,6 +261,12 @@ pub struct InewsState {
     /// key = LIST 上的完整名稱（含 ID，ID 第三段是修改時間戳）：稿件一改就換 key，
     /// 自然會重新 RETR。
     cache: HashMap<String, CachedStory>,
+    /// 上一輪自動同步選中的節次：換了就先對它做最後一次同步。
+    last_show: Option<String>,
+    /// 上一次延遲補掃時的「目前節次」（見 `inews::sweep_target`）。
+    swept_for: Option<String>,
+    /// story key → 上一次看到的版本，決策紀錄算「新增／變動」用。
+    versions: HashMap<String, String>,
 }
 
 /// 一則被選中的稿件，給前端做單則變動偵測。
@@ -267,6 +277,8 @@ pub struct StoryMeta {
     pub version: String,
     pub cume: String,
     pub floated: bool,
+    /// 這則屬於哪一節（換節最後同步、補掃時會跟目前節次不同）。
+    pub show: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -276,25 +288,75 @@ pub struct InewsMeta {
     pub queue_path: String,
     pub now: String,
     pub switched_early: bool,
-    /// "after_preview" | "last_prefixed" | "none"
+    /// 目前節次的有效範圍與來源（`硬時間` / `fallback`）。
+    pub range_start: String,
+    pub range_end: String,
+    pub start_source: String,
+    pub end_show: Option<String>,
+    pub end_source: Option<String>,
+    /// 這一輪對剛換掉的舊節次做了最後一次同步。
+    pub switched_from: Option<String>,
+    /// 這一輪完成了這一節的延遲補掃：它的分隔線現在可以寫了。
+    pub closed_show: Option<String>,
+    /// 標記式截止（預設關閉）："after_preview" | "last_prefixed" | "none"
     pub cutoff_rule: String,
     pub cutoff_title: Option<String>,
     pub list_count: usize,
     pub retrieved: usize,
     pub pending: usize,
     pub stories: Vec<StoryMeta>,
+    /// 換節、補掃、跳過的節次，跟決策紀錄寫的是同一份。
+    pub events: Vec<String>,
     pub warnings: Vec<String>,
 }
 
 pub struct FetchResult {
     pub files: Vec<(String, String)>,
     pub meta: InewsMeta,
+    /// 決策紀錄的這一行（不含時間戳）。
+    pub log_line: String,
+}
+
+/// 手動按「從 iNEWS 匯入」只讀目前節次；自動刷新才做換節最後同步與延遲補掃。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchMode {
+    Manual,
+    /// `session_start` = 剛打開自動刷新：上一輪的狀態作廢，也不回頭補掃開啟前的節次。
+    Auto { session_start: bool },
 }
 
 /// 現在是台北時間的當天第幾秒。跟電腦的時區設定無關：rundown 的時間是台北時間。
 pub fn taipei_seconds_of_day() -> u32 {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     ((now + 8 * 3600) % 86_400) as u32
+}
+
+/// 一則要輸出的稿：哪一節、rundown 裡的哪一列、算出來的累積時間。
+struct Pick {
+    show: String,
+    index: usize,
+    cume: Option<i64>,
+}
+
+fn clock(t: i64) -> String {
+    inews::format_clock(t)
+}
+
+/// `07:55:00（硬時間）～ 08:55:00（0900 硬時間）`
+fn describe_window(w: &inews::Window) -> String {
+    let end = match &w.next {
+        Some(n) => format!("{}（{} {}）", clock(w.end()), n.show, n.source.label()),
+        None => format!("{}（沒有下一節）", clock(w.end())),
+    };
+    format!("{}（{}）～ {end}", clock(w.start()), w.slot.source.label())
+}
+
+/// 決策紀錄裡的一則：`09:01:50 合成第二則0900`。
+fn describe_row(rows: &[RundownRow], sel: &inews::Selection, i: Option<usize>) -> String {
+    match i {
+        Some(i) => format!("{} {}", sel.cume[i].map(clock).unwrap_or_else(|| "--:--:--".into()), rows[i].title),
+        None => "（無）".into(),
+    }
 }
 
 impl InewsState {
@@ -348,14 +410,7 @@ impl InewsState {
     }
 
     /// 讀一個 queue：一次 LIST，只 RETR 快取裡沒有的（新的或改過的）。
-    fn read_queue(
-        &mut self,
-        cfg: &InewsConfig,
-        creds: &Credentials,
-        path: &str,
-        stop_at_first_hard: bool,
-        retrieved: &mut usize,
-    ) -> FtpResult<Vec<(ListEntry, NsmlStory)>> {
+    fn read_queue(&mut self, cfg: &InewsConfig, creds: &Credentials, path: &str, retrieved: &mut usize) -> FtpResult<Rundown> {
         let entries: Vec<ListEntry> =
             self.list_dir(cfg, creds, path)?.into_iter().filter(|e| e.kind == ListKind::Story).collect();
         let mut out = Vec::with_capacity(entries.len());
@@ -370,123 +425,264 @@ impl InewsState {
                     story
                 }
             };
-            let hard = story.hard_time().is_some();
             out.push((entry, story));
-            if stop_at_first_hard && hard {
-                break;
-            }
         }
         Ok(out)
     }
 
-    fn fetch_once(&mut self, cfg: &InewsConfig, creds: &Credentials, now: u32) -> FtpResult<FetchResult> {
+    fn fetch_once(&mut self, cfg: &InewsConfig, creds: &Credentials, now: u32, mode: FetchMode) -> FtpResult<FetchResult> {
         let names = self.show_names(cfg, creds)?;
-        let ((mut show, mut start), next) = inews::current_and_next(&names, now)
-            .ok_or_else(|| FtpError::Protocol(format!("{} 底下找不到 4 位數的節次資料夾", cfg.root)))?;
         let queue_of = |show: &str| format!("{}.{}.{}", cfg.root, show, cfg.queue);
         let mut retrieved = 0;
-        let mut switched_early = false;
-        let mut kept = Vec::new();
 
-        if let Some((next_show, next_start)) = next {
-            if inews::seconds_until(next_start, now) <= inews::NEXT_SHOW_PROBE_SECONDS {
-                let probe = self.read_queue(cfg, creds, &queue_of(&next_show), true, &mut retrieved)?;
-                let first_hard = probe.iter().find_map(|(_, s)| s.hard_time());
-                kept.extend(probe.into_iter().map(|(e, _)| e.name));
-                if inews::should_switch_early(next_start, now, first_hard, cfg.lead_minutes) {
-                    show = next_show;
-                    start = next_start;
-                    switched_early = true;
+        // 選節次要看好幾節的 rundown（有沒有稿、第一個硬時間），讀過的這一輪都留著用。
+        let mut rundowns: HashMap<String, Rundown> = HashMap::new();
+        let mut probe_err: Option<FtpError> = None;
+        let plan = {
+            let mut probe = |show: &str| -> inews::ShowProbe {
+                if probe_err.is_some() {
+                    return inews::ShowProbe::default();
                 }
+                if !rundowns.contains_key(show) {
+                    match self.read_queue(cfg, creds, &queue_of(show), &mut retrieved) {
+                        Ok(r) => {
+                            rundowns.insert(show.to_string(), r);
+                        }
+                        Err(e) => {
+                            probe_err = Some(e);
+                            return inews::ShowProbe::default();
+                        }
+                    }
+                }
+                let rows: Vec<RundownRow> = rundowns[show].iter().map(|(e, s)| RundownRow::from_story(s, e.floated)).collect();
+                inews::ShowProbe::of(&rows)
+            };
+            inews::plan_slots(&names, now, &cfg.slot_spans, cfg.lead_minutes, &mut probe)
+        };
+        if let Some(e) = probe_err {
+            return Err(e);
+        }
+        let plan = plan.ok_or_else(|| FtpError::Protocol(format!("{} 底下找不到 4 位數的節次資料夾", cfg.root)))?;
+
+        let rundown_of = |state: &mut Self, rundowns: &mut HashMap<String, Rundown>, show: &str, retrieved: &mut usize| -> FtpResult<()> {
+            if !rundowns.contains_key(show) {
+                let r = state.read_queue(cfg, creds, &queue_of(show), retrieved)?;
+                rundowns.insert(show.to_string(), r);
             }
-        }
+            Ok(())
+        };
+        let cur = plan.current.clone();
+        rundown_of(self, &mut rundowns, &cur.slot.show, &mut retrieved)?;
+        let marker = cfg.cutoff_by_marker.then_some((cfg.cutoff_preview_keyword.as_str(), cfg.cutoff_page_prefix.as_str()));
+        let rows_of = |rundowns: &HashMap<String, Rundown>, show: &str| -> Vec<RundownRow> {
+            rundowns[show].iter().map(|(e, s)| RundownRow::from_story(s, e.floated)).collect()
+        };
 
-        let queue_path = queue_of(&show);
-        let stories = self.read_queue(cfg, creds, &queue_path, false, &mut retrieved)?;
-        kept.extend(stories.iter().map(|(e, _)| e.name.clone()));
-        // 快取只留這一輪還看得到的稿件，換節後舊的就放掉。
-        self.cache.retain(|name, _| kept.contains(name));
+        let cur_rows = rows_of(&rundowns, &cur.slot.show);
+        let sel = inews::select_rows(&cur_rows, Some(now), &cur, cfg.include_floated, marker);
 
-        let rows: Vec<RundownRow> = stories.iter().map(|(e, s)| RundownRow::from_story(s, e.floated)).collect();
-        let sel = inews::select_rows(
-            &rows,
-            now,
-            start,
-            &cfg.cutoff_preview_keyword,
-            &cfg.cutoff_page_prefix,
-            cfg.include_floated,
-        );
-
-        let mut warnings = Vec::new();
-        if sel.rule == inews::CutoffRule::None {
-            warnings.push(format!(
-                "找不到截止點（標題含「{}」之後序號以「{}」開頭的列），整節都會處理，預備稿可能也會被匯入。",
-                cfg.cutoff_preview_keyword, cfg.cutoff_page_prefix
-            ));
-        }
-        if !rows.is_empty() && rows.iter().all(|r| r.hard.is_none()) {
-            warnings.push("這一節的 rundown 沒有任何硬時間（＠），算不出累積時間，暫時不匯入任何稿件。".into());
-        }
-
-        let titles: Vec<String> = sel.rows.iter().map(|&i| stories[i].1.title().to_string()).collect();
-        let file_names = inews::unique_file_names(&titles);
-        let mut files = Vec::with_capacity(sel.rows.len());
-        let mut metas = Vec::with_capacity(sel.rows.len());
-        for (&i, file_name) in sel.rows.iter().zip(file_names) {
-            let (entry, story) = &stories[i];
-            let cume = sel.cume[i].map(inews::format_clock).unwrap_or_default();
-            let fill = (cfg.fill_computed_time && !cume.is_empty()).then_some(cume.as_str());
-            files.push((file_name.clone(), inews::story_to_text(story, fill)));
-            metas.push(StoryMeta {
-                file_name,
-                key: entry.story_key(),
-                version: entry.version().to_string(),
-                cume,
-                floated: entry.floated,
+        let mut events: Vec<String> = Vec::new();
+        for (show, reason) in &plan.skipped {
+            events.push(match reason {
+                inews::SkipReason::Spanned(by) => format!("跳過 {show}（併入 {by}）"),
+                inews::SkipReason::Empty => format!("跳過 {show}（沒有帶樣式的稿）"),
             });
         }
 
+        // 舊節次（換節最後同步或延遲補掃）要輸出的稿排在前面，跟寫進文件的順序一致。
+        let mut extra: Vec<Pick> = Vec::new();
+        let mut switched_from = None;
+        let mut closed_show = None;
+        if let FetchMode::Auto { session_start } = mode {
+            if session_start {
+                self.last_show = None;
+                self.swept_for = None;
+            }
+            // 剛開始自動刷新：不回頭補掃開啟前就結束的節次。
+            if self.swept_for.is_none() {
+                self.swept_for = Some(cur.slot.show.clone());
+            }
+            let sweep = inews::sweep_target(&plan, now, cfg.sweep_delay_minutes, self.swept_for.as_deref()).cloned();
+            if let Some(last) = self.last_show.clone().filter(|l| *l != cur.slot.show) {
+                events.push(format!("換節 {last} → {}", cur.slot.show));
+                match plan.previous.as_ref().filter(|p| p.slot.show == last) {
+                    // 補掃同一節的話，補掃已經涵蓋最後同步，不必做兩次。
+                    Some(prev) if sweep.as_ref().map(|w| &w.slot.show) != Some(&last) => {
+                        rundown_of(self, &mut rundowns, &last, &mut retrieved)?;
+                        let rows = rows_of(&rundowns, &last);
+                        let s = inews::select_rows(&rows, Some(now), prev, cfg.include_floated, marker);
+                        events.push(format!("{last} 最後同步：納入 {} 則（累積時間 < {}）", s.rows.len(), clock(prev.end())));
+                        extra.extend(s.rows.iter().map(|&i| Pick { show: last.clone(), index: i, cume: s.cume[i] }));
+                        switched_from = Some(last);
+                    }
+                    Some(_) => {}
+                    None => events.push(format!("{last} 不是 {} 的上一個有效節次，不做最後同步", cur.slot.show)),
+                }
+            }
+            if let Some(w) = sweep {
+                rundown_of(self, &mut rundowns, &w.slot.show, &mut retrieved)?;
+                let rows = rows_of(&rundowns, &w.slot.show);
+                let s = inews::select_rows(&rows, None, &w, cfg.include_floated, marker);
+                events.push(format!(
+                    "補掃 {}：範圍 {}，納入 {} 則，最後一則 {}",
+                    w.slot.show,
+                    describe_window(&w),
+                    s.rows.len(),
+                    describe_row(&rows, &s, s.last_included())
+                ));
+                extra.extend(s.rows.iter().map(|&i| Pick { show: w.slot.show.clone(), index: i, cume: s.cume[i] }));
+                closed_show = Some(w.slot.show.clone());
+                self.swept_for = Some(cur.slot.show.clone());
+            }
+            self.last_show = Some(cur.slot.show.clone());
+        }
+
+        // 快取只留這一輪還看得到的稿件，換節後舊的就放掉。
+        let kept: std::collections::HashSet<&String> = rundowns.values().flatten().map(|(e, _)| &e.name).collect();
+        self.cache.retain(|name, _| kept.contains(name));
+
+        let mut warnings = Vec::new();
+        if cfg.cutoff_by_marker && sel.rule == inews::CutoffRule::None {
+            warnings.push(format!(
+                "已開啟標記式截止，但找不到截止點（標題含「{}」之後序號以「{}」開頭的列），只用時間判斷。",
+                cfg.cutoff_preview_keyword, cfg.cutoff_page_prefix
+            ));
+        }
+        if !cur_rows.is_empty() && cur_rows.iter().all(|r| r.hard.is_none()) {
+            warnings.push("這一節的 rundown 沒有任何硬時間（＠），算不出累積時間，暫時不匯入任何稿件。".into());
+        }
+
+        let picks: Vec<Pick> = extra
+            .into_iter()
+            .chain(sel.rows.iter().map(|&i| Pick { show: cur.slot.show.clone(), index: i, cume: sel.cume[i] }))
+            .collect();
+        let titles: Vec<String> = picks.iter().map(|p| rundowns[&p.show][p.index].1.title().to_string()).collect();
+        let file_names = inews::unique_file_names(&titles);
+        let mut files = Vec::with_capacity(picks.len());
+        let mut metas = Vec::with_capacity(picks.len());
+        let (mut added, mut changed) = (0, 0);
+        for (pick, file_name) in picks.iter().zip(file_names) {
+            let (entry, story) = &rundowns[&pick.show][pick.index];
+            let cume = pick.cume.map(inews::format_clock).unwrap_or_default();
+            let fill = (cfg.fill_computed_time && !cume.is_empty()).then_some(cume.as_str());
+            files.push((file_name.clone(), inews::story_to_text(story, fill)));
+            let key = entry.story_key();
+            match self.versions.insert(key.clone(), entry.version().to_string()) {
+                None => added += 1,
+                Some(v) if v != entry.version() => changed += 1,
+                _ => {}
+            }
+            metas.push(StoryMeta {
+                file_name,
+                key,
+                version: entry.version().to_string(),
+                cume,
+                floated: entry.floated,
+                show: pick.show.clone(),
+            });
+        }
+
+        let log_line = format!(
+            "節次 {}{}｜範圍 {}｜新增 {added}・變動 {changed}・納入 {}・排除 {}｜最後納入 {}｜第一則排除 {}{}",
+            cur.slot.show,
+            if plan.switched_early { "（提前換節）" } else { "" },
+            describe_window(&cur),
+            picks.len(),
+            sel.excluded,
+            describe_row(&cur_rows, &sel, sel.last_included()),
+            describe_row(&cur_rows, &sel, sel.first_excluded()),
+            if events.is_empty() { String::new() } else { format!("｜{}", events.join("；")) },
+        );
+
         Ok(FetchResult {
             files,
+            log_line,
             meta: InewsMeta {
-                show_label: inews::show_hour_label(&show),
-                show,
-                queue_path,
+                show_label: inews::show_hour_label(&cur.slot.show),
+                show: cur.slot.show.clone(),
+                queue_path: queue_of(&cur.slot.show),
                 now: inews::format_clock(now as i64),
-                switched_early,
+                switched_early: plan.switched_early,
+                range_start: clock(cur.start()),
+                range_end: clock(cur.end()),
+                start_source: cur.slot.source.label().into(),
+                end_show: cur.next.as_ref().map(|n| n.show.clone()),
+                end_source: cur.next.as_ref().map(|n| n.source.label().to_string()),
+                switched_from,
+                closed_show,
                 cutoff_rule: match sel.rule {
                     inews::CutoffRule::AfterPreview => "after_preview",
                     inews::CutoffRule::LastPrefixed => "last_prefixed",
                     inews::CutoffRule::None => "none",
                 }
                 .into(),
-                cutoff_title: sel.cutoff.map(|i| rows[i].title.clone()),
-                list_count: stories.len(),
+                cutoff_title: sel.cutoff.map(|i| cur_rows[i].title.clone()),
+                list_count: cur_rows.len(),
                 retrieved,
                 pending: sel.pending,
                 stories: metas,
+                events,
                 warnings,
             },
         })
     }
 
-    /// 一輪自動匯入。連線斷了（伺服器閒置踢人、網路閃斷）就重連再試一次。
-    pub fn fetch(&mut self, cfg: &InewsConfig, creds: &Credentials, now: u32) -> Result<FetchResult, String> {
-        match self.fetch_once(cfg, creds, now) {
+    /// 一輪匯入。連線斷了（伺服器閒置踢人、網路閃斷）就重連再試一次。
+    pub fn fetch(&mut self, cfg: &InewsConfig, creds: &Credentials, now: u32, mode: FetchMode) -> Result<FetchResult, String> {
+        match self.fetch_once(cfg, creds, now, mode) {
             Ok(r) => Ok(r),
             // 421 = 伺服器閒置踢人；530 = 舊連線的登入狀態失效。都重新登入再試。
             Err(FtpError::Io(_)) | Err(FtpError::Protocol(_)) if self.session.is_some() => {
                 self.drop_session();
-                self.fetch_once(cfg, creds, now).map_err(|e| e.to_string())
+                self.fetch_once(cfg, creds, now, mode).map_err(|e| e.to_string())
             }
             Err(FtpError::Reply { ref reply, .. }) if self.session.is_some() && matches!(reply.code, 421 | 530) => {
                 self.drop_session();
-                self.fetch_once(cfg, creds, now).map_err(|e| e.to_string())
+                self.fetch_once(cfg, creds, now, mode).map_err(|e| e.to_string())
             }
             Err(e) => {
                 // 登入失敗之類的：下一輪重新連線，不要卡在壞掉的連線上。
                 self.drop_session();
                 Err(e.to_string())
+            }
+        }
+    }
+}
+
+// --- 決策紀錄 ---------------------------------------------------------------------
+
+/// 紀錄保留天數。
+pub const LOG_KEEP_DAYS: i64 = 14;
+
+/// 台北時間的 (yyyymmdd, `yyyy-mm-dd HH:MM:SS`)。
+fn taipei_stamp() -> (String, String) {
+    let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+    (now.format("%Y%m%d").to_string(), now.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+/// 附加一行到 `dir/inews-YYYYMMDD.log`，順便刪掉超過 14 天的紀錄。寫不進去不影響匯入。
+pub fn append_log(dir: &std::path::Path, line: &str) {
+    let (day, stamp) = taipei_stamp();
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let path = dir.join(format!("inews-{day}.log"));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{stamp} {line}");
+    }
+    prune_logs(dir, &day);
+}
+
+/// 刪掉檔名日期比今天早 14 天以上的 `inews-YYYYMMDD.log`。
+fn prune_logs(dir: &std::path::Path, today: &str) {
+    let Ok(today) = chrono::NaiveDate::parse_from_str(today, "%Y%m%d") else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(date) = name.strip_prefix("inews-").and_then(|n| n.strip_suffix(".log")) else { continue };
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y%m%d") {
+            if (today - d).num_days() >= LOG_KEEP_DAYS {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }
@@ -695,45 +891,115 @@ mod tests {
         assert!(!err.contains("wrong"), "password leaked into {err}");
     }
 
+    fn names_of(r: &FetchResult) -> Vec<&str> {
+        r.files.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
     #[test]
-    fn a_round_imports_only_aired_rows_above_the_cutoff() {
+    fn a_round_imports_aired_rows_inside_the_time_window() {
         let server = two_shows(None);
         let mut state = InewsState::default();
         // 08:20：大片頭 07:55、早安稿 07:56、第二則 07:58、預告 07:59:30 都播過了。
-        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 20 * 60).unwrap();
+        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 20 * 60, FetchMode::Manual).unwrap();
         assert_eq!(r.meta.show, "0800");
         assert!(!r.meta.switched_early);
-        assert_eq!(r.meta.cutoff_rule, "after_preview");
-        assert_eq!(r.meta.cutoff_title.as_deref(), Some("=CM 3=="));
-        let names: Vec<&str> = r.files.iter().map(|(n, _)| n.as_str()).collect();
-        // float 的框不輸出；截止點（=CM 3==）以下的預備稿不處理。
-        assert_eq!(names, ["大片頭.txt", "合成早安稿0800.txt", "合成第二則0800.txt", "下節預告三.txt"]);
+        assert_eq!((r.meta.range_start.as_str(), r.meta.range_end.as_str()), ("07:55:00", "08:55:00"));
+        assert_eq!(r.meta.start_source, "硬時間");
+        assert_eq!(r.meta.end_show.as_deref(), Some("0900"));
+        assert_eq!(r.meta.cutoff_rule, "none", "marker cutoff is off by default");
+        // float 的框不輸出；=CM 3==（08:50）還沒播到。
+        assert_eq!(names_of(&r), ["大片頭.txt", "合成早安稿0800.txt", "合成第二則0800.txt", "下節預告三.txt"]);
+        assert_eq!(r.meta.pending, 1);
         let early = &r.files[1].1;
         assert!(early.contains("\r\n累積時間: 07:56:00\r\n"), "computed cume filled in");
         assert_eq!(r.meta.stories[1].key, "0000000A:00000002");
         assert_eq!(r.meta.stories[1].version, "00000A02");
-        assert_eq!(*server.retrs.lock().unwrap(), 7);
+        assert_eq!(r.meta.stories[1].show, "0800");
+        assert!(r.log_line.contains("範圍 07:55:00（硬時間）～ 08:55:00（0900 硬時間）"), "{}", r.log_line);
+        assert!(r.log_line.contains("最後納入 07:59:30 下節預告三"), "{}", r.log_line);
+        assert!(r.log_line.contains("第一則排除 08:50:00 =CM 3=="), "{}", r.log_line);
+        // 0800 全部 7 則 + 為了算 0800 的結束時間讀的 0900 的 2 則。
+        assert_eq!(*server.retrs.lock().unwrap(), 9);
 
-        // 第二輪：LIST 一次，沒有任何變動就不 RETR。
-        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 21 * 60).unwrap();
+        // 第二輪：每個 queue LIST 一次，沒有任何變動就不 RETR。
+        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 21 * 60, FetchMode::Manual).unwrap();
         assert_eq!(r.meta.retrieved, 0);
-        assert_eq!(*server.retrs.lock().unwrap(), 7);
+        assert_eq!(*server.retrs.lock().unwrap(), 9);
         let lists = server.commands().iter().filter(|c| *c == "LIST").count();
-        assert_eq!(lists, 3, "root once (cached), the queue once per round");
+        assert_eq!(lists, 5, "root once (cached), both queues once per round");
     }
 
     #[test]
     fn the_next_show_takes_over_once_its_first_hard_time_passes() {
         let server = two_shows(None);
         let mut state = InewsState::default();
-        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 54 * 60).unwrap();
+        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 54 * 60, FetchMode::Manual).unwrap();
         assert_eq!(r.meta.show, "0800");
         // 08:55:30：0900 的大片頭（08:55:00）已經開始，九點稿（08:56:00）還沒。
-        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 55 * 60 + 30).unwrap();
+        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 55 * 60 + 30, FetchMode::Manual).unwrap();
         assert_eq!(r.meta.show, "0900");
         assert!(r.meta.switched_early);
         assert_eq!(r.meta.show_label, "09");
-        assert_eq!(r.files.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["大片頭.txt"]);
+        assert_eq!(names_of(&r), ["大片頭.txt"]);
+        assert_eq!(r.meta.switched_from, None, "manual imports never do the final sync");
+    }
+
+    #[test]
+    fn switching_shows_does_a_final_sync_of_the_old_one_then_sweeps_it_at_ten_past() {
+        let server = two_shows(None);
+        let mut state = InewsState::default();
+        let c = cfg(server.port);
+        let auto = |start| FetchMode::Auto { session_start: start };
+        // 08:51 開始自動刷新：0800，=CM 3==（08:50）剛播。
+        let r = state.fetch(&c, &creds("secret"), 8 * 3600 + 51 * 60, auto(true)).unwrap();
+        assert_eq!(r.meta.show, "0800");
+        assert_eq!(r.meta.closed_show, None, "never sweeps a show that ended before auto-refresh started");
+        // 08:55:30 換到 0900：先對 0800 做最後一次同步（累積時間 < 08:55:00），預備稿不納入。
+        let r = state.fetch(&c, &creds("secret"), 8 * 3600 + 55 * 60 + 30, auto(false)).unwrap();
+        assert_eq!(r.meta.show, "0900");
+        assert_eq!(r.meta.switched_from.as_deref(), Some("0800"));
+        let shows: Vec<(&str, &str)> = r.meta.stories.iter().map(|s| (s.show.as_str(), s.file_name.as_str())).collect();
+        assert_eq!(
+            shows,
+            [
+                ("0800", "大片頭.txt"),
+                ("0800", "合成早安稿0800.txt"),
+                ("0800", "合成第二則0800.txt"),
+                ("0800", "下節預告三.txt"),
+                ("0800", "=CM 3==.txt"),
+                ("0900", "大片頭_2.txt"),
+            ]
+        );
+        assert!(r.log_line.contains("換節 0800 → 0900"), "{}", r.log_line);
+        // 09:05 還沒到補掃時間。
+        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 5 * 60, auto(false)).unwrap();
+        assert_eq!(r.meta.closed_show, None);
+        assert!(r.meta.stories.iter().all(|s| s.show == "0900"));
+        // 09:10 補掃 0800：不看現在時間，累積時間 < 08:55:00 的全部納入；分隔線可以寫了。
+        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 10 * 60, auto(false)).unwrap();
+        assert_eq!(r.meta.closed_show.as_deref(), Some("0800"));
+        let swept: Vec<&str> = r.meta.stories.iter().filter(|s| s.show == "0800").map(|s| s.file_name.as_str()).collect();
+        assert_eq!(swept.len(), 5);
+        assert!(!r.files.iter().any(|(_, t)| t.contains("合成預備稿0800")));
+        assert!(r.log_line.contains("補掃 0800"), "{}", r.log_line);
+        // 只補掃一次。
+        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 11 * 60, auto(false)).unwrap();
+        assert_eq!(r.meta.closed_show, None);
+    }
+
+    #[test]
+    fn old_logs_are_pruned_after_fourteen_days() {
+        let dir = std::env::temp_dir().join(format!("nst-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for d in ["20261001", "20261011", "20261012", "20261025"] {
+            std::fs::write(dir.join(format!("inews-{d}.log")), "x").unwrap();
+        }
+        std::fs::write(dir.join("other.txt"), "x").unwrap();
+        prune_logs(&dir, "20261025");
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        left.sort();
+        assert_eq!(left, ["inews-20261012.log", "inews-20261025.log", "other.txt"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -741,7 +1007,7 @@ mod tests {
         // 第 8 個指令（進 queue 的 CWD）時伺服器直接斷線，像閒置被踢掉一樣。
         let server = two_shows(Some(8));
         let mut state = InewsState::default();
-        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 20 * 60).unwrap();
+        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 20 * 60, FetchMode::Manual).unwrap();
         assert_eq!(r.meta.show, "0800");
         let logins = server.commands().iter().filter(|c| c.starts_with("USER")).count();
         assert!(logins >= 2, "reconnected and logged in again");
@@ -753,7 +1019,7 @@ mod tests {
         queues.insert("51新聞台.SHOWS".to_string(), "d--------- 1 d 27 Apr 30  2025 .0800\r\n".to_string());
         queues.insert("51新聞台.SHOWS.0800.ONAIR".to_string(), String::new());
         let server = FakeServer::start(queues, HashMap::new(), None);
-        let r = InewsState::default().fetch(&cfg(server.port), &creds("secret"), 8 * 3600).unwrap();
+        let r = InewsState::default().fetch(&cfg(server.port), &creds("secret"), 8 * 3600, FetchMode::Manual).unwrap();
         assert!(r.files.is_empty());
         assert_eq!(r.meta.list_count, 0);
     }

@@ -36,6 +36,7 @@
     "allow-test-inews-connection",
     "allow-get-inews-credential-status",
     "allow-set-inews-credentials",
-    "allow-clear-inews-credentials"
+    "allow-clear-inews-credentials",
+    "allow-open-inews-log-folder"
   ]
 }
