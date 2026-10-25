@@ -374,6 +374,15 @@ pub struct InewsConfig {
     /// NSML 的 cume-time 是空的時候，填入照 iNEWS 方式算出來的累積時間。
     /// 關掉就跟手動「匯出延伸文稿」位元組完全相同。
     pub fill_computed_time: bool,
+    /// 跨節合併（v0.3.1）：`1200 = 1400` = 1200 的 rundown 一直用到 1400 開始，中間的
+    /// 1300 跳過。
+    pub slot_spans: BTreeMap<String, String>,
+    /// 每個整點過幾分鐘，對上一個有效節次完整補掃一次（補抓換節瞬間漏掉、或播出後才
+    /// 修改的稿）。該節的分隔線在補掃完成後才寫。
+    pub sweep_delay_minutes: u32,
+    /// v0.3.0 的標記式截止（預告後的廣告列以下不處理）。v0.3.1 起改用時間判斷，預設
+    /// 關閉：跨節 rundown 中間有好幾個 CM，用標記會切在一半。
+    pub cutoff_by_marker: bool,
 }
 
 impl Default for InewsConfig {
@@ -392,6 +401,12 @@ impl Default for InewsConfig {
             divider_position: DividerPosition::After,
             auto_write: false,
             fill_computed_time: true,
+            slot_spans: [("1200", "1400"), ("1800", "2000")]
+                .into_iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect(),
+            sweep_delay_minutes: 10,
+            cutoff_by_marker: false,
         }
     }
 }
@@ -688,6 +703,32 @@ theme = "warm"
         assert_eq!(cfg.inews.divider_position, DividerPosition::Before);
         assert_eq!(cfg.inews.queue, "ONAIR");
         assert_eq!(cfg.inews.lead_minutes, 5);
+    }
+
+    #[test]
+    fn a_v030_inews_section_keeps_its_values_and_gains_the_v031_settings() {
+        // A full [inews] section as v0.3.0 saved it: none of the v0.3.1 keys.
+        let s = format!(
+            "{}\n[inews]\nserver = \"10.3.125.2\"\nport = 21\nroot = \"51新聞台.SHOWS\"\nqueue = \"ONAIR\"\n\
+             poll_seconds = 15\nlead_minutes = 4\ninclude_floated = false\ncutoff_preview_keyword = \"預告\"\n\
+             cutoff_page_prefix = \"=\"\ndivider_format = \"=== {{hh}} ===\"\ndivider_position = \"after\"\n\
+             auto_write = true\nfill_computed_time = true\n",
+            v6_toml()
+        );
+        let mut cfg = load_from_str(&s).unwrap();
+        cfg.config_version = CURRENT_CONFIG_VERSION;
+        assert!(!migrate(&mut cfg), "new keys come from serde defaults, no migration needed");
+        assert_eq!(cfg.inews.poll_seconds, 15);
+        assert_eq!(cfg.inews.lead_minutes, 4);
+        assert_eq!(cfg.inews.divider_format, "=== {hh} ===");
+        assert!(cfg.inews.auto_write);
+        assert_eq!(cfg.inews.slot_spans.get("1200").map(String::as_str), Some("1400"));
+        assert_eq!(cfg.inews.slot_spans.get("1800").map(String::as_str), Some("2000"));
+        assert_eq!(cfg.inews.sweep_delay_minutes, 10);
+        assert!(!cfg.inews.cutoff_by_marker);
+        // And it round-trips with the new keys.
+        let back = load_from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.inews.slot_spans, cfg.inews.slot_spans);
     }
 
     #[test]

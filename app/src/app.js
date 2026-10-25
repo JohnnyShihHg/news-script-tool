@@ -40,6 +40,8 @@ const {
   mergeInewsItems,
   autoWriteCandidates,
   composeInewsWrite,
+  parseSlotSpans,
+  formatSlotSpans,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -793,6 +795,10 @@ let inewsVersions = new Map();
 let inewsShow = "";
 /** Show of the last automatic write this session, so the divider goes in once. */
 let lastWrittenShow = "";
+/** Shows whose delayed sweep has completed: their divider may now be written. */
+const closedShows = new Set();
+/** The next auto round is the first since 自動刷新 was switched on. */
+let inewsSessionStart = false;
 /** `${key}|${version}` written this session: one version is never written twice. */
 const writtenKeys = new Set();
 let inewsTimer = null;
@@ -805,8 +811,9 @@ function applyInewsConfig(config) {
 }
 
 function rememberInewsVersions(summary) {
-  const stories = summary.inews?.stories ?? [];
-  inewsVersions = new Map(stories.map((s) => [s.key, s.version]));
+  // Merged, not replaced: a sweep round also reports the previous show's stories, and
+  // the round after it must not see them as new again.
+  for (const s of summary.inews?.stories ?? []) inewsVersions.set(s.key, s.version);
   inewsShow = summary.inews?.show ?? "";
 }
 
@@ -817,13 +824,17 @@ function inewsStatus(text, kind = "") {
 }
 
 function describeInewsRound(meta) {
+  const aired = (meta.stories ?? []).filter((s) => (s.show ?? meta.show) === meta.show).length;
+  const end = meta.end_show ? `${meta.range_end}（${meta.end_show} 開始，${meta.end_source}）` : `${meta.range_end}`;
   const lines = [
-    `iNEWS ${meta.show} 節（${meta.queue_path}，${meta.now}${meta.switched_early ? "，已提前換到下一節" : ""}）：` +
-      `已播出 ${meta.stories.length} 則、截止點以上尚未播出 ${meta.pending} 則；本輪讀取 ${meta.retrieved} / ${meta.list_count} 則。`,
+    `iNEWS ${meta.show} 節（現在 ${meta.now}${meta.switched_early ? "，已提前換到這一節" : ""}）：` +
+      `有效範圍 ${meta.range_start}（${meta.start_source}）～ ${end}。` +
+      `已播出 ${aired} 則、範圍內尚未播出 ${meta.pending} 則；本輪讀取 ${meta.retrieved} / ${meta.list_count} 則。`,
   ];
   if (meta.cutoff_title) {
-    lines.push(`截止點：「${meta.cutoff_title}」以下不處理${meta.cutoff_rule === "last_prefixed" ? "（找不到預告後的廣告列，改用最後一個廣告列）" : ""}。`);
+    lines.push(`標記式截止：「${meta.cutoff_title}」以下不處理${meta.cutoff_rule === "last_prefixed" ? "（找不到預告後的廣告列，改用最後一個廣告列）" : ""}。`);
   }
+  for (const e of meta.events ?? []) lines.push(`・${e}`);
   for (const w of meta.warnings ?? []) lines.push(`⚠ ${w}`);
   return lines.join("\n");
 }
@@ -869,15 +880,16 @@ async function inewsRound() {
   try {
     let summary;
     try {
-      summary = await invoke("import_inews");
+      summary = await invoke("import_inews", { auto: true, sessionStart: inewsSessionStart });
+      inewsSessionStart = false;
     } catch (err) {
       // 網路閃斷或伺服器重啟：下一輪後端會自動重連，所以不停下來。
       inewsStatus(`⚠ 讀取 iNEWS 失敗（下一輪會自動重試）：${err}`, "error");
       return;
     }
     const meta = summary.inews;
-    const showChanged = inewsShow !== "" && meta.show !== inewsShow;
-    const { added, changed } = diffInewsVersions(showChanged ? new Map() : inewsVersions, meta.stories);
+    if (meta.closed_show) closedShows.add(meta.closed_show);
+    const { added, changed } = diffInewsVersions(inewsVersions, meta.stories);
     const hadCards = items.some((i) => i.inews);
     items = sortByTime(mergeInewsItems(hadCards ? items : [], inewsItemsFromSummary(summary), writtenKeys));
     rememberInewsVersions(summary);
@@ -892,7 +904,7 @@ async function inewsRound() {
     );
 
     const pending = items.some((i) => isPendingWrite(i, writtenKeys));
-    if (added.length || changed.length || pending) await runInewsPipeline();
+    if (added.length || changed.length || pending || meta.closed_show || dividerOwed()) await runInewsPipeline();
   } finally {
     inewsRoundActive = false;
     inewsBusy = false;
@@ -928,30 +940,61 @@ async function runInewsPipeline() {
     }
   }
 
-  // 3. 寫入（或等確認）。
+  // 3. 寫入（或等確認）。分隔線要等上一節補掃完才寫，新一節的稿也先等著。
   const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel);
-  if (ready.length === 0) {
+  const plan = inewsWriteText(ready);
+  if (plan.written.length === 0 && !plan.text.trim()) {
     hideInewsConfirm();
+    if (plan.held.length) showHeldNotice(plan.held);
     return;
   }
   if (inewsCfg.auto_write) await writeInewsItems(ready);
-  else showInewsConfirm(ready);
+  else showInewsConfirm(plan);
+}
+
+/// Shows that still have entries waiting for keywords or a compare: their divider
+/// waits for those, or a straggler would land under the next show's divider.
+function pendingShowsOutside(ready) {
+  const inReady = new Set(ready);
+  return new Set(
+    items.filter((i) => i.inews && !inReady.has(i) && isPendingWrite(i, writtenKeys)).map((i) => i.inews.show)
+  );
 }
 
 function inewsWriteText(ready) {
   return composeInewsWrite(
     ready,
-    lastWrittenShow,
+    { lastShow: lastWrittenShow, closed: closedShows, pending: pendingShowsOutside(ready) },
     { format: inewsCfg.divider_format, position: inewsCfg.divider_position },
     (group) => buildOutputText(group.map(outputFieldsOf))
   );
 }
 
-function showInewsConfirm(ready) {
-  const slugs = ready.map(slugOf);
+/// A closed show's divider is due even when no story comes with it.
+function dividerOwed() {
+  return !!lastWrittenShow && closedShows.has(lastWrittenShow) && inewsWriteText([]).text.trim() !== "";
+}
+
+function heldText(held) {
+  const shows = [...new Set(held.map((i) => i.inews?.show))].join("、");
+  return `${held.length} 則 ${shows} 的稿等 ${lastWrittenShow} 節延遲補掃完成、寫完分隔線後再寫入（整點過 ${inewsCfg.sweep_delay_minutes ?? 10} 分鐘）。`;
+}
+
+function showHeldNotice(held) {
+  const status = el("compareStatus");
+  status.classList.remove("hidden");
+  status.className = "compare-status";
+  status.textContent = `⏸ ${heldText(held)}`;
+}
+
+function showInewsConfirm(plan) {
+  const slugs = plan.written.map(slugOf);
   el("inewsConfirmText").textContent =
-    `${ready.length} 則已產生關鍵字，等待寫入協作文件：` +
-    slugs.slice(0, 8).join("、") + (slugs.length > 8 ? ` 等 ${slugs.length} 則` : "");
+    (slugs.length
+      ? `${slugs.length} 則已產生關鍵字，等待寫入協作文件：` + slugs.slice(0, 8).join("、") + (slugs.length > 8 ? ` 等 ${slugs.length} 則` : "")
+      : `等待寫入節次分隔線 ${plan.dividers.join("、")}`) +
+    (plan.dividers.length && slugs.length ? `（含分隔線 ${plan.dividers.join("、")}）` : "") +
+    (plan.held.length ? `\n${heldText(plan.held)}` : "");
   el("inewsConfirm").classList.remove("hidden");
 }
 
@@ -962,16 +1005,18 @@ function hideInewsConfirm() {
 async function writeInewsItems(ready) {
   // 寫入前再擋一次：同一個版本（或這次 session 寫過的 slug）不重複寫入。
   const fresh = ready.filter((i) => isPendingWrite(i, writtenKeys) && !writtenSlugs.has(`${slugOf(i)}|${i.inews?.version ?? ""}`));
-  if (fresh.length === 0) return;
-  const { text, lastShow } = inewsWriteText(fresh);
-  if (!text.trim()) return;
+  const { text, lastShow, written, held } = inewsWriteText(fresh);
+  if (!text.trim()) {
+    if (held.length) showHeldNotice(held);
+    return;
+  }
   const status = el("compareStatus");
   status.classList.remove("hidden");
   status.className = "compare-status";
-  status.textContent = `寫入 ${fresh.length} 則到協作文件中…`;
+  status.textContent = written.length ? `寫入 ${written.length} 則到協作文件中…` : "寫入節次分隔線中…";
   try {
     const msg = await invoke("append_to_collab_doc", { text });
-    for (const i of fresh) {
+    for (const i of written) {
       const key = writtenKey(i);
       if (key) writtenKeys.add(key);
       writtenSlugs.add(slugOf(i));
@@ -983,7 +1028,8 @@ async function writeInewsItems(ready) {
     }
     lastWrittenShow = lastShow;
     hideInewsConfirm();
-    status.textContent = `✅ 自動寫入 ${fresh.length} 則：${msg}`;
+    status.textContent = (written.length ? `✅ 自動寫入 ${written.length} 則：${msg}` : `✅ 已寫入節次分隔線：${msg}`) +
+      (held.length ? `\n⏸ ${heldText(held)}` : "");
     renderFunnel();
     render();
   } catch (err) {
@@ -997,7 +1043,7 @@ async function confirmInewsWrite() {
   try {
     // 用按下去這一刻的狀態重算，不用顯示時那份：中間可能比對過或改過勾選。
     const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel);
-    if (ready.length === 0) {
+    if (ready.length === 0 && !dividerOwed()) {
       hideInewsConfirm();
       return;
     }
@@ -1033,6 +1079,7 @@ async function toggleInewsAuto() {
     stopInewsAuto(`⚠ ${err}`);
     return;
   }
+  inewsSessionStart = true;
   inewsStatus(`自動刷新已開啟，每 ${inewsCfg.poll_seconds} 秒讀一次 iNEWS。` +
     (inewsCfg.auto_write ? "（全自動寫入）" : "（產生關鍵字後等你按「確認寫入」）"));
   scheduleInewsRound(0);
@@ -1347,11 +1394,20 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <div class="field"><label>節次所在路徑（點號串接）</label><input type="text" data-cfg="inews.root" value="${escapeHtml(inewsSettings.root)}" /></div>
             <div class="field"><label>Queue</label><input type="text" data-cfg="inews.queue" value="${escapeHtml(inewsSettings.queue)}" /></div>
             <div class="field"><label>自動刷新間隔（秒）</label><input type="number" min="3" data-cfg-num="inews.poll_seconds" value="${inewsSettings.poll_seconds}" /></div>
-            <div class="field"><label>下一節沒有硬時間時，整點前幾分鐘換節</label><input type="number" min="0" data-cfg-num="inews.lead_minutes" value="${inewsSettings.lead_minutes}" /></div>
-            <div class="muted">節目會在整點前開始：預設選已過整點的最近一節，但只要下一節 rundown 的第一個硬時間（＠）已經到了就提前換過去；下一節沒有硬時間才用這個分鐘數。</div>
-            <div class="field"><label>截止點：預告關鍵字</label><input type="text" data-cfg="inews.cutoff_preview_keyword" value="${escapeHtml(inewsSettings.cutoff_preview_keyword)}" /></div>
-            <div class="field"><label>截止點：廣告列序號開頭</label><input type="text" data-cfg="inews.cutoff_page_prefix" value="${escapeHtml(inewsSettings.cutoff_page_prefix)}" /></div>
-            <div class="muted">找最後一則標題含預告關鍵字的稿，再找它之後第一個序號以這個開頭的列（例：<code>=CM 3==</code>），從那一列開始以下是預備稿，不處理。找不到就改用最後一個這樣的列；再找不到就整節處理並顯示警告。</div>
+            <div class="field"><label>節次開始時間找不到可信的硬時間時，整點前幾分鐘開始</label><input type="number" min="0" data-cfg-num="inews.lead_minutes" value="${inewsSettings.lead_minutes}" /></div>
+            <div class="muted">節次開始時間 = 該節 rundown 的第一個硬時間（＠），但只有落在整點前 30 分 ～ 整點後 15 分之間才採用，否則用整點減這個分鐘數。目前節次的有效範圍是從它的開始時間到下一個有效節次的開始時間；下一節一開始就提前換過去。累積時間早於節次開始 10 分鐘以上的是殘留稿，不處理。</div>
+            <div class="field"><label>跨節合併（例：1200=1400, 1800=2000）</label><input type="text" data-cfg-spans="inews.slot_spans" value="${escapeHtml(formatSlotSpans(inewsSettings.slot_spans))}" /></div>
+            <div class="muted">1200=1400 表示 1200 的 rundown 一直用到 1400 開始，中間的 1300 跳過。沒有帶樣式稿件的節次也會自動跳過。</div>
+            <div class="field"><label>延遲補掃：整點過幾分鐘補掃上一節</label><input type="number" min="0" data-cfg-num="inews.sweep_delay_minutes" value="${inewsSettings.sweep_delay_minutes ?? 10}" /></div>
+            <div class="muted">例：09:10 對 0800 完整掃一次，補抓換節瞬間漏掉或播出後才改的稿；該節的分隔線在補掃完成後才寫，新一節的稿在那之前先等著。跨節節次要等它真正結束（1200 是 14:10）才補掃。只在自動刷新時進行。</div>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.cutoff_by_marker" ${inewsSettings.cutoff_by_marker ? "checked" : ""} /> 另外套用標記式截止（v0.3.0 的規則，預設關閉）</label>
+            <div class="field"><label>標記式截止：預告關鍵字</label><input type="text" data-cfg="inews.cutoff_preview_keyword" value="${escapeHtml(inewsSettings.cutoff_preview_keyword)}" /></div>
+            <div class="field"><label>標記式截止：廣告列序號開頭</label><input type="text" data-cfg="inews.cutoff_page_prefix" value="${escapeHtml(inewsSettings.cutoff_page_prefix)}" /></div>
+            <div class="muted">打開時，最後一則標題含預告關鍵字的稿之後第一個序號以這個開頭的列（例：<code>=CM 3==</code>）以下也不處理。1200 播到 1400 這種 rundown 中間有好幾個 CM，打開會切在一半，建議維持關閉。</div>
+            <div class="field">
+              <label>決策紀錄（每次同步選了哪一節、範圍、納入／排除，保留 14 天）</label>
+              <div class="keywords-row"><button id="openInewsLogBtn" type="button">開啟紀錄資料夾</button><span id="inewsLogStatus" class="muted"></span></div>
+            </div>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.include_floated" ${inewsSettings.include_floated ? "checked" : ""} /> 也匯入 float 列（版型、框、SOU 這類 iNEWS 上 float 的稿）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.fill_computed_time" ${inewsSettings.fill_computed_time ? "checked" : ""} /> 累積時間空白時填入自動算出的時間（關掉就跟手動匯出完全相同）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_write" ${inewsSettings.auto_write ? "checked" : ""} /> 全自動寫入協作文件（不勾 = 產生關鍵字後等你按「確認寫入」）</label>
@@ -1535,6 +1591,11 @@ function readConfigFromForm(base) {
       : elm.value;
     setPath(cfg, path, value);
   });
+  document.querySelectorAll("[data-cfg-spans]").forEach((elm) => {
+    const spans = parseSlotSpans(elm.value);
+    if (spans === null) throw new Error(`跨節合併格式錯誤：「${elm.value}」，請寫成 1200=1400, 1800=2000`);
+    setPath(cfg, elm.dataset.cfgSpans, spans);
+  });
   document.querySelectorAll("[data-cfg-bool]").forEach((elm) => setPath(cfg, elm.dataset.cfgBool, elm.checked));
   document.querySelectorAll("[data-cfg-num]").forEach((elm) => setPath(cfg, elm.dataset.cfgNum, Number(elm.value)));
   document.querySelectorAll("[data-punct-key]").forEach((elm) => {
@@ -1603,6 +1664,13 @@ async function openSettings() {
       openSettings();
     } catch (err) {
       inewsCredStatus(`⚠ 清除失敗：${err}`, true);
+    }
+  });
+  el("openInewsLogBtn").addEventListener("click", async () => {
+    try {
+      el("inewsLogStatus").textContent = await invoke("open_inews_log_folder");
+    } catch (err) {
+      el("inewsLogStatus").textContent = `⚠ ${err}`;
     }
   });
   el("testInewsBtn").addEventListener("click", async () => {

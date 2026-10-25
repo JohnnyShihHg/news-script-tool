@@ -505,7 +505,8 @@
       const story = byFile.get(fields.file_name);
       if (story) {
         item.id = `inews-${story.key}`;
-        item.inews = { key: story.key, version: story.version, show: meta.show };
+        // 換節最後同步、延遲補掃的稿屬於舊節次，不是這一輪的目前節次。
+        item.inews = { key: story.key, version: story.version, show: story.show ?? meta.show };
       }
       return item;
     });
@@ -550,13 +551,13 @@
   function mergeInewsItems(previous, fresh, writtenKeys) {
     const prevById = new Map((previous ?? []).filter((p) => p.inews).map((p) => [p.id, p]));
     const freshIds = new Set(fresh.map((f) => f.id));
-    const freshShow = fresh.find((f) => f.inews)?.inews.show;
+    const freshShows = new Set(fresh.filter((f) => f.inews).map((f) => f.inews.show));
     const merged = fresh.map((f) => {
       const p = prevById.get(f.id);
       return p && f.inews && p.inews.version === f.inews.version ? p : f;
     });
     const carried = (previous ?? []).filter(
-      (p) => p.inews && !freshIds.has(p.id) && p.inews.show !== freshShow && isPendingWrite(p, writtenKeys)
+      (p) => p.inews && !freshIds.has(p.id) && !freshShows.has(p.inews.show) && isPendingWrite(p, writtenKeys)
     );
     return [...carried, ...merged];
   }
@@ -575,6 +576,24 @@
     );
   }
 
+  /**
+   * 跨節合併設定的文字 ↔ 物件：`1200=1400, 1800=2000` ↔ `{ "1200": "1400", "1800": "2000" }`.
+   * Typed with a Chinese IME, so full-width ＝，、 and → are accepted too.
+   */
+  function parseSlotSpans(text) {
+    const spans = {};
+    for (const part of String(text ?? "").split(/[,，、;；\s]+/)) {
+      const m = part.trim().match(/^(\d{4})\s*(?:=|＝|->|→)\s*(\d{4})$/);
+      if (m) spans[m[1]] = m[2];
+      else if (part.trim()) return null;
+    }
+    return spans;
+  }
+
+  function formatSlotSpans(spans) {
+    return Object.entries(spans ?? {}).map(([a, b]) => `${a}=${b}`).join(", ");
+  }
+
   /** `==== {hh} ====` with `{hh}` = the show's hour (`0800` -> `08`) and `{show}` = its folder name. */
   function formatDivider(format, show) {
     const s = String(show ?? "");
@@ -582,32 +601,68 @@
   }
 
   /**
-   * The text one automatic write sends, show by show in the order given, with a
-   * divider wherever the show changes:
-   *   after  -- before the first entry of a new show, a divider naming the show that
-   *             just ended (only once something of that show was written);
-   *   before -- before the first entry of every show, naming that show.
-   * `toText(items)` renders one show's entries (buildOutputText in the app).
+   * The text one automatic write sends, show by show, with the 節次分隔線 placed so
+   * that a show's divider only goes in once its delayed sweep is done (v0.3.1).
+   *
+   * The shared doc can only grow at the bottom, so anything the sweep picks up has to
+   * be written before the divider -- and the next show's stories after it. So while
+   * the show last written to (`lastShow`) is still open, stories of a newer show are
+   * held back (returned in `held`) rather than written above the divider.
+   *
+   *   closed   -- shows whose sweep has completed (`closed_show` from the backend)
+   *   pending  -- shows that still have entries waiting (keywords, compare) outside
+   *               `items`; their divider waits for those too
+   *   after    -- once `lastShow` is closed and nothing of it is pending, a divider
+   *               naming it goes in, even if no new story comes with it
+   *   before   -- a divider naming the new show goes in before its first story
+   *
+   * Stories of a show already closed and left behind arrive late (edited after the
+   * sweep); they are written where they are, with no divider of their own.
    */
-  function composeInewsWrite(items, lastShow, { format, position }, toText) {
+  function composeInewsWrite(items, { lastShow = "", closed = new Set(), pending = new Set() } = {}, { format, position }, toText) {
     const groups = [];
     for (const i of items) {
       const show = i.inews?.show ?? "";
-      const g = groups[groups.length - 1];
-      if (g && g.show === show) g.items.push(i);
+      const g = groups.find((x) => x.show === show);
+      if (g) g.items.push(i);
       else groups.push({ show, items: [i] });
     }
+    // The show being written goes first: its sweep results belong above its divider.
+    groups.sort((a, b) => (b.show === lastShow) - (a.show === lastShow));
+
     const parts = [];
+    const written = [];
+    const held = [];
+    const dividers = [];
+    const divider = (show) => {
+      const d = formatDivider(format, show);
+      parts.push(d);
+      dividers.push(d);
+    };
     let current = lastShow ?? "";
+    const done = (show) => closed.has(show) && !pending.has(show);
+    const closeIfDone = () => {
+      if (position !== "before" && current && done(current)) {
+        divider(current);
+        current = "";
+      }
+    };
     for (const g of groups) {
-      if (g.show && g.show !== current) {
-        if (position === "before") parts.push(formatDivider(format, g.show));
-        else if (current) parts.push(formatDivider(format, current));
+      const late = g.show && g.show !== current && closed.has(g.show);
+      if (g.show && g.show !== current && !late) {
+        if (current && !done(current)) {
+          held.push(...g.items);
+          continue;
+        }
+        if (position === "before") divider(g.show);
+        else if (current) divider(current);
+        current = g.show;
       }
       parts.push(toText(g.items));
-      if (g.show) current = g.show;
+      written.push(...g.items);
     }
-    return { text: parts.filter((p) => p.trim() !== "").join("\n\n"), lastShow: current };
+    closeIfDone();
+    return { text: parts.filter((p) => p.trim() !== "").join("\n\n"), lastShow: current, written, held, dividers };
   }
 
   return {
@@ -618,6 +673,8 @@
     mergeInewsItems,
     autoWriteCandidates,
     formatDivider,
+    parseSlotSpans,
+    formatSlotSpans,
     composeInewsWrite,
     eveningItemFromDto,
     isEveningHit,

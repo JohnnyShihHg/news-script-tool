@@ -655,7 +655,7 @@ function inewsSummary(show, stories) {
       kind: "Passed",
       Passed: { file_name: `${s.slug}.txt`, slug: s.slug, style: "SOT", time: "", group: "", title: `${s.slug}標題`, body: "內文", slug_marker: "", raw_title: "", raw_body: "", warnings: [] },
     })),
-    inews: { show, stories: stories.map((s) => ({ file_name: `${s.slug}.txt`, key: s.key, version: s.version, cume: "" })) },
+    inews: { show, stories: stories.map((s) => ({ file_name: `${s.slug}.txt`, key: s.key, version: s.version, cume: "", show: s.show ?? show })) },
   };
 }
 
@@ -742,20 +742,83 @@ test("dividers name the show hour", () => {
   assert.equal(L.formatDivider("== {show} ==", "2400"), "== 2400 ==");
 });
 
-test("a divider goes between shows: after names the show that ended, before names the new one", () => {
-  const mk = (slug, show) => ({ slug, inews: { show } });
-  const toText = (items) => items.map((i) => i.slug).join("\n");
-  const items = [mk("甲", "0800"), mk("乙", "0900")];
-  const after = L.composeInewsWrite(items, "0800", { format: "==== {hh} ====", position: "after" }, toText);
-  assert.equal(after.text, "甲\n\n==== 08 ====\n\n乙");
-  assert.equal(after.lastShow, "0900");
-  const before = L.composeInewsWrite(items, "0800", { format: "==== {hh} ====", position: "before" }, toText);
-  assert.equal(before.text, "甲\n\n==== 09 ====\n\n乙");
+const AFTER = { format: "==== {hh} ====", position: "after" };
+const BEFORE = { format: "==== {hh} ====", position: "before" };
+const mk = (slug, show) => ({ slug, inews: { show } });
+const toText = (items) => items.map((i) => i.slug).join("\n");
 
-  // 這次 session 第一次寫：after 沒有「剛播完的那節」，不加；before 標上這一節。
-  const solo = [mk("甲", "0800")];
-  assert.equal(L.composeInewsWrite(solo, "", { format: "==== {hh} ====", position: "after" }, toText).text, "甲");
-  assert.equal(L.composeInewsWrite(solo, "", { format: "==== {hh} ====", position: "before" }, toText).text, "==== 08 ====\n\n甲");
+test("the divider of a show waits for its delayed sweep, and the next show waits for the divider", () => {
+  // 08:56：0900 的稿出來了，但 0800 還沒補掃完 → 0800 的最後同步照寫，0900 先等。
+  let r = L.composeInewsWrite([mk("八點末", "0800"), mk("九點一", "0900")], { lastShow: "0800" }, AFTER, toText);
+  assert.equal(r.text, "八點末");
+  assert.deepEqual(r.held.map((i) => i.slug), ["九點一"]);
+  assert.equal(r.lastShow, "0800");
+  assert.deepEqual(r.dividers, []);
+
+  // 09:10 補掃完成：補到的稿先寫，接著 0800 的分隔線，然後才是等著的 0900。
+  const closed = new Set(["0800"]);
+  r = L.composeInewsWrite([mk("九點一", "0900"), mk("補到的", "0800")], { lastShow: "0800", closed }, AFTER, toText);
+  assert.equal(r.text, "補到的\n\n==== 08 ====\n\n九點一");
+  assert.equal(r.lastShow, "0900");
+  assert.deepEqual(r.dividers, ["==== 08 ===="]);
+
+  // 補掃完成但沒有任何稿：分隔線照樣寫。
+  r = L.composeInewsWrite([], { lastShow: "0800", closed }, AFTER, toText);
+  assert.equal(r.text, "==== 08 ====");
+  assert.equal(r.lastShow, "");
+
+  // 補掃完成，但 0800 還有稿在等關鍵字：分隔線也要等。
+  r = L.composeInewsWrite([mk("九點一", "0900")], { lastShow: "0800", closed, pending: new Set(["0800"]) }, AFTER, toText);
+  assert.equal(r.text, "");
+  assert.equal(r.held.length, 1);
+});
+
+test("a spanned show keeps writing until its sweep at 14:10", () => {
+  // 13:10：還是 1200（1300 被跳過），沒有分隔線。
+  let r = L.composeInewsWrite([mk("一點稿", "1200")], { lastShow: "1200" }, AFTER, toText);
+  assert.equal(r.text, "一點稿");
+  // 13:56：1400 開始，1200 還沒補掃 → 1400 的稿等著。
+  r = L.composeInewsWrite([mk("兩點稿", "1400")], { lastShow: "1200" }, AFTER, toText);
+  assert.equal(r.text, "");
+  assert.deepEqual(r.held.map((i) => i.slug), ["兩點稿"]);
+  // 14:10 補掃 1200 完成。
+  r = L.composeInewsWrite([mk("兩點稿", "1400")], { lastShow: "1200", closed: new Set(["1200"]) }, AFTER, toText);
+  assert.equal(r.text, "==== 12 ====\n\n兩點稿");
+});
+
+test("before-position dividers name the new show once the old one is swept", () => {
+  let r = L.composeInewsWrite([mk("九點一", "0900")], { lastShow: "0800" }, BEFORE, toText);
+  assert.equal(r.text, "");
+  r = L.composeInewsWrite([mk("補到的", "0800"), mk("九點一", "0900")], { lastShow: "0800", closed: new Set(["0800"]) }, BEFORE, toText);
+  assert.equal(r.text, "補到的\n\n==== 09 ====\n\n九點一");
+  // 這次 session 第一次寫：before 標上這一節；after 沒有「剛播完的那節」。
+  assert.equal(L.composeInewsWrite([mk("甲", "0800")], {}, BEFORE, toText).text, "==== 08 ====\n\n甲");
+  assert.equal(L.composeInewsWrite([mk("甲", "0800")], {}, AFTER, toText).text, "甲");
   // 同一節繼續寫：不加分隔線。
-  assert.equal(L.composeInewsWrite(solo, "0800", { format: "==== {hh} ====", position: "before" }, toText).text, "甲");
+  assert.equal(L.composeInewsWrite([mk("甲", "0800")], { lastShow: "0800" }, BEFORE, toText).text, "甲");
+});
+
+test("a story of a show already swept and left behind is written where it is", () => {
+  const r = L.composeInewsWrite([mk("晚改的", "0800"), mk("九點二", "0900")], { lastShow: "0900", closed: new Set(["0800"]) }, AFTER, toText);
+  assert.equal(r.text, "九點二\n\n晚改的");
+  assert.equal(r.held.length, 0);
+});
+
+test("stories from a final sync or a sweep keep their own show", () => {
+  const items = L.inewsItemsFromSummary(inewsSummary("0900", [
+    { slug: "八點末", key: "A:9", version: "v1", show: "0800" },
+    { slug: "九點一", key: "B:1", version: "v1" },
+  ]));
+  assert.deepEqual(items.map((i) => i.inews.show), ["0800", "0900"]);
+  // 合併時，同一輪有回報的節次不帶舊卡。
+  const merged = L.mergeInewsItems(items, items, new Set());
+  assert.equal(merged.length, 2);
+});
+
+test("slot spans round-trip between settings text and config", () => {
+  assert.deepEqual(L.parseSlotSpans("1200=1400, 1800=2000"), { 1200: "1400", 1800: "2000" });
+  assert.deepEqual(L.parseSlotSpans("1200＝1400，1800→2000"), { 1200: "1400", 1800: "2000" });
+  assert.deepEqual(L.parseSlotSpans(""), {});
+  assert.equal(L.parseSlotSpans("1200-1400"), null);
+  assert.equal(L.formatSlotSpans({ 1200: "1400", 1800: "2000" }), "1200=1400, 1800=2000");
 });

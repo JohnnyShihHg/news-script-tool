@@ -445,7 +445,8 @@ pub fn show_hour_label(name: &str) -> String {
     name.get(..2).unwrap_or(name).to_string()
 }
 
-/// 依開始時間排好的節次（2400 排最前面）。
+/// 依開始時間排好的節次（2400 排最前面）。只看資料夾名稱；被跨節合併或空節次
+/// 跳過的判斷要讀 rundown，在 `plan_slots` 裡做。
 pub fn sorted_shows(names: &[String]) -> Vec<(String, u32)> {
     let mut shows: Vec<(String, u32)> =
         names.iter().filter_map(|n| show_start(n).map(|s| (n.clone(), s))).collect();
@@ -454,56 +455,289 @@ pub fn sorted_shows(names: &[String]) -> Vec<(String, u32)> {
     shows
 }
 
-/// 「已過整點的最近一節」與它的下一節（循環，2300 的下一節是 2400）。
-/// 現在時間比當天第一節還早，就是前一天的最後一節。
-pub fn current_and_next(names: &[String], now: u32) -> Option<((String, u32), Option<(String, u32)>)> {
-    let shows = sorted_shows(names);
-    if shows.is_empty() {
-        return None;
-    }
-    let idx = shows.iter().rposition(|(_, s)| *s <= now).unwrap_or(shows.len() - 1);
-    let next = (shows.len() > 1).then(|| shows[(idx + 1) % shows.len()].clone());
-    Some((shows[idx].clone(), next))
-}
-
 /// 距離 `target` 還有幾秒（循環，0..86400）。
 pub fn seconds_until(target: u32, now: u32) -> u32 {
     (target as i64 - now as i64).rem_euclid(DAY) as u32
 }
 
-/// 第一個硬時間離整點超過這麼遠就不可信（多半是別天的值），改用 `lead_minutes`。
-const MAX_EARLY_START: i64 = 2 * 3600;
-
-/// 下一節要提前多少秒換過去。節目會在整點前就開始（0900 那節第一個硬時間是
-/// 08:55:00），所以用下一節 rundown 的第一個硬時間；沒有硬時間就退回 `lead_minutes`。
-/// 硬時間在整點之後代表那節準時或晚開，回傳負值（不提前）。
-pub fn early_start_lead(next_start: u32, next_first_hard: Option<u32>, lead_minutes: u32) -> i64 {
-    let fallback = lead_minutes as i64 * 60;
-    match next_first_hard {
-        Some(hard) => {
-            let mut diff = (next_start as i64 - hard as i64).rem_euclid(DAY);
-            if diff > DAY / 2 {
-                diff -= DAY;
-            }
-            if diff.abs() <= MAX_EARLY_START {
-                diff
-            } else {
-                fallback
-            }
-        }
-        None => fallback,
+/// 從 `from` 往後到 `to` 的整點距離（循環，1..=86400：同一個時間算一整天）。
+fn forward_gap(from: u32, to: u32) -> i64 {
+    match seconds_until(to, from) {
+        0 => DAY,
+        g => g as i64,
     }
 }
 
-/// 現在是否該提前換到下一節。
-pub fn should_switch_early(next_start: u32, now: u32, next_first_hard: Option<u32>, lead_minutes: u32) -> bool {
-    let remaining = seconds_until(next_start, now) as i64;
-    remaining > 0 && remaining <= early_start_lead(next_start, next_first_hard, lead_minutes)
+/// 節次的第一個硬時間最早可以比整點早多少、最晚可以晚多少，超出就不可信（殘留的
+/// 舊稿，例：1400 的 rundown 第一個硬時間是 06:41），改用 `lead_minutes`。
+pub const START_EARLY_LIMIT: i64 = 30 * 60;
+pub const START_LATE_LIMIT: i64 = 15 * 60;
+/// 累積時間比節次開始時間早這麼多以上，是 rundown 裡殘留的舊稿，不處理。
+pub const RESIDUAL_SECONDS: i64 = 10 * 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartSource {
+    /// 該節 rundown 的第一個硬時間。
+    HardTime,
+    /// 沒有硬時間，或硬時間不在整點 −30 分 ～ +15 分之間：整點 − lead_minutes。
+    Fallback,
 }
 
-/// 現在離下一節整點在這個範圍內，才去讀下一節的 rundown 找硬時間 —— 不然每一輪都要
-/// 多 LIST 一個 queue。節目通常只提前 5 分鐘左右開始，半小時綽綽有餘。
-pub const NEXT_SHOW_PROBE_SECONDS: u32 = 30 * 60;
+impl StartSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            StartSource::HardTime => "硬時間",
+            StartSource::Fallback => "fallback",
+        }
+    }
+}
+
+/// 節次的實際開始時間（拉到整點附近，可能是負的或超過 86400）與來源。
+pub fn slot_start(nominal: u32, first_hard: Option<u32>, lead_minutes: u32) -> (i64, StartSource) {
+    let nominal = nominal as i64;
+    if let Some(hard) = first_hard {
+        let h = unwrap_near(hard as i64, nominal);
+        if h >= nominal - START_EARLY_LIMIT && h <= nominal + START_LATE_LIMIT {
+            return (h, StartSource::HardTime);
+        }
+    }
+    (nominal - lead_minutes as i64 * 60, StartSource::Fallback)
+}
+
+/// 選節次時需要知道的 rundown 資訊。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShowProbe {
+    pub first_hard: Option<u32>,
+    /// 有沒有「帶樣式的非 float 稿」。沒有就是空節次，自動跳過。
+    pub has_stories: bool,
+}
+
+impl ShowProbe {
+    pub fn of(rows: &[RundownRow]) -> Self {
+        ShowProbe {
+            first_hard: rows.iter().find_map(|r| r.hard),
+            has_stories: rows.iter().any(|r| !r.floated && r.styled),
+        }
+    }
+}
+
+/// 一個有效節次：名稱、整點、實際開始時間。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slot {
+    pub show: String,
+    pub nominal: u32,
+    /// 拉到 `nominal` 附近的實際開始時間。
+    pub start: i64,
+    pub source: StartSource,
+}
+
+impl Slot {
+    /// `other` 的開始時間，換算到這一節的時間軸上（一定在這一節之後）。
+    pub fn later_start(&self, other: &Slot) -> i64 {
+        self.nominal as i64 + forward_gap(self.nominal, other.nominal) + (other.start - other.nominal as i64)
+    }
+
+    /// 把一個當天秒數（或累積時間）拉到這一節的時間軸上。
+    pub fn axis(&self, t: i64) -> i64 {
+        unwrap_near(t, self.nominal as i64)
+    }
+}
+
+/// 一節的有效範圍：開始 ～ 下一個有效節次的開始（不含）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    pub slot: Slot,
+    /// 下一個有效節次；None = 只有這一節，範圍到 24 小時後。
+    pub next: Option<Slot>,
+}
+
+impl Window {
+    pub fn start(&self) -> i64 {
+        self.slot.start
+    }
+
+    pub fn end(&self) -> i64 {
+        match &self.next {
+            Some(n) => self.slot.later_start(n),
+            None => self.slot.nominal as i64 + DAY,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// 被某節的跨節設定蓋過（1200 → 1400 時的 1300）。
+    Spanned(String),
+    /// 沒有帶樣式的非 float 稿。
+    Empty,
+}
+
+/// 這一輪選中的節次。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    pub current: Window,
+    /// 上一個有效節次（補掃、換節最後同步用）。
+    pub previous: Option<Window>,
+    /// 已過整點的最近一節還沒結束，但下一節已經開始，所以提前換過去了。
+    pub switched_early: bool,
+    /// 判斷過程中跳過的節次（只列有讀到的）。
+    pub skipped: Vec<(String, SkipReason)>,
+}
+
+/// `plan_slots` 的工作狀態：排好的節次、讀過的 rundown 摘要、跨節設定、跳過紀錄。
+struct Planner<'a> {
+    shows: Vec<(String, u32)>,
+    /// (起點 index, 起點到終點的距離)。
+    spans: Vec<(usize, i64)>,
+    lead_minutes: u32,
+    probes: HashMap<String, ShowProbe>,
+    probe: &'a mut dyn FnMut(&str) -> ShowProbe,
+    skipped: Vec<(String, SkipReason)>,
+}
+
+impl Planner<'_> {
+    fn len(&self) -> usize {
+        self.shows.len()
+    }
+
+    fn probe(&mut self, i: usize) -> ShowProbe {
+        let name = self.shows[i].0.clone();
+        if let Some(p) = self.probes.get(&name) {
+            return *p;
+        }
+        let p = (self.probe)(&name);
+        self.probes.insert(name, p);
+        p
+    }
+
+    fn skip(&mut self, i: usize, reason: SkipReason) {
+        let name = &self.shows[i].0;
+        if !self.skipped.iter().any(|(s, _)| s == name) {
+            self.skipped.push((name.clone(), reason));
+        }
+    }
+
+    /// 沒被跨節設定蓋過、而且有帶樣式的非 float 稿。跨節的起點那節本身是空的，就不
+    /// 蓋過後面的節次。
+    fn valid(&mut self, i: usize) -> bool {
+        for k in 0..self.spans.len() {
+            let (from, len) = self.spans[k];
+            if from == i {
+                continue;
+            }
+            if forward_gap(self.shows[from].1, self.shows[i].1) < len && self.probe(from).has_stories {
+                let by = self.shows[from].0.clone();
+                self.skip(i, SkipReason::Spanned(by));
+                return false;
+            }
+        }
+        if !self.probe(i).has_stories {
+            self.skip(i, SkipReason::Empty);
+            return false;
+        }
+        true
+    }
+
+    fn slot(&mut self, i: usize) -> Slot {
+        let (name, nominal) = self.shows[i].clone();
+        let (start, source) = slot_start(nominal, self.probe(i).first_hard, self.lead_minutes);
+        Slot { show: name, nominal, start, source }
+    }
+
+    /// 下一個有效節次：有跨節設定就從終點那節（或終點之後的第一節）開始找。
+    fn next_valid(&mut self, i: usize) -> Option<usize> {
+        let n = self.len();
+        let span = self.spans.iter().find(|(from, _)| *from == i).map(|&(_, len)| len);
+        let from_k = match span {
+            Some(len) => {
+                let k = (1..n).find(|&k| forward_gap(self.shows[i].1, self.shows[(i + k) % n].1) >= len)?;
+                // 跳過的中間節次也記下來，決策紀錄才看得到「1300 被 1200 合併」。
+                for m in 1..k {
+                    let by = self.shows[i].0.clone();
+                    self.skip((i + m) % n, SkipReason::Spanned(by));
+                }
+                k
+            }
+            None => 1,
+        };
+        (from_k..n).map(|k| (i + k) % n).find(|&j| self.valid(j))
+    }
+
+    fn prev_valid(&mut self, i: usize) -> Option<usize> {
+        let n = self.len();
+        (1..n).map(|k| (i + n - k) % n).find(|&j| self.valid(j))
+    }
+
+    fn window(&mut self, i: usize) -> Window {
+        let next = self.next_valid(i).map(|j| self.slot(j));
+        Window { slot: self.slot(i), next }
+    }
+}
+
+/// 節次選擇。`probe` 讀一節的 rundown（呼叫端快取），只會被呼叫在需要判斷的節次上。
+///
+/// - 有效節次 = 沒被跨節設定蓋過、而且有帶樣式的非 float 稿。
+/// - 下一個有效節次：有跨節設定（1200 → 1400）就是終點那節，沒有就是下一節（都跳過無效的）。
+/// - 目前節次 = 已過整點的最近一個有效節次；下一個有效節次的開始時間 ≤ 現在就提前換過去。
+pub fn plan_slots(
+    names: &[String],
+    now: u32,
+    spans: &std::collections::BTreeMap<String, String>,
+    lead_minutes: u32,
+    probe: &mut dyn FnMut(&str) -> ShowProbe,
+) -> Option<Plan> {
+    let shows = sorted_shows(names);
+    if shows.is_empty() {
+        return None;
+    }
+    let span_list = spans
+        .iter()
+        .filter_map(|(from, to)| {
+            let i = shows.iter().position(|(name, _)| name == from.trim())?;
+            let to = show_start(to.trim())?;
+            Some((i, forward_gap(shows[i].1, to)))
+        })
+        .collect();
+    let mut p = Planner { shows, spans: span_list, lead_minutes, probes: HashMap::new(), probe, skipped: Vec::new() };
+    let n = p.len();
+
+    let base = p.shows.iter().rposition(|(_, s)| *s <= now).unwrap_or(n - 1);
+    let mut cur = (0..n).map(|k| (base + n - k) % n).find(|&j| p.valid(j)).unwrap_or(base);
+
+    let mut switched_early = false;
+    for _ in 0..n {
+        let Some(nx) = p.next_valid(cur) else { break };
+        let (cur_slot, next_slot) = (p.slot(cur), p.slot(nx));
+        if cur_slot.axis(now as i64) >= cur_slot.later_start(&next_slot) {
+            cur = nx;
+            switched_early = true;
+        } else {
+            break;
+        }
+    }
+
+    let current = p.window(cur);
+    let previous = p.prev_valid(cur).map(|j| p.window(j));
+    // 「提前」= 現在還沒到這一節的整點（08:56 換到 0900）。
+    let switched_early = switched_early && current.slot.axis(now as i64) < current.slot.nominal as i64;
+    Some(Plan { current, previous, switched_early, skipped: p.skipped })
+}
+
+/// 延遲補掃：目前節次的整點過了 `delay_minutes` 分鐘、而且這一節還沒補掃過，就補掃
+/// 上一個有效節次，回傳它的範圍。
+///
+/// `swept_for` 是上一次補掃時的「目前節次」。延續中的跨節節次（13:10 時的 1200）在
+/// 12:10 就補掃過 1100 了，所以 13:10 不會再觸發；14:10 目前節次變成 1400，才補掃 1200。
+pub fn sweep_target<'a>(plan: &'a Plan, now: u32, delay_minutes: u32, swept_for: Option<&str>) -> Option<&'a Window> {
+    let cur = &plan.current.slot;
+    if swept_for == Some(cur.show.as_str()) {
+        return None;
+    }
+    if cur.axis(now as i64) < cur.nominal as i64 + delay_minutes as i64 * 60 {
+        return None;
+    }
+    plan.previous.as_ref()
+}
 
 // --- Rundown -------------------------------------------------------------------
 
@@ -515,6 +749,8 @@ pub struct RundownRow {
     pub title: String,
     pub total: u32,
     pub hard: Option<u32>,
+    /// v-style 有填：判斷空節次用。
+    pub styled: bool,
 }
 
 impl RundownRow {
@@ -525,6 +761,7 @@ impl RundownRow {
             title: story.title().to_string(),
             total: story.total_seconds(),
             hard: story.hard_time(),
+            styled: !story.raw("v-style").trim().is_empty(),
         }
     }
 }
@@ -561,14 +798,13 @@ pub enum CutoffRule {
     AfterPreview,
     /// 找不到上面那個，退回最後一個序號以前綴開頭的列。
     LastPrefixed,
-    /// 兩個都找不到：整節都處理，UI 要顯示警告。
+    /// 兩個都找不到（或沒開標記式截止）。
     None,
 }
 
-/// 截止點：從回傳的 index 開始（含它本身）以下全部是預備稿，不處理。
-///
-/// iNEWS 畫面上最下面那塊灰色**不是** float（廣告列的 float 旗標是關的），所以用的是
-/// rundown 結構：`下節預告三` → `=CM 3==`（序號 `=========`）→ 預備稿。
+/// 標記式截止點（v0.3.0 的規則，v0.3.1 起預設關閉）：從回傳的 index 開始（含它本身）
+/// 以下不處理。1200 播到 1400 這種跨節 rundown 中間有好幾個 CM，用標記會切在一半，
+/// 所以預設改用時間判斷（`select_rows`）。
 pub fn find_cutoff(rows: &[RundownRow], preview_keyword: &str, page_prefix: &str) -> (Option<usize>, CutoffRule) {
     let prefix = page_prefix.trim();
     let keyword = preview_keyword.trim();
@@ -599,50 +835,104 @@ pub fn unwrap_near(t: i64, anchor: i64) -> i64 {
     anchor + d
 }
 
-/// 累積時間 ≤ 現在時間就算已播出。兩邊都先拉到節次開始時間附近再比。
-pub fn is_aired(cume: Option<i64>, now: u32, show_start: u32) -> bool {
-    match cume {
-        Some(c) => unwrap_near(c, show_start as i64) <= unwrap_near(now as i64, show_start as i64),
-        None => false,
+/// 一列在這一節的時間判斷下的結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowFate {
+    /// 範圍內、已播出：處理。
+    Aired,
+    /// 範圍內、還沒播到。
+    Pending,
+    /// 累積時間 ≥ 下一個有效節次的開始時間：預備稿或下一節的事。
+    AfterEnd,
+    /// 比節次開始時間早 10 分鐘以上：殘留的舊稿。
+    Residual,
+    /// 算不出累積時間（整份沒有硬時間）。
+    NoTime,
+}
+
+/// 新規則的「已播出」：累積時間 ≤ 現在、< 下一個有效節次的開始時間、而且不是殘留稿。
+/// `now` 是 None = 延遲補掃，不看現在時間。
+pub fn is_aired(cume: Option<i64>, now: Option<u32>, window: &Window) -> RowFate {
+    let Some(c) = cume else { return RowFate::NoTime };
+    let c = window.slot.axis(c);
+    if c < window.start() - RESIDUAL_SECONDS {
+        RowFate::Residual
+    } else if c >= window.end() {
+        RowFate::AfterEnd
+    } else if now.is_some_and(|n| c > window.slot.axis(n as i64)) {
+        RowFate::Pending
+    } else {
+        RowFate::Aired
     }
 }
 
 /// 一節 rundown 要處理哪些列。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
-    /// 截止點以上、已播出、（預設）非 float 的列的 index。
+    /// 要處理的列的 index（rundown 順序）。
     pub rows: Vec<usize>,
     pub cume: Vec<Option<i64>>,
+    /// 每一列的判斷結果（float 且不收 float 的是 None）。
+    pub fates: Vec<Option<RowFate>>,
+    /// 標記式截止點（只有開了才有）。
     pub cutoff: Option<usize>,
     pub rule: CutoffRule,
-    /// 截止點以上但還沒播到的列數（之後一定還會變動，不自動處理）。
+    /// 範圍內但還沒播到的列數。
     pub pending: usize,
+    /// 沒處理的非 float 列數（還沒播、預備稿、殘留、截止點以下）。
+    pub excluded: usize,
 }
+
+impl Selection {
+    /// 納入的最後一則。
+    pub fn last_included(&self) -> Option<usize> {
+        self.rows.last().copied()
+    }
+
+    /// 納入的最後一則之後、第一則沒納入的非 float 列（範圍的邊界在哪裡）。
+    pub fn first_excluded(&self) -> Option<usize> {
+        let from = self.last_included().map_or(0, |i| i + 1);
+        (from..self.fates.len()).find(|&i| matches!(self.fates[i], Some(f) if f != RowFate::Aired))
+            .or_else(|| (0..self.fates.len()).find(|&i| matches!(self.fates[i], Some(f) if f != RowFate::Aired)))
+    }
+}
+
+/// 標記式截止（預設關閉）的設定：(預告關鍵字, 廣告列序號開頭)。
+pub type MarkerCutoff<'a> = Option<(&'a str, &'a str)>;
 
 pub fn select_rows(
     rows: &[RundownRow],
-    now: u32,
-    show_start: u32,
-    preview_keyword: &str,
-    page_prefix: &str,
+    now: Option<u32>,
+    window: &Window,
     include_floated: bool,
+    marker: MarkerCutoff,
 ) -> Selection {
-    let (cutoff, rule) = find_cutoff(rows, preview_keyword, page_prefix);
+    let (cutoff, rule) = match marker {
+        Some((keyword, prefix)) => find_cutoff(rows, keyword, prefix),
+        None => (None, CutoffRule::None),
+    };
     let cume = compute_cume(rows);
     let end = cutoff.unwrap_or(rows.len());
     let mut picked = Vec::new();
+    let mut fates = vec![None; rows.len()];
     let mut pending = 0;
-    for i in 0..end {
+    let mut excluded = 0;
+    for i in 0..rows.len() {
         if rows[i].floated && !include_floated {
             continue;
         }
-        if is_aired(cume[i], now, show_start) {
-            picked.push(i);
-        } else {
-            pending += 1;
+        let fate = if i >= end { RowFate::AfterEnd } else { is_aired(cume[i], now, window) };
+        fates[i] = Some(fate);
+        match fate {
+            RowFate::Aired => picked.push(i),
+            RowFate::Pending => {
+                pending += 1;
+                excluded += 1;
+            }
+            _ => excluded += 1,
         }
     }
-    Selection { rows: picked, cume, cutoff, rule, pending }
+    Selection { rows: picked, cume, fates, cutoff, rule, pending, excluded }
 }
 
 /// 匯入時用的檔名：標題加 `.txt`，同名的加 `_2`、`_3`。檔名不能有的字元換成 `_`。
@@ -678,7 +968,7 @@ mod tests {
     use super::*;
 
     fn row(page: &str, title: &str, total: u32, hard: Option<u32>, floated: bool) -> RundownRow {
-        RundownRow { floated, page: page.into(), title: title.into(), total, hard }
+        RundownRow { floated, page: page.into(), title: title.into(), total, hard, styled: false }
     }
 
     #[test]
@@ -746,39 +1036,250 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    #[test]
-    fn the_current_show_is_the_latest_one_past_the_hour() {
-        let shows = names(&["0800", "0900", "1000", "2400", "0100", "README"]);
-        let ((cur, _), next) = current_and_next(&shows, 8 * 3600 + 56 * 60).unwrap();
-        assert_eq!(cur, "0800");
-        assert_eq!(next.unwrap().0, "0900");
+    fn clock(h: u32, m: u32, sec: u32) -> u32 {
+        h * 3600 + m * 60 + sec
+    }
 
-        // 00:30 → 2400（午夜那節排序時當 0000）。
-        let ((cur, start), _) = current_and_next(&shows, 30 * 60).unwrap();
-        assert_eq!((cur.as_str(), start), ("2400", 0));
+    fn styled(page: &str, title: &str, total: u32, hard: Option<u32>) -> RundownRow {
+        RundownRow { floated: false, page: page.into(), title: title.into(), total, hard, styled: true }
+    }
 
-        // 23:57 在 1000 之後；下一節循環到 2400。
-        let shows = names(&["2300", "2400", "1000"]);
-        let ((cur, _), next) = current_and_next(&shows, 23 * 3600 + 57 * 60).unwrap();
-        assert_eq!(cur, "2300");
-        assert_eq!(next.unwrap().0, "2400");
+    /// 合成的一天，重現使用者用真實 rundown 量到的數據：
+    /// 0900 開始 08:55:00、結束 09:55:05（預備稿 颱風陽台掉1800 算出 09:55:05）；
+    /// 1100 結束 11:40:00（1200 第一個硬時間）；1200 播到 1400，中間有 CM 和報時列；
+    /// 1300 有列但沒有帶樣式的稿；1400 殘留舊稿，第一個硬時間 06:41（無效 → 13:55）。
+    fn day() -> HashMap<String, Vec<RundownRow>> {
+        let mut d = HashMap::new();
+        d.insert("0800".to_string(), vec![
+            row("", "大片頭", 60, Some(clock(7, 55, 0)), false),
+            styled("A1", "合成早安稿0800", 120, None),
+            styled("=========", "=CM 3==", 300, Some(clock(8, 50, 0))),
+            styled("C1", "合成預備稿0800", 60, None),
+        ]);
+        d.insert("0900".to_string(), vec![
+            row("", "大片頭", 60, Some(clock(8, 55, 0)), false),
+            styled("A1", "合成九點稿0900", 120, None),
+            row("", "*CP1 下節預告一", 30, None, false),
+            row("=====", "=COMMERCIAL 1==", 180, None, false),
+            styled("B1", "合成第二則0900", 90, None),
+            row("", "下節預告三 2則", 30, None, false),
+            row("=========", "=CM 3==", 305, Some(clock(9, 50, 0)), false),
+            row("", "版型框", 999, None, true),
+            styled("A1", "颱風陽台掉1800", 127, None),
+            styled("A2", "屋飛砸誰賠1800", 60, None),
+        ]);
+        d.insert("1000".to_string(), vec![
+            row("", "! 09:55:05午安片頭", 10, Some(clock(9, 55, 5)), false),
+            styled("A1", "合成十點稿1000", 120, None),
+        ]);
+        d.insert("1100".to_string(), vec![
+            row("", "片頭", 60, Some(clock(10, 55, 0)), false),
+            styled("A1", "合成十一點稿1100", 120, None),
+            // 結尾是交接列，沒有 CM。
+            row("====", "不雙框交接12", 30, Some(clock(11, 40, 0)), false),
+            styled("C1", "合成預備稿1100", 60, None),
+        ]);
+        d.insert("1200".to_string(), vec![
+            row("", "片頭", 60, Some(clock(11, 40, 0)), false),
+            styled("A1", "合成午間稿1200", 600, None),
+            row("=========", "=CM 1==", 180, None, false),
+            row("", "====13:00====", 0, Some(clock(13, 0, 0)), false),
+            styled("B1", "合成一點稿1200", 600, None),
+            row("=========", "=CM 2==", 180, None, false),
+            styled("C1", "合成一點半稿1200", 300, Some(clock(13, 30, 0))),
+            styled("D1", "合成預備稿1200", 60, Some(clock(13, 56, 0))),
+        ]);
+        let mut thirteen: Vec<RundownRow> = (0..45).map(|i| row("", &format!("1300空列{i}"), 10, None, false)).collect();
+        thirteen[0].hard = Some(clock(12, 55, 0));
+        d.insert("1300".to_string(), thirteen);
+        d.insert("1400".to_string(), vec![
+            styled("Z9", "殘留舊稿", 60, Some(clock(6, 41, 0))),
+            row("", "片頭", 60, Some(clock(13, 55, 0)), false),
+            styled("A1", "合成兩點稿1400", 120, None),
+        ]);
+        d
+    }
+
+    fn spans() -> std::collections::BTreeMap<String, String> {
+        crate::config::InewsConfig::default().slot_spans
+    }
+
+    fn plan_at(d: &HashMap<String, Vec<RundownRow>>, now: u32, spans: &std::collections::BTreeMap<String, String>) -> Plan {
+        let names: Vec<String> = d.keys().cloned().collect();
+        let mut probe = |name: &str| ShowProbe::of(d.get(name).map_or(&[][..], |r| r.as_slice()));
+        plan_slots(&names, now, spans, 5, &mut probe).unwrap()
+    }
+
+    fn titles(rows: &[RundownRow], sel: &Selection) -> Vec<String> {
+        sel.rows.iter().map(|&i| rows[i].title.clone()).collect()
     }
 
     #[test]
-    fn the_next_show_takes_over_once_its_first_hard_time_passes() {
-        let nine = 9 * 3600;
-        // 0900 的第一個硬時間是 大片頭 ＠32100 = 08:55:00。
-        assert!(should_switch_early(nine, 8 * 3600 + 56 * 60, Some(32100), 5));
-        assert!(should_switch_early(nine, 32100, Some(32100), 5));
-        assert!(!should_switch_early(nine, 32099, Some(32100), 5));
-        // 沒有硬時間就退回整點前 N 分鐘。
-        assert!(should_switch_early(nine, nine - 5 * 60, None, 5));
-        assert!(!should_switch_early(nine, nine - 6 * 60, None, 5));
-        // 硬時間在整點之後：不提前。
-        assert!(!should_switch_early(nine, nine - 60, Some(nine + 10), 5));
-        // 午夜那節 2400（start 0），23:55 開始。
-        assert!(should_switch_early(0, 23 * 3600 + 56 * 60, Some(86100), 5));
-        assert!(!should_switch_early(0, 23 * 3600 + 50 * 60, Some(86100), 5));
+    fn the_0900_slot_runs_from_its_first_hard_time_to_the_next_slot() {
+        let d = day();
+        // 08:56 → 0900（0900 的第一個硬時間 08:55:00 已經到了）。
+        let p = plan_at(&d, clock(8, 56, 0), &spans());
+        assert_eq!(p.current.slot.show, "0900");
+        assert!(p.switched_early);
+        assert_eq!(p.current.start(), clock(8, 55, 0) as i64);
+        assert_eq!(p.current.slot.source, StartSource::HardTime);
+        assert_eq!(p.current.end(), clock(9, 55, 5) as i64);
+        assert_eq!(p.previous.as_ref().unwrap().slot.show, "0800");
+        // 08:54 還在 0800。
+        let p = plan_at(&d, clock(8, 54, 0), &spans());
+        assert_eq!(p.current.slot.show, "0800");
+        assert!(!p.switched_early);
+    }
+
+    #[test]
+    fn the_time_cutoff_leaves_out_standby_stories_without_any_marker() {
+        let d = day();
+        let rows = &d["0900"];
+        let p = plan_at(&d, clock(9, 30, 0), &spans());
+        // 補掃（不看現在時間）：颱風陽台掉1800 算出 09:55:05 = 下一節開始，不納入。
+        let sel = select_rows(rows, None, &p.current, false, None);
+        assert_eq!(
+            titles(rows, &sel),
+            ["大片頭", "合成九點稿0900", "*CP1 下節預告一", "=COMMERCIAL 1==", "合成第二則0900", "下節預告三 2則", "=CM 3=="]
+        );
+        assert_eq!(sel.fates[8], Some(RowFate::AfterEnd));
+        assert_eq!(rows[sel.first_excluded().unwrap()].title, "颱風陽台掉1800");
+        assert_eq!(sel.rule, CutoffRule::None, "marker cutoff is off by default");
+        // 09:00：第二則（09:01:50）還沒播。
+        let sel = select_rows(rows, Some(clock(9, 0, 0)), &p.current, false, None);
+        assert_eq!(titles(rows, &sel), ["大片頭", "合成九點稿0900", "*CP1 下節預告一", "=COMMERCIAL 1=="]);
+        assert_eq!(sel.pending, 3);
+    }
+
+    #[test]
+    fn a_handoff_row_ends_the_1100_slot_without_a_commercial() {
+        let d = day();
+        let p = plan_at(&d, clock(11, 20, 0), &spans());
+        assert_eq!(p.current.slot.show, "1100");
+        assert_eq!(p.current.end(), clock(11, 40, 0) as i64);
+        let rows = &d["1100"];
+        let sel = select_rows(rows, None, &p.current, false, None);
+        assert_eq!(titles(rows, &sel), ["片頭", "合成十一點稿1100"]);
+    }
+
+    #[test]
+    fn the_1200_rundown_runs_until_1400_starts_and_1300_is_skipped() {
+        let d = day();
+        for now in [clock(12, 0, 0), clock(13, 10, 0), clock(13, 54, 59)] {
+            let p = plan_at(&d, now, &spans());
+            assert_eq!(p.current.slot.show, "1200", "at {}", format_clock(now as i64));
+            let next = p.current.next.as_ref().unwrap();
+            assert_eq!(next.show, "1400");
+            // 1400 的第一個硬時間 06:41 不在 13:30～14:15 之間 → 14:00 − 5 分鐘。
+            assert_eq!(next.source, StartSource::Fallback);
+            assert_eq!(p.current.end(), clock(13, 55, 0) as i64);
+            assert!(p.skipped.contains(&("1300".to_string(), SkipReason::Spanned("1200".into()))));
+        }
+        // 13:40：中間的 CM 和 ====13:00==== 都不會切斷，13:56 的預備稿不納入。
+        let p = plan_at(&d, clock(13, 40, 0), &spans());
+        let rows = &d["1200"];
+        let sel = select_rows(rows, Some(clock(13, 40, 0)), &p.current, false, None);
+        assert!(titles(rows, &sel).contains(&"合成一點半稿1200".to_string()));
+        assert!(!titles(rows, &sel).contains(&"合成預備稿1200".to_string()));
+        // 標記式截止打開的話會切在第一個 CM（舊行為，預設關閉）。
+        let sel = select_rows(rows, Some(clock(13, 40, 0)), &p.current, false, Some(("預告", "=")));
+        assert_eq!(sel.rule, CutoffRule::LastPrefixed);
+        // 13:55 一到就換 1400。
+        let p = plan_at(&d, clock(13, 55, 0), &spans());
+        assert_eq!(p.current.slot.show, "1400");
+        assert_eq!(p.previous.as_ref().unwrap().slot.show, "1200");
+    }
+
+    #[test]
+    fn a_show_with_no_styled_stories_is_skipped_even_without_a_span() {
+        let d = day();
+        let p = plan_at(&d, clock(13, 10, 0), &Default::default());
+        assert_eq!(p.current.slot.show, "1200");
+        assert!(p.skipped.contains(&("1300".to_string(), SkipReason::Empty)));
+        assert_eq!(p.current.next.as_ref().unwrap().show, "1400");
+    }
+
+    #[test]
+    fn a_first_hard_time_far_from_the_hour_falls_back_to_the_lead() {
+        let two = clock(14, 0, 0);
+        assert_eq!(slot_start(two, Some(clock(6, 41, 0)), 5), (clock(13, 55, 0) as i64, StartSource::Fallback));
+        assert_eq!(slot_start(two, Some(clock(13, 30, 0)), 5), (clock(13, 30, 0) as i64, StartSource::HardTime));
+        assert_eq!(slot_start(two, Some(clock(13, 29, 59)), 5).1, StartSource::Fallback);
+        assert_eq!(slot_start(two, Some(clock(14, 15, 0)), 5).1, StartSource::HardTime);
+        assert_eq!(slot_start(two, Some(clock(14, 15, 1)), 5).1, StartSource::Fallback);
+        assert_eq!(slot_start(two, None, 5), (clock(13, 55, 0) as i64, StartSource::Fallback));
+        // 午夜那節：23:55 = 整點前 5 分鐘。
+        assert_eq!(slot_start(0, Some(clock(23, 55, 0)), 5), (-300, StartSource::HardTime));
+    }
+
+    #[test]
+    fn leftover_stories_far_before_the_slot_start_are_residual() {
+        let d = day();
+        let p = plan_at(&d, clock(14, 20, 0), &spans());
+        assert_eq!(p.current.slot.show, "1400");
+        let rows = &d["1400"];
+        let sel = select_rows(rows, Some(clock(14, 20, 0)), &p.current, false, None);
+        assert_eq!(sel.fates[0], Some(RowFate::Residual));
+        assert_eq!(titles(rows, &sel), ["片頭", "合成兩點稿1400"]);
+    }
+
+    #[test]
+    fn the_midnight_show_takes_over_across_zero_hour() {
+        let mut d = HashMap::new();
+        d.insert("2300".to_string(), vec![styled("", "片頭", 600, Some(clock(22, 55, 0))), styled("A1", "十一點稿", 60, None)]);
+        d.insert("2400".to_string(), vec![styled("", "片頭", 600, Some(clock(23, 55, 0))), styled("A1", "午夜稿", 60, None)]);
+        assert_eq!(plan_at(&d, clock(0, 30, 0), &Default::default()).current.slot.show, "2400");
+        assert_eq!(plan_at(&d, clock(23, 50, 0), &Default::default()).current.slot.show, "2300");
+        let p = plan_at(&d, clock(23, 56, 0), &Default::default());
+        assert_eq!(p.current.slot.show, "2400");
+        assert!(p.switched_early);
+        // 00:06：片頭（23:55）和午夜稿（00:05:00）都播過了。
+        let p = plan_at(&d, clock(0, 6, 0), &Default::default());
+        let sel = select_rows(&d["2400"], Some(clock(0, 6, 0)), &p.current, false, None);
+        assert_eq!(sel.rows, vec![0, 1]);
+    }
+
+    #[test]
+    fn floats_are_left_out_unless_asked_for() {
+        let d = day();
+        let p = plan_at(&d, clock(9, 30, 0), &spans());
+        let mut rows = d["0900"].clone();
+        rows[1].floated = true;
+        let sel = select_rows(&rows, None, &p.current, false, None);
+        assert!(!sel.rows.contains(&1));
+        assert_eq!(sel.fates[1], None);
+        let sel = select_rows(&rows, None, &p.current, true, None);
+        assert!(sel.rows.contains(&1));
+    }
+
+    #[test]
+    fn no_hard_time_means_nothing_is_aired() {
+        let d = day();
+        let p = plan_at(&d, clock(9, 30, 0), &spans());
+        let rows = vec![styled("1", "a", 60, None), styled("2", "b", 60, None)];
+        assert_eq!(compute_cume(&rows), vec![None, None]);
+        let sel = select_rows(&rows, Some(clock(12, 0, 0)), &p.current, false, None);
+        assert!(sel.rows.is_empty());
+        assert_eq!(sel.fates[0], Some(RowFate::NoTime));
+    }
+
+    #[test]
+    fn the_delayed_sweep_waits_for_ten_past_and_skips_a_continuing_span() {
+        let d = day();
+        let at = |h, m, swept: Option<&str>| {
+            let p = plan_at(&d, clock(h, m, 0), &spans());
+            sweep_target(&p, clock(h, m, 0), 10, swept).map(|w| (w.slot.show.clone(), w.end()))
+        };
+        // 09:05 還沒到；09:10 補掃 0800（結束在 0900 開始的 08:55:00）。
+        assert_eq!(at(9, 5, Some("0800")), None);
+        assert_eq!(at(9, 10, Some("0800")), Some(("0800".into(), clock(8, 55, 0) as i64)));
+        // 同一節補掃過就不再補。
+        assert_eq!(at(9, 30, Some("0900")), None);
+        // 12:10 補掃 1100；13:10 目前還是 1200（12:10 已補掃過），不補。
+        assert_eq!(at(12, 10, Some("1100")), Some(("1100".into(), clock(11, 40, 0) as i64)));
+        assert_eq!(at(13, 10, Some("1200")), None);
+        // 14:10 才補掃 1200，範圍到 1400 開始的 13:55。
+        assert_eq!(at(14, 10, Some("1200")), Some(("1200".into(), clock(13, 55, 0) as i64)));
     }
 
     #[test]
@@ -797,76 +1298,9 @@ mod tests {
     }
 
     #[test]
-    fn no_hard_time_means_no_cume_and_nothing_is_aired() {
-        let rows = vec![row("1", "a", 60, None, false), row("2", "b", 60, None, false)];
-        assert_eq!(compute_cume(&rows), vec![None, None]);
-        let sel = select_rows(&rows, 12 * 3600, 9 * 3600, "預告", "=", false);
-        assert!(sel.rows.is_empty());
-        assert_eq!(sel.pending, 2);
-    }
-
-    fn rundown() -> Vec<RundownRow> {
-        vec![
-            row("", "大片頭", 60, Some(32100), false),
-            row("A1", "第一則", 120, None, false),
-            row("", "*CP1 下節預告一", 30, None, false),
-            row("", "預告內容", 20, None, false),
-            row("=====", "=COMMERCIAL 1==", 180, None, false),
-            row("B1", "第二則", 90, None, false),
-            row("", "下節預告三 2則", 30, None, false),
-            row("=========", "=CM 3==", 305, Some(35400), false),
-            row("", "! 09:55:05午安片頭", 10, None, false),
-            row("C1", "預備稿", 60, None, false),
-        ]
-    }
-
-    #[test]
-    fn the_cutoff_is_the_first_commercial_after_the_last_preview() {
-        assert_eq!(find_cutoff(&rundown(), "預告", "="), (Some(7), CutoffRule::AfterPreview));
-    }
-
-    #[test]
-    fn the_cutoff_falls_back_to_the_last_commercial_then_to_nothing() {
-        let mut rows = rundown();
-        rows[6].title = "下節三".into(); // 最後一則預告變成 *CP1 下節預告一，之後有 =COMMERCIAL 1==
-        assert_eq!(find_cutoff(&rows, "預告", "="), (Some(4), CutoffRule::AfterPreview));
-        assert_eq!(find_cutoff(&rows, "沒有這個詞", "="), (Some(7), CutoffRule::LastPrefixed));
-        assert_eq!(find_cutoff(&rows, "預告", "#"), (None, CutoffRule::None));
-    }
-
-    #[test]
-    fn only_aired_rows_above_the_cutoff_are_selected() {
-        // 09:00:00：大片頭 08:55、第一則 08:56、預告 08:58... 第二則 09:01:50 還沒播。
-        let sel = select_rows(&rundown(), 9 * 3600, 9 * 3600, "預告", "=", false);
-        assert_eq!(sel.rows, vec![0, 1, 2, 3, 4]);
-        assert_eq!(sel.pending, 2);
-        assert_eq!(sel.cutoff, Some(7));
-        // 很晚了：截止點以下的預備稿仍然不處理。
-        let sel = select_rows(&rundown(), 12 * 3600, 9 * 3600, "預告", "=", false);
-        assert_eq!(sel.rows, vec![0, 1, 2, 3, 4, 5, 6]);
-    }
-
-    #[test]
-    fn floats_are_left_out_unless_asked_for() {
-        let mut rows = rundown();
-        rows[1].floated = true;
-        let sel = select_rows(&rows, 12 * 3600, 9 * 3600, "預告", "=", false);
-        assert!(!sel.rows.contains(&1));
-        let sel = select_rows(&rows, 12 * 3600, 9 * 3600, "預告", "=", true);
-        assert!(sel.rows.contains(&1));
-    }
-
-    #[test]
-    fn the_midnight_show_compares_across_zero_hour() {
-        let rows = vec![row("", "片頭", 600, Some(86100), false), row("A1", "午夜稿", 60, None, false)];
-        // 23:55 開始，00:01 時兩則都播過了（第二則 00:05:00 還沒）。
-        let sel = select_rows(&rows, 60, 0, "預告", "=", false);
-        assert_eq!(sel.rows, vec![0]);
-        let sel = select_rows(&rows, 5 * 60, 0, "預告", "=", false);
-        assert_eq!(sel.rows, vec![0, 1]);
-        // 23:58：片頭播了，午夜稿還沒。
-        let sel = select_rows(&rows, 23 * 3600 + 58 * 60, 0, "預告", "=", false);
-        assert_eq!(sel.rows, vec![0]);
+    fn the_cutoff_markers_still_work_when_turned_on() {
+        assert_eq!(find_cutoff(&day()["0900"], "預告", "="), (Some(6), CutoffRule::AfterPreview));
+        assert_eq!(find_cutoff(&day()["0900"], "預告", "#"), (None, CutoffRule::None));
     }
 
     #[test]
