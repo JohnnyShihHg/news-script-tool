@@ -26,6 +26,15 @@
       <span class="toolbar-sep"></span>
 
       <span class="toolbar-group">
+        <button id="importInewsBtn" title="從 iNEWS 讀當節次 ONAIR rundown 裡已播出的稿件">從 iNEWS 匯入</button>
+        <label class="section-label" title="定時重讀 rundown，有新的已播出稿或內容變動就自動比對、產生關鍵字並寫入（或等你確認）">
+          <input type="checkbox" id="inewsAutoToggle" /> 自動刷新
+        </label>
+      </span>
+
+      <span class="toolbar-sep"></span>
+
+      <span class="toolbar-group">
         <button id="openCollabBtn">開啟協作工具</button>
         <button id="compareBtn" disabled title="請先匯入並開啟協作工具">比對 <span class="kbd-hint">Ctrl+R</span></button>
         <button id="genAllKeywordsBtn" disabled>產生關鍵字</button>
@@ -82,6 +91,12 @@
 
   <div id="scriptView" class="view">
   <div id="funnel" class="funnel hidden"></div>
+
+  <div id="inewsStatus" class="compare-status hidden"></div>
+  <div id="inewsConfirm" class="compare-status inews-confirm hidden">
+    <span id="inewsConfirmText"></span>
+    <button id="inewsConfirmBtn" class="primary">確認寫入</button>
+  </div>
 
   <div id="compareStatus" class="compare-status hidden"></div>
 

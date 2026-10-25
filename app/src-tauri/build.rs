@@ -32,6 +32,11 @@ fn main() {
             "generate_group_keywords",
             "load_evening_state",
             "save_evening_state",
+            "import_inews",
+            "test_inews_connection",
+            "get_inews_credential_status",
+            "set_inews_credentials",
+            "clear_inews_credentials",
         ])),
     )
     .expect("failed to run tauri-build");

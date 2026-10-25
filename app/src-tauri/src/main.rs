@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod inews;
 mod weather;
 
 use news_script_core::config::Config;
@@ -13,6 +14,8 @@ use tauri_plugin_dialog::DialogExt;
 
 const KEYRING_SERVICE: &str = "news-script-tool";
 const KEYRING_USER: &str = "gemini_api_key";
+const KEYRING_INEWS_USER: &str = "inews_username";
+const KEYRING_INEWS_PASS: &str = "inews_password";
 const COLLAB_WINDOW_LABEL: &str = "collab";
 const COLLAB_URL: &str = "https://small-helper-4-20260724.ebclan1.chatgpt.site/helper4";
 
@@ -21,6 +24,9 @@ struct AppState {
     /// Holds the reply channel for an in-flight scrape while we wait for the
     /// injected script running in the collab webview to call `receive_scraped_text`.
     scrape_reply: Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>,
+    /// iNEWS 的控制連線與稿件快取，跨輪保留。Arc 是因為 FTP 是阻塞的，要帶進
+    /// `spawn_blocking`；Mutex 同時保證兩輪不會同時跑。
+    inews: std::sync::Arc<Mutex<inews::InewsState>>,
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -106,6 +112,9 @@ struct ImportSummaryDto {
     needs_manual: usize,
     failed: usize,
     entries: Vec<EntryDto>,
+    /// Only set by `import_inews`: which show was read and which story each entry is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inews: Option<inews::InewsMeta>,
 }
 
 /// Tauri v2 does not ACL-gate app-defined commands (only plugin commands go through
@@ -141,13 +150,12 @@ fn read_txt_files(folder: &str) -> std::io::Result<Vec<(String, String)>> {
     Ok(files)
 }
 
-#[tauri::command]
-async fn import_folder(window: tauri::Window, state: tauri::State<'_, AppState>, folder: String) -> Result<ImportSummaryDto, String> {
-    require_main_window(&window)?;
-    let files = read_txt_files(&folder).map_err(|e| e.to_string())?;
+/// The shared half of every import: a list of (file name, txt text) goes through
+/// `import_files` exactly as a folder of manual exports would, so iNEWS and folder
+/// imports can never drift apart in how they judge a script.
+async fn import_texts(files: &[(String, String)], cfg: &Config) -> ImportSummaryDto {
     let total_files = files.len();
-    let cfg = state.config.lock().unwrap().clone();
-    let mut summary = import_files(&files, &cfg);
+    let mut summary = import_files(files, cfg);
     weather::fill_manual_weather(&mut summary.needs_manual).await;
 
     let mut entries = Vec::new();
@@ -175,7 +183,7 @@ async fn import_folder(window: tauri::Window, state: tauri::State<'_, AppState>,
         }
     }
 
-    Ok(ImportSummaryDto {
+    ImportSummaryDto {
         total_files,
         loaded: summary.loaded,
         passed: summary.passed.len(),
@@ -184,7 +192,104 @@ async fn import_folder(window: tauri::Window, state: tauri::State<'_, AppState>,
         needs_manual: summary.needs_manual.len(),
         failed: summary.failed.len(),
         entries,
+        inews: None,
+    }
+}
+
+#[tauri::command]
+async fn import_folder(window: tauri::Window, state: tauri::State<'_, AppState>, folder: String) -> Result<ImportSummaryDto, String> {
+    require_main_window(&window)?;
+    let files = read_txt_files(&folder).map_err(|e| e.to_string())?;
+    let cfg = state.config.lock().unwrap().clone();
+    Ok(import_texts(&files, &cfg).await)
+}
+
+// --- iNEWS FTP ---
+
+fn inews_credentials() -> Result<inews::Credentials, String> {
+    let get = |user: &str| {
+        keyring::Entry::new(KEYRING_SERVICE, user)
+            .ok()
+            .and_then(|e| e.get_password().ok())
+            .filter(|v| !v.is_empty())
+    };
+    match (get(KEYRING_INEWS_USER), get(KEYRING_INEWS_PASS)) {
+        (Some(user), Some(pass)) => Ok(inews::Credentials { user, pass }),
+        _ => Err("尚未設定 iNEWS 帳號密碼，請到設定頁輸入。".to_string()),
+    }
+}
+
+/// 從 iNEWS FTP 讀當節次的 rundown，把已播出、截止點以上的稿件轉成跟手動「匯出
+/// 延伸文稿」相同的 txt，再走跟 `import_folder` 完全相同的流程。
+#[tauri::command]
+async fn import_inews(window: tauri::Window, state: tauri::State<'_, AppState>) -> Result<ImportSummaryDto, String> {
+    require_main_window(&window)?;
+    let cfg = state.config.lock().unwrap().clone();
+    let creds = inews_credentials()?;
+    let shared = state.inews.clone();
+    let inews_cfg = cfg.inews.clone();
+    let fetched = tauri::async_runtime::spawn_blocking(move || {
+        let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
+        st.fetch(&inews_cfg, &creds, inews::taipei_seconds_of_day())
     })
+    .await
+    .map_err(|e| e.to_string())??;
+    let mut dto = import_texts(&fetched.files, &cfg).await;
+    dto.inews = Some(fetched.meta);
+    Ok(dto)
+}
+
+#[tauri::command]
+async fn test_inews_connection(window: tauri::Window, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    require_main_window(&window)?;
+    let cfg = state.config.lock().unwrap().inews.clone();
+    let creds = inews_credentials()?;
+    tauri::async_runtime::spawn_blocking(move || inews::test_connection(&cfg, &creds))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+struct InewsCredentialStatus {
+    has_credentials: bool,
+    username: String,
+}
+
+#[tauri::command]
+fn get_inews_credential_status(window: tauri::Window) -> Result<InewsCredentialStatus, String> {
+    require_main_window(&window)?;
+    Ok(match inews_credentials() {
+        Ok(c) => InewsCredentialStatus { has_credentials: true, username: c.user },
+        Err(_) => InewsCredentialStatus { has_credentials: false, username: String::new() },
+    })
+}
+
+#[tauri::command]
+fn set_inews_credentials(window: tauri::Window, username: String, password: String) -> Result<(), String> {
+    require_main_window(&window)?;
+    if username.trim().is_empty() || password.is_empty() {
+        return Err("帳號和密碼都不能是空白".to_string());
+    }
+    let set = |user: &str, value: &str| {
+        keyring::Entry::new(KEYRING_SERVICE, user).and_then(|e| e.set_password(value)).map_err(|e| e.to_string())
+    };
+    set(KEYRING_INEWS_USER, username.trim())?;
+    set(KEYRING_INEWS_PASS, &password)
+}
+
+#[tauri::command]
+fn clear_inews_credentials(window: tauri::Window, state: tauri::State<AppState>) -> Result<(), String> {
+    require_main_window(&window)?;
+    for user in [KEYRING_INEWS_USER, KEYRING_INEWS_PASS] {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, user).map_err(|e| e.to_string())?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    // 下一輪要用新的帳密重新登入，不能沿用舊的連線。
+    *state.inews.lock().unwrap_or_else(|p| p.into_inner()) = inews::InewsState::default();
+    Ok(())
 }
 
 #[tauri::command]
@@ -265,6 +370,12 @@ fn save_config_inner(state: &tauri::State<AppState>, config: Config) -> Result<(
     regex::Regex::new(&config.filter.title_tag_pattern).map_err(|e| format!("標題標記樣式（regex）錯誤：{e}"))?;
     regex::Regex::new(&config.filter.title_tag_fallback_pattern)
         .map_err(|e| format!("標題標記備援樣式（regex）錯誤：{e}"))?;
+    if config.inews.server.trim().is_empty() {
+        return Err("iNEWS 伺服器不能是空白".to_string());
+    }
+    if config.inews.poll_seconds < 3 {
+        return Err("iNEWS 自動刷新間隔至少 3 秒".to_string());
+    }
 
     let path = config_path().ok_or_else(|| "找不到設定檔存放路徑".to_string())?;
     news_script_core::config::save_to_path(&config, &path).map_err(|e| e.to_string())?;
@@ -911,6 +1022,7 @@ fn main() {
         .manage(AppState {
             config: Mutex::new(load_config_from_disk_or_default()),
             scrape_reply: Mutex::new(None),
+            inews: Default::default(),
         })
         .invoke_handler(tauri::generate_handler![
             import_folder,
@@ -935,7 +1047,12 @@ fn main() {
             compare_evening,
             generate_group_keywords,
             load_evening_state,
-            save_evening_state
+            save_evening_state,
+            import_inews,
+            test_inews_connection,
+            get_inews_credential_status,
+            set_inews_credentials,
+            clear_inews_credentials
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

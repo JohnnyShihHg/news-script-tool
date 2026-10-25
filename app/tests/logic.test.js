@@ -646,3 +646,116 @@ test("evening groups match what the copied text is built from", () => {
   const opts = { date: "2026-10-17", anchor: "吳宇舒" };
   assert.equal(groups.map((g) => L.buildEveningGroupText(g, opts)).join("\n\n"), L.buildEveningText(items, opts));
 });
+
+// --- 從 iNEWS 自動匯入 ---
+
+function inewsSummary(show, stories) {
+  return {
+    entries: stories.map((s) => ({
+      kind: "Passed",
+      Passed: { file_name: `${s.slug}.txt`, slug: s.slug, style: "SOT", time: "", group: "", title: `${s.slug}標題`, body: "內文", slug_marker: "", raw_title: "", raw_body: "", warnings: [] },
+    })),
+    inews: { show, stories: stories.map((s) => ({ file_name: `${s.slug}.txt`, key: s.key, version: s.version, cume: "" })) },
+  };
+}
+
+test("iNEWS cards are keyed by story, not by position", () => {
+  const items = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲", key: "A:1", version: "v1" }]));
+  assert.equal(items[0].id, "inews-A:1");
+  assert.deepEqual(items[0].inews, { key: "A:1", version: "v1", show: "0800" });
+  assert.equal(items[0].included, true);
+});
+
+test("a poll reports new and edited stories, nothing for unchanged ones", () => {
+  const prev = new Map([["A:1", "v1"], ["A:2", "v1"]]);
+  const d = L.diffInewsVersions(prev, [
+    { key: "A:1", version: "v1" },
+    { key: "A:2", version: "v2" },
+    { key: "A:3", version: "v1" },
+  ]);
+  assert.deepEqual(d, { added: ["A:3"], changed: ["A:2"] });
+});
+
+test("an unchanged story keeps its keywords and edits across polls; an edited one starts fresh", () => {
+  const first = L.inewsItemsFromSummary(inewsSummary("0800", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v1" },
+  ]));
+  first[0].keywords = "#a #b";
+  first[0].title = "手改標題";
+  first[1].keywords = "#舊";
+  const fresh = L.inewsItemsFromSummary(inewsSummary("0800", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v2" },
+    { slug: "丙", key: "A:3", version: "v1" },
+  ]));
+  const merged = L.mergeInewsItems(first, fresh, new Set());
+  assert.equal(merged.length, 3);
+  assert.equal(merged[0].keywords, "#a #b");
+  assert.equal(merged[0].title, "手改標題");
+  assert.equal(merged[1].keywords, "", "edited story is regenerated");
+  assert.equal(merged[1].inews.version, "v2");
+});
+
+test("switching show keeps last show's unwritten cards but drops written ones", () => {
+  const old = L.inewsItemsFromSummary(inewsSummary("0800", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v1" },
+  ]));
+  old.forEach((i) => { i.matchStatus = "to_cut"; });
+  const written = new Set(["A:1|v1"]);
+  const fresh = L.inewsItemsFromSummary(inewsSummary("0900", [{ slug: "丙", key: "B:1", version: "v1" }]));
+  const merged = L.mergeInewsItems(old, fresh, written);
+  assert.deepEqual(merged.map((i) => i.id), ["inews-A:2", "inews-B:1"]);
+});
+
+test("only compared, pending entries with keywords are written automatically", () => {
+  const items = L.inewsItemsFromSummary(inewsSummary("0800", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v1" },
+    { slug: "丙", key: "A:3", version: "v1" },
+    { slug: "丁", key: "A:4", version: "v1" },
+    { slug: "戊", key: "A:5", version: "v1" },
+  ]));
+  items.forEach((i) => { i.matchStatus = "to_cut"; i.keywords = "#k"; });
+  items[1].keywords = ""; // 還在等關鍵字
+  items[2].alreadyInDoc = true; // 文件裡已經有
+  items[3].matchStatus = null; // 還沒比對
+  const written = new Set(["A:5|v1"]); // 已經寫過這個版本
+  assert.deepEqual(L.autoWriteCandidates(items, written, "(勿上網)").map((i) => i.id), ["inews-A:1"]);
+
+  // 勿上網不需要關鍵字就能寫。
+  items[1].slug_marker = "(勿上網)";
+  assert.deepEqual(L.autoWriteCandidates(items, written, "(勿上網)").map((i) => i.id), ["inews-A:1", "inews-A:2"]);
+});
+
+test("a re-paste request (要重貼) of an already written version is not written twice", () => {
+  const [item] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲", key: "A:1", version: "v1" }]));
+  item.matchStatus = "keep_refresh";
+  item.keywords = "#k";
+  assert.equal(L.autoWriteCandidates([item], new Set(), "").length, 1);
+  assert.equal(L.autoWriteCandidates([item], new Set(["A:1|v1"]), "").length, 0);
+});
+
+test("dividers name the show hour", () => {
+  assert.equal(L.formatDivider("==== {hh} ====", "0800"), "==== 08 ====");
+  assert.equal(L.formatDivider("== {show} ==", "2400"), "== 2400 ==");
+});
+
+test("a divider goes between shows: after names the show that ended, before names the new one", () => {
+  const mk = (slug, show) => ({ slug, inews: { show } });
+  const toText = (items) => items.map((i) => i.slug).join("\n");
+  const items = [mk("甲", "0800"), mk("乙", "0900")];
+  const after = L.composeInewsWrite(items, "0800", { format: "==== {hh} ====", position: "after" }, toText);
+  assert.equal(after.text, "甲\n\n==== 08 ====\n\n乙");
+  assert.equal(after.lastShow, "0900");
+  const before = L.composeInewsWrite(items, "0800", { format: "==== {hh} ====", position: "before" }, toText);
+  assert.equal(before.text, "甲\n\n==== 09 ====\n\n乙");
+
+  // 這次 session 第一次寫：after 沒有「剛播完的那節」，不加；before 標上這一節。
+  const solo = [mk("甲", "0800")];
+  assert.equal(L.composeInewsWrite(solo, "", { format: "==== {hh} ====", position: "after" }, toText).text, "甲");
+  assert.equal(L.composeInewsWrite(solo, "", { format: "==== {hh} ====", position: "before" }, toText).text, "==== 08 ====\n\n甲");
+  // 同一節繼續寫：不加分隔線。
+  assert.equal(L.composeInewsWrite(solo, "0800", { format: "==== {hh} ====", position: "before" }, toText).text, "甲");
+});

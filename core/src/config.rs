@@ -330,9 +330,75 @@ impl Default for EveningConfig {
     }
 }
 
+/// Where 節次分隔線 goes relative to the show it labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DividerPosition {
+    /// 節次結束後：換節時先寫一行標著剛播完那節的分隔線。
+    After,
+    /// 節次開始前：新的一節第一次寫入前，先寫一行標著這一節的分隔線。
+    Before,
+}
+
+/// 從 iNEWS FTP 自動匯入（v0.3.0）。帳號密碼不在這裡 —— 跟 Gemini key 一樣存在系統
+/// 憑證管理員，絕對不寫進設定檔。
+///
+/// Container-level `#[serde(default)]`: a config.toml with only some of these keys
+/// (or none -- every file written before v0.3.0) still loads, missing keys taking
+/// their defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InewsConfig {
+    /// FTP 主機名稱或 IP（台內 `inews` = 10.3.125.1/.2）。
+    pub server: String,
+    pub port: u16,
+    /// 節次資料夾所在的完整路徑，點號串接（`51新聞台.SHOWS`）。
+    pub root: String,
+    /// 每一節底下要讀的 queue。
+    pub queue: String,
+    /// 自動刷新間隔（秒）。
+    pub poll_seconds: u32,
+    /// 下一節 rundown 沒有硬時間時，整點前幾分鐘換節。
+    pub lead_minutes: u32,
+    /// float 列（版型、框、SOU）也輸出。
+    pub include_floated: bool,
+    /// 截止點：最後一則標題含這個詞的稿……
+    pub cutoff_preview_keyword: String,
+    /// ……之後第一個序號以這個開頭的列（廣告列），從它開始以下不處理。
+    pub cutoff_page_prefix: String,
+    /// 節次分隔線，`{hh}` = 節次小時（08），`{show}` = 資料夾名稱（0800）。
+    pub divider_format: String,
+    pub divider_position: DividerPosition,
+    /// true = 產生關鍵字後直接寫入協作文件；false = 等使用者按確認（預設）。
+    pub auto_write: bool,
+    /// NSML 的 cume-time 是空的時候，填入照 iNEWS 方式算出來的累積時間。
+    /// 關掉就跟手動「匯出延伸文稿」位元組完全相同。
+    pub fill_computed_time: bool,
+}
+
+impl Default for InewsConfig {
+    fn default() -> Self {
+        Self {
+            server: "inews".into(),
+            port: 21,
+            root: "51新聞台.SHOWS".into(),
+            queue: "ONAIR".into(),
+            poll_seconds: 10,
+            lead_minutes: 5,
+            include_floated: false,
+            cutoff_preview_keyword: "預告".into(),
+            cutoff_page_prefix: "=".into(),
+            divider_format: "==== {hh} ====".into(),
+            divider_position: DividerPosition::After,
+            auto_write: false,
+            fill_computed_time: true,
+        }
+    }
+}
+
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 6;
+pub const CURRENT_CONFIG_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -359,6 +425,8 @@ pub struct Config {
     pub annotations: AnnotationsConfig,
     #[serde(default)]
     pub evening: EveningConfig,
+    #[serde(default)]
+    pub inews: InewsConfig,
 }
 
 /// Bring a config written by an older version up to date.
@@ -413,6 +481,9 @@ pub fn migrate(cfg: &mut Config) -> bool {
         LEGACY_TITLE_TAG_FALLBACK_PATTERN,
         &defaults.filter.title_tag_fallback_pattern,
     );
+
+    // v7 (v0.3.0) only added the [inews] section, which `#[serde(default)]` fills in;
+    // there is no list to union, so nothing else to do for it here.
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -573,6 +644,50 @@ theme = "warm"
         let cfg = load_from_str(legacy_toml()).unwrap();
         assert_eq!(cfg.evening.anchors, vec!["吳宇舒".to_string(), "房業涵".to_string()]);
         assert!(cfg.evening.no_online_markers.iter().any(|m| m == "(勿上網)"));
+    }
+
+    /// A config as written by v0.2.9 (version 6), with some settings the user changed.
+    fn v6_toml() -> String {
+        let mut cfg = Config::default();
+        cfg.config_version = 6;
+        cfg.ui.theme = "dark".into();
+        cfg.import.default_folder = r"D:\iNews".into();
+        cfg.filter.allowed_styles.push("自訂樣式".into());
+        cfg.gemini.max_per_run = 7;
+        let mut s = toml::to_string_pretty(&cfg).unwrap();
+        // v0.2.9 had no [inews] section at all.
+        let at = s.find("[inews]").unwrap();
+        s.truncate(at);
+        s
+    }
+
+    #[test]
+    fn a_version_6_config_loads_with_inews_defaults_and_keeps_its_settings() {
+        let mut cfg = load_from_str(&v6_toml()).unwrap();
+        assert_eq!(cfg.inews.server, "inews");
+        assert_eq!(cfg.inews.root, "51新聞台.SHOWS");
+        assert_eq!(cfg.inews.queue, "ONAIR");
+        assert_eq!(cfg.inews.poll_seconds, 10);
+        assert!(!cfg.inews.auto_write, "confirm mode is the default");
+        assert_eq!(cfg.inews.divider_format, "==== {hh} ====");
+
+        assert!(migrate(&mut cfg));
+        assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(cfg.ui.theme, "dark");
+        assert_eq!(cfg.import.default_folder, r"D:\iNews");
+        assert_eq!(cfg.gemini.max_per_run, 7);
+        assert!(cfg.filter.allowed_styles.iter().any(|s| s == "自訂樣式"));
+        assert_eq!(cfg.filter.allowed_styles.iter().filter(|s| *s == "SOT").count(), 1);
+    }
+
+    #[test]
+    fn a_partial_inews_section_keeps_what_is_there_and_defaults_the_rest() {
+        let s = format!("{}\n[inews]\nserver = \"10.3.125.2\"\ndivider_position = \"before\"\n", v6_toml());
+        let cfg = load_from_str(&s).unwrap();
+        assert_eq!(cfg.inews.server, "10.3.125.2");
+        assert_eq!(cfg.inews.divider_position, DividerPosition::Before);
+        assert_eq!(cfg.inews.queue, "ONAIR");
+        assert_eq!(cfg.inews.lead_minutes, 5);
     }
 
     #[test]

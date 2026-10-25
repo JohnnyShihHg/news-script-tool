@@ -195,6 +195,12 @@
           "markdownDescription": "Enables the clear_folder command without any pre-configured scope."
         },
         {
+          "description": "Enables the clear_inews_credentials command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clear-inews-credentials",
+          "markdownDescription": "Enables the clear_inews_credentials command without any pre-configured scope."
+        },
+        {
           "description": "Enables the compare_evening command without any pre-configured scope.",
           "type": "string",
           "const": "allow-compare-evening",
@@ -249,10 +255,22 @@
           "markdownDescription": "Enables the get_config command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_inews_credential_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-inews-credential-status",
+          "markdownDescription": "Enables the get_inews_credential_status command without any pre-configured scope."
+        },
+        {
           "description": "Enables the import_folder command without any pre-configured scope.",
           "type": "string",
           "const": "allow-import-folder",
           "markdownDescription": "Enables the import_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the import_inews command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-import-inews",
+          "markdownDescription": "Enables the import_inews command without any pre-configured scope."
         },
         {
           "description": "Enables the load_evening_state command without any pre-configured scope.",
@@ -315,6 +333,18 @@
           "markdownDescription": "Enables the set_api_key command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_inews_credentials command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-inews-credentials",
+          "markdownDescription": "Enables the set_inews_credentials command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the test_inews_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-test-inews-connection",
+          "markdownDescription": "Enables the test_inews_connection command without any pre-configured scope."
+        },
+        {
           "description": "Denies the append_to_collab_doc command without any pre-configured scope.",
           "type": "string",
           "const": "deny-append-to-collab-doc",
@@ -331,6 +361,12 @@
           "type": "string",
           "const": "deny-clear-folder",
           "markdownDescription": "Denies the clear_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear_inews_credentials command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clear-inews-credentials",
+          "markdownDescription": "Denies the clear_inews_credentials command without any pre-configured scope."
         },
         {
           "description": "Denies the compare_evening command without any pre-configured scope.",
@@ -387,10 +423,22 @@
           "markdownDescription": "Denies the get_config command without any pre-configured scope."
         },
         {
+          "description": "Denies the get_inews_credential_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-inews-credential-status",
+          "markdownDescription": "Denies the get_inews_credential_status command without any pre-configured scope."
+        },
+        {
           "description": "Denies the import_folder command without any pre-configured scope.",
           "type": "string",
           "const": "deny-import-folder",
           "markdownDescription": "Denies the import_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the import_inews command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-import-inews",
+          "markdownDescription": "Denies the import_inews command without any pre-configured scope."
         },
         {
           "description": "Denies the load_evening_state command without any pre-configured scope.",
@@ -451,6 +499,18 @@
           "type": "string",
           "const": "deny-set-api-key",
           "markdownDescription": "Denies the set_api_key command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_inews_credentials command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-inews-credentials",
+          "markdownDescription": "Denies the set_inews_credentials command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the test_inews_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-test-inews-connection",
+          "markdownDescription": "Denies the test_inews_connection command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

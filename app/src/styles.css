@@ -158,6 +158,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 .compare-status.hidden { display: none; }
 .compare-status.error { background: var(--danger-bg); color: var(--danger); }
+.compare-status.warn { background: var(--warn-bg); color: var(--warn); }
+.inews-confirm { display: flex; align-items: center; gap: 12px; }
+.inews-confirm.hidden { display: none; }
+.inews-confirm span { flex: 1; white-space: pre-line; }
+#inewsStatus { white-space: pre-line; }
 
 .badge.to_cut { color: var(--ok); background: var(--ok-bg); }
 .badge.keep_refresh { color: var(--warn); background: var(--warn-bg); }

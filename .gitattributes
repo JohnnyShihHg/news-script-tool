@@ -1,0 +1,2 @@
+# iNEWS 轉換的預期輸出是 CRLF、逐位元組比對，不能讓 git 改行尾。
+core/tests/fixtures/inews/** -text
