@@ -856,3 +856,27 @@ test("program settings parse 開頭=名稱 pairs", () => {
   assert.deepEqual(L.parsePrograms(""), {});
   assert.equal(L.parsePrograms("關鍵KS"), null);
 });
+
+test("a show that is current again is no longer closed (App left running overnight)", () => {
+  const closed = new Set();
+  const programs = new Map();
+  // 昨晚 22:10 補掃 2000（帶關鍵時刻）。
+  L.noteInewsRound(closed, programs, { show: "2200", closed_show: "2000", program_divider: "==== 22 關鍵時刻 ====" });
+  assert.ok(closed.has("2000"));
+  assert.equal(programs.get("2000"), "==== 22 關鍵時刻 ====");
+  // 補掃後才改的晚到稿：目前節次還不是 2000，照樣算已結束。
+  L.noteInewsRound(closed, programs, { show: "2400" });
+  assert.ok(closed.has("2000"));
+  // 今天 19:55 2000 又是目前節次：昨天的補掃作廢，第一則 2000 的稿後面不會馬上寫分隔線。
+  L.noteInewsRound(closed, programs, { show: "2000" });
+  assert.ok(!closed.has("2000"));
+  assert.ok(!programs.has("2000"));
+  const r = L.composeInewsWrite([mk("八點一", "2000")], { lastShow: "1800", closed: new Set([...closed, "1800"]), programs }, AFTER, toText);
+  assert.equal(r.text, "==== 18 ====\n\n八點一");
+  assert.equal(r.lastShow, "2000");
+  // 週末 2000 補掃時沒有節目分隔線，不沿用前一天的。
+  L.noteInewsRound(closed, programs, { show: "2200", closed_show: "2000", program_divider: "==== 22 關鍵時刻 ====" });
+  L.noteInewsRound(closed, programs, { show: "2000" });
+  L.noteInewsRound(closed, programs, { show: "2200", closed_show: "2000" });
+  assert.ok(!programs.has("2000"));
+});

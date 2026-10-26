@@ -598,6 +598,24 @@
     return Object.entries(spans ?? {}).map(([a, b]) => `${a}=${b}`).join(", ");
   }
 
+  /**
+   * Keeps the 已補掃 set (and its 節目分隔線) in step with one auto round. A show that
+   * is current again is a new airing (tomorrow's 2000), so it is no longer closed:
+   * without this an App left running overnight saw yesterday's sweep and wrote
+   * `==== 20 ====` right after the first 2000 story of the day (v0.3.4).
+   */
+  function noteInewsRound(closed, programs, meta) {
+    if (meta?.show && meta.show !== meta.closed_show) {
+      closed.delete(meta.show);
+      programs.delete(meta.show);
+    }
+    if (meta?.closed_show) {
+      closed.add(meta.closed_show);
+      if (meta.program_divider) programs.set(meta.closed_show, meta.program_divider);
+      else programs.delete(meta.closed_show);
+    }
+  }
+
   /** `關鍵KS=關鍵時刻, XX=某節目` -> { 關鍵KS: "關鍵時刻", ... }; null on a malformed part. */
   function parsePrograms(text) {
     const programs = {};
@@ -696,6 +714,7 @@
     parseSlotSpans,
     formatSlotSpans,
     parsePrograms,
+    noteInewsRound,
     composeInewsWrite,
     eveningItemFromDto,
     isEveningHit,

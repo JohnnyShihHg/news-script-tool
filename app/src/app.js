@@ -43,6 +43,7 @@ const {
   parseSlotSpans,
   formatSlotSpans,
   parsePrograms,
+  noteInewsRound,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -920,8 +921,7 @@ async function inewsRound() {
       return;
     }
     const meta = summary.inews;
-    if (meta.closed_show) closedShows.add(meta.closed_show);
-    if (meta.closed_show && meta.program_divider) programDividers.set(meta.closed_show, meta.program_divider);
+    noteInewsRound(closedShows, programDividers, meta);
     const { added, changed } = diffInewsVersions(inewsVersions, meta.stories);
     const hadCards = items.some((i) => i.inews);
     items = sortByTime(mergeInewsItems(hadCards ? items : [], inewsItemsFromSummary(summary), writtenKeys));
