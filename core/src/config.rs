@@ -37,11 +37,21 @@ pub struct FilterConfig {
     /// the entry is fully parsed and can be ticked back on.
     #[serde(default = "default_blocked_note_terms")]
     pub blocked_note_terms: Vec<String>,
-    /// Terms in the slug that keep a blank-樣式 row out of 解析失敗 without setting a
-    /// style. `專` names a 專題, which can run in any format, so it is not a style --
-    /// it only means "this is a story", leaving 未知樣式 for a human to call.
-    #[serde(default = "default_slug_keep_terms")]
-    pub slug_keep_terms: Vec<String>,
+    /// slug 以這些字開頭（先去掉開頭的 `(寰)`、`【xx】` 這類括號標記）就一律通過，不管
+    /// 樣式是什麼 —— 空白、未知、BS、乾稿都收。`專` 開頭 = 專題（v0.3.2，取代 v0.2.9
+    /// 的 `slug_keep_terms`）。只看開頭不看「含有」，`專家`、`專案` 這類出現在中間的
+    /// 不算。SOU 字尾和編輯備註「預告」仍然優先。
+    #[serde(default = "default_force_pass_slug_prefixes")]
+    pub force_pass_slug_prefixes: Vec<String>,
+    /// 一個樣式可能代表兩種東西時，依 slug／編輯備註決定：`D` 可能是 DLIVE（延遲連線）
+    /// 也可能是 DRY（乾稿）。slug 或編輯備註含 `live_terms` 任一 → `live_style`，否則
+    /// → `else_style`，再照一般規則分類。
+    #[serde(default = "default_ambiguous_styles")]
+    pub ambiguous_styles: BTreeMap<String, AmbiguousStyle>,
+    /// 樣式空白、slug 以時間標結尾（`北投強風垮1800`、`季瑩氣象2100(ok)`）而且有標題
+    /// 和內文 → 視為正式新聞稿並通過，樣式留空。`=` 開頭或含 `==` 的是節目結構，不適用。
+    #[serde(default = "default_true")]
+    pub blank_style_timecode_pass: bool,
     /// `尾碼=樣式` pairs read off the last `-` segment of 影像編號, used only when 樣式
     /// is blank and the slug names no style. `X5` is the camera code for an SL fake
     /// live hit (`20261023-585-X5`), which producers often leave 樣式 blank on.
@@ -53,8 +63,28 @@ fn default_video_id_styles() -> Vec<String> {
     vec!["X5=SL".into()]
 }
 
-fn default_slug_keep_terms() -> Vec<String> {
+fn default_force_pass_slug_prefixes() -> Vec<String> {
     vec!["專".into()]
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AmbiguousStyle {
+    pub live_terms: Vec<String>,
+    pub live_style: String,
+    pub else_style: String,
+}
+
+fn default_ambiguous_styles() -> BTreeMap<String, AmbiguousStyle> {
+    let d = AmbiguousStyle {
+        live_terms: ["DL", "DLIVE", "SL", "連線", "延遲"].iter().map(|s| s.to_string()).collect(),
+        live_style: "DLIVE".into(),
+        else_style: "DRY".into(),
+    };
+    [("D".to_string(), d)].into_iter().collect()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_blocked_note_terms() -> Vec<String> {
@@ -80,15 +110,23 @@ impl Default for FilterConfig {
                 "SOT".into(), "短sot".into(), "LIVE".into(), "海神".into(),
                 "閃電".into(), "旋風".into(), "4G".into(), "TEL".into(), "電連".into(),
                 "SLIVE".into(), "SL".into(), "SNG".into(), "推播".into(), "連線".into(),
+                "電聯".into(), "DL".into(), "DLIVE".into(), "直進".into(),
             ],
-            blocked_styles: vec!["BS".into(), "SO".into()],
+            blocked_styles: [
+                "BS", "SO", "乾稿", "乾", "DRY", "改BS", "SOBS", "PRO", "PROMO", "片頭",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             excluded_slug_suffixes: vec!["SOU".into()],
-            flag_styles: vec!["TEL".into(), "電連".into()],
+            flag_styles: vec!["TEL".into(), "電連".into(), "電聯".into()],
             title_tag_pattern: r"^\[BAR_.*大\]$".into(),
             title_tag_fallback_pattern: default_title_tag_fallback_pattern(),
             slug_style_terms: default_slug_style_terms(),
             blocked_note_terms: default_blocked_note_terms(),
-            slug_keep_terms: default_slug_keep_terms(),
+            force_pass_slug_prefixes: default_force_pass_slug_prefixes(),
+            ambiguous_styles: default_ambiguous_styles(),
+            blank_style_timecode_pass: true,
             video_id_styles: default_video_id_styles(),
         }
     }
@@ -177,6 +215,7 @@ impl Default for AnnotationsConfig {
             exclusive_prefix: "獨家》".into(),
             latest_styles: [
                 "live", "slive", "sl", "4G", "SNG", "推播", "連線", "旋風", "閃電", "海神",
+                "DL", "DLIVE", "直進",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -383,6 +422,18 @@ pub struct InewsConfig {
     /// v0.3.0 的標記式截止（預告後的廣告列以下不處理）。v0.3.1 起改用時間判斷，預設
     /// 關閉：跨節 rundown 中間有好幾個 CM，用標記會切在一半。
     pub cutoff_by_marker: bool,
+    /// 播出日的分界（v0.3.2）：公司 02:00 回收 rundown，所以 00:00～01:59 播出的稿
+    /// 還算前一天，比對協作文件時用前一天的日期段落。
+    pub broadcast_day_start: String,
+    /// 協作文件裡還沒有今天的日期分隔線時，第一次寫入前自動補上。
+    pub auto_date_header: bool,
+    /// 前一天段落裡同一個 slug 的稿，標題也相同才算重播（不再寫入）；標題不同就是新
+    /// 內容。關掉 = 完全不看前一天。
+    pub cross_day_title_match: bool,
+    /// rundown 裡長度 0:00 的直進／LIVE 播出後，後面的稿先暫緩，等製作人重設硬時間。
+    pub hold_after_open_live: bool,
+    /// 暫緩上限：直進開始後幾分鐘仍沒有新的硬時間就恢復一般判定（並寫警告）。
+    pub open_live_max_minutes: u32,
 }
 
 impl Default for InewsConfig {
@@ -407,13 +458,18 @@ impl Default for InewsConfig {
                 .collect(),
             sweep_delay_minutes: 10,
             cutoff_by_marker: false,
+            broadcast_day_start: "02:00".into(),
+            auto_date_header: true,
+            cross_day_title_match: true,
+            hold_after_open_live: true,
+            open_live_max_minutes: 30,
         }
     }
 }
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 7;
+pub const CURRENT_CONFIG_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -471,7 +527,10 @@ pub fn migrate(cfg: &mut Config) -> bool {
     union(&mut cfg.filter.allowed_styles, &defaults.filter.allowed_styles);
     union(&mut cfg.markers.refresh_keywords, &defaults.markers.refresh_keywords);
     union(&mut cfg.filter.slug_style_terms, &defaults.filter.slug_style_terms);
-    union(&mut cfg.filter.slug_keep_terms, &defaults.filter.slug_keep_terms);
+    union(&mut cfg.filter.blocked_styles, &defaults.filter.blocked_styles);
+    union(&mut cfg.filter.flag_styles, &defaults.filter.flag_styles);
+    union(&mut cfg.annotations.latest_styles, &defaults.annotations.latest_styles);
+    union(&mut cfg.filter.force_pass_slug_prefixes, &defaults.filter.force_pass_slug_prefixes);
     union(&mut cfg.filter.video_id_styles, &defaults.filter.video_id_styles);
     union(&mut cfg.evening.no_online_markers, &defaults.evening.no_online_markers);
 
@@ -499,6 +558,8 @@ pub fn migrate(cfg: &mut Config) -> bool {
 
     // v7 (v0.3.0) only added the [inews] section, which `#[serde(default)]` fills in;
     // there is no list to union, so nothing else to do for it here.
+    // v8 (v0.3.2) widened allowed/blocked/flag/latest styles (unioned above); the new
+    // scalar and map settings come from serde defaults.
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -738,4 +799,53 @@ theme = "warm"
         assert_eq!(cfg.annotations.no_upload_label, "(勿上網)");
         assert!(cfg.clean.strip_marker_symbols);
     }
+
+    #[test]
+    fn a_version_7_config_gains_the_v032_styles_and_keeps_the_users_own() {
+        // v0.3.1 as saved on disk: the old narrower lists, slug_keep_terms (removed in
+        // v0.3.2), a style the user added themselves, and none of the new settings.
+        let mut old = Config::default();
+        old.config_version = 7;
+        old.filter.allowed_styles.retain(|s| !["電聯", "DL", "DLIVE", "直進"].contains(&s.as_str()));
+        old.filter.allowed_styles.push("自訂樣式".into());
+        old.filter.blocked_styles = vec!["BS".into(), "SO".into(), "自訂擋掉".into()];
+        old.filter.flag_styles = vec!["TEL".into(), "電連".into()];
+        old.annotations.latest_styles.retain(|s| !["DL", "DLIVE", "直進"].contains(&s.as_str()));
+        old.inews.poll_seconds = 20;
+        let mut s = toml::to_string_pretty(&old).unwrap();
+        for key in ["force_pass_slug_prefixes", "blank_style_timecode_pass", "broadcast_day_start", "auto_date_header",
+            "cross_day_title_match", "hold_after_open_live", "open_live_max_minutes"]
+        {
+            s = s.lines().filter(|l| !l.starts_with(key)).collect::<Vec<_>>().join("\n");
+        }
+        s = s.replace("[filter]\n", "[filter]\nslug_keep_terms = [\"專\"]\n");
+        // Drop the ambiguous_styles table entirely.
+        let cut_from = s.find("[filter.ambiguous_styles").unwrap();
+        let cut_to = s[cut_from..].find("\n[clean]").map(|i| cut_from + i).unwrap();
+        s.replace_range(cut_from..cut_to, "");
+
+        let mut cfg = load_from_str(&s).unwrap();
+        assert!(cfg.filter.blank_style_timecode_pass);
+        assert_eq!(cfg.filter.force_pass_slug_prefixes, vec!["專".to_string()]);
+        assert_eq!(cfg.filter.ambiguous_styles["D"].live_style, "DLIVE");
+        assert_eq!(cfg.inews.broadcast_day_start, "02:00");
+        assert!(cfg.inews.auto_date_header && cfg.inews.cross_day_title_match && cfg.inews.hold_after_open_live);
+        assert_eq!(cfg.inews.open_live_max_minutes, 30);
+
+        assert!(migrate(&mut cfg));
+        assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+        for style in ["電聯", "DL", "DLIVE", "直進", "自訂樣式"] {
+            assert!(cfg.filter.allowed_styles.iter().any(|s| s == style), "allowed missing {style}");
+        }
+        for style in ["乾稿", "DRY", "改BS", "SOBS", "PROMO", "片頭", "自訂擋掉"] {
+            assert!(cfg.filter.blocked_styles.iter().any(|s| s == style), "blocked missing {style}");
+        }
+        assert!(cfg.filter.flag_styles.iter().any(|s| s == "電聯"));
+        for style in ["DL", "DLIVE", "直進"] {
+            assert!(cfg.annotations.latest_styles.iter().any(|s| s == style), "latest missing {style}");
+        }
+        assert_eq!(cfg.inews.poll_seconds, 20);
+        assert_eq!(cfg.filter.blocked_styles.iter().filter(|s| *s == "BS").count(), 1);
+    }
+
 }

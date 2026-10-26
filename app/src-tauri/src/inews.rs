@@ -352,6 +352,33 @@ fn describe_window(w: &inews::Window) -> String {
 }
 
 /// 決策紀錄裡的一則：`09:01:50 合成第二則0900`。
+/// 看現在時間的判斷：`select_rows` 加上直進暫緩（長度 0:00 的直進／LIVE 播出後，
+/// 後面的稿等新的硬時間）。暫緩寫進 events，逾時恢復寫進 warnings。
+fn select_now(
+    cfg: &InewsConfig,
+    rows: &[RundownRow],
+    now: u32,
+    w: &inews::Window,
+    marker: inews::MarkerCutoff,
+    (events, warnings): &mut (&mut Vec<String>, &mut Vec<String>),
+) -> inews::Selection {
+    let mut s = inews::select_rows(rows, Some(now), w, cfg.include_floated, marker);
+    if cfg.hold_after_open_live {
+        for h in inews::hold_after_open_live(rows, &mut s, now, w, cfg.open_live_max_minutes) {
+            let live = format!("{} {}", clock(h.live_cume), rows[h.live].title);
+            if h.expired {
+                warnings.push(format!(
+                    "{} 直進暫緩逾 {} 分鐘仍沒有新的硬時間，已恢復一般判定：{live}",
+                    w.slot.show, cfg.open_live_max_minutes
+                ));
+            } else {
+                events.push(format!("直進暫緩：{live} 起，後續 {} 則等待新硬時間", h.held.len()));
+            }
+        }
+    }
+    s
+}
+
 fn describe_row(rows: &[RundownRow], sel: &inews::Selection, i: Option<usize>) -> String {
     match i {
         Some(i) => format!("{} {}", sel.cume[i].map(clock).unwrap_or_else(|| "--:--:--".into()), rows[i].title),
@@ -478,10 +505,11 @@ impl InewsState {
             rundowns[show].iter().map(|(e, s)| RundownRow::from_story(s, e.floated)).collect()
         };
 
-        let cur_rows = rows_of(&rundowns, &cur.slot.show);
-        let sel = inews::select_rows(&cur_rows, Some(now), &cur, cfg.include_floated, marker);
-
         let mut events: Vec<String> = Vec::new();
+        let mut warnings = Vec::new();
+        let cur_rows = rows_of(&rundowns, &cur.slot.show);
+        let sel = select_now(cfg, &cur_rows, now, &cur, marker, &mut (&mut events, &mut warnings));
+
         for (show, reason) in &plan.skipped {
             events.push(match reason {
                 inews::SkipReason::Spanned(by) => format!("跳過 {show}（併入 {by}）"),
@@ -510,7 +538,7 @@ impl InewsState {
                     Some(prev) if sweep.as_ref().map(|w| &w.slot.show) != Some(&last) => {
                         rundown_of(self, &mut rundowns, &last, &mut retrieved)?;
                         let rows = rows_of(&rundowns, &last);
-                        let s = inews::select_rows(&rows, Some(now), prev, cfg.include_floated, marker);
+                        let s = select_now(cfg, &rows, now, prev, marker, &mut (&mut events, &mut warnings));
                         events.push(format!("{last} 最後同步：納入 {} 則（累積時間 < {}）", s.rows.len(), clock(prev.end())));
                         extra.extend(s.rows.iter().map(|&i| Pick { show: last.clone(), index: i, cume: s.cume[i] }));
                         switched_from = Some(last);
@@ -541,7 +569,6 @@ impl InewsState {
         let kept: std::collections::HashSet<&String> = rundowns.values().flatten().map(|(e, _)| &e.name).collect();
         self.cache.retain(|name, _| kept.contains(name));
 
-        let mut warnings = Vec::new();
         if cfg.cutoff_by_marker && sel.rule == inews::CutoffRule::None {
             warnings.push(format!(
                 "已開啟標記式截止，但找不到截止點（標題含「{}」之後序號以「{}」開頭的列），只用時間判斷。",
@@ -649,6 +676,23 @@ impl InewsState {
     }
 }
 
+// --- 播出日 -----------------------------------------------------------------------
+
+/// 播出日的 (今天 MMDD, 前一天 MMDD)。`day_start`（`02:00`）之前還算前一天：公司
+/// 02:00 回收 rundown，2400、0100 那節的稿屬於前一天的段落。格式錯就當 00:00。
+pub fn broadcast_days(now: chrono::NaiveDateTime, day_start: &str) -> (String, String) {
+    let offset = chrono::NaiveTime::parse_from_str(day_start.trim(), "%H:%M")
+        .map(|t| t.signed_duration_since(chrono::NaiveTime::MIN))
+        .unwrap_or_default();
+    let today = (now - offset).date();
+    let previous = today.pred_opt().unwrap_or(today);
+    (today.format("%m%d").to_string(), previous.format("%m%d").to_string())
+}
+
+pub fn taipei_now() -> chrono::NaiveDateTime {
+    chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).naive_local()
+}
+
 // --- 決策紀錄 ---------------------------------------------------------------------
 
 /// 紀錄保留天數。
@@ -656,7 +700,7 @@ pub const LOG_KEEP_DAYS: i64 = 14;
 
 /// 台北時間的 (yyyymmdd, `yyyy-mm-dd HH:MM:SS`)。
 fn taipei_stamp() -> (String, String) {
-    let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+    let now = taipei_now();
     (now.format("%Y%m%d").to_string(), now.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
@@ -869,6 +913,63 @@ mod tests {
         FakeServer::start(queues, stories, drop_after)
     }
 
+    /// 0800 有一則長度 0:00 的直進（07:58:00 開始）；0900 跟 `two_shows` 一樣。
+    fn live_show() -> FakeServer {
+        let mut queues = HashMap::new();
+        let mut stories = HashMap::new();
+        queues.insert(
+            "51新聞台.SHOWS".to_string(),
+            "d--------- 1 d    27 Apr 30  2025 .0800\r\nd--------- 1 d    27 Apr 30  2025 .0900\r\n".to_string(),
+        );
+        let mut add = |queue: &str, rows: &[(&str, String)]| {
+            let mut list = String::new();
+            for (id, nsml) in rows {
+                let slug = format!("稿{}", &id[id.len() - 2..]);
+                list.push_str(&list_line(false, id, &slug));
+                stories.insert(format!("{id} {slug}"), nsml.clone());
+            }
+            queues.insert(queue.to_string(), list);
+        };
+        add(
+            "51新聞台.SHOWS.0800.ONAIR",
+            &[
+                ("0000000A:00000001:00000A01", story("", "大片頭", 60, "＠28500", "")),
+                ("0000000A:00000002:00000A02", story("A1", "合成早安稿0800", 120, "", "SOT")),
+                ("0000000A:00000003:00000A03", story("A2", "合成直進", 0, "", "直進")),
+                ("0000000A:00000004:00000A04", story("A3", "合成直進後一0800", 60, "", "SOT")),
+                ("0000000A:00000005:00000A05", story("A4", "合成直進後二0800", 60, "", "SOT")),
+            ],
+        );
+        add(
+            "51新聞台.SHOWS.0900.ONAIR",
+            &[
+                ("0000000B:00000001:00000B01", story("", "大片頭", 60, "＠32100", "")),
+                ("0000000B:00000002:00000B02", story("A1", "合成九點稿0900", 120, "", "SOT")),
+            ],
+        );
+        FakeServer::start(queues, stories, None)
+    }
+
+    #[test]
+    fn stories_after_an_open_live_wait_and_the_hold_is_logged() {
+        let server = live_show();
+        let mut state = InewsState::default();
+        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 5 * 60, FetchMode::Manual).unwrap();
+        assert_eq!(names_of(&r), ["大片頭.txt", "合成早安稿0800.txt", "合成直進.txt"]);
+        assert!(r.log_line.contains("直進暫緩：07:58:00 合成直進 起，後續 2 則等待新硬時間"), "{}", r.log_line);
+
+        // 30 分鐘後仍沒有新的硬時間：恢復一般判定，並留下警告。
+        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 28 * 60, FetchMode::Manual).unwrap();
+        assert_eq!(r.files.len(), 5);
+        assert!(r.meta.warnings.iter().any(|w| w.contains("直進暫緩逾 30 分鐘")), "{:?}", r.meta.warnings);
+
+        // 關掉就是 v0.3.1 的行為。
+        let mut off = cfg(server.port);
+        off.hold_after_open_live = false;
+        let r = state.fetch(&off, &creds("secret"), 8 * 3600 + 5 * 60, FetchMode::Manual).unwrap();
+        assert_eq!(r.files.len(), 5);
+    }
+
     #[test]
     fn login_sends_the_verified_sequence_without_bom_or_longnames() {
         let server = two_shows(None);
@@ -1023,4 +1124,22 @@ mod tests {
         assert!(r.files.is_empty());
         assert_eq!(r.meta.list_count, 0);
     }
+
+    fn at(d: u32, h: u32, m: u32) -> chrono::NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(2026, 10, d).unwrap().and_hms_opt(h, m, 0).unwrap()
+    }
+
+    #[test]
+    fn stories_aired_before_two_belong_to_the_previous_day() {
+        assert_eq!(broadcast_days(at(27, 1, 30), "02:00"), ("1026".into(), "1025".into()));
+        assert_eq!(broadcast_days(at(27, 0, 5), "02:00"), ("1026".into(), "1025".into()));
+        assert_eq!(broadcast_days(at(27, 2, 10), "02:00"), ("1027".into(), "1026".into()));
+        assert_eq!(broadcast_days(at(26, 23, 59), "02:00"), ("1026".into(), "1025".into()));
+        // Month and year boundaries.
+        let jan1 = chrono::NaiveDate::from_ymd_opt(2027, 1, 1).unwrap().and_hms_opt(1, 0, 0).unwrap();
+        assert_eq!(broadcast_days(jan1, "02:00"), ("1231".into(), "1230".into()));
+        // A broken setting reads as midnight rather than failing the compare.
+        assert_eq!(broadcast_days(at(27, 1, 30), "兩點"), ("1027".into(), "1026".into()));
+    }
+
 }

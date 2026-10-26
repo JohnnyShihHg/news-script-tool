@@ -751,6 +751,8 @@ pub struct RundownRow {
     pub hard: Option<u32>,
     /// v-style 有填：判斷空節次用。
     pub styled: bool,
+    /// v-style 本身：判斷長度 0:00 的直進／LIVE 用。
+    pub style: String,
 }
 
 impl RundownRow {
@@ -762,6 +764,7 @@ impl RundownRow {
             total: story.total_seconds(),
             hard: story.hard_time(),
             styled: !story.raw("v-style").trim().is_empty(),
+            style: story.raw("v-style").trim().to_string(),
         }
     }
 }
@@ -848,6 +851,9 @@ pub enum RowFate {
     Residual,
     /// 算不出累積時間（整份沒有硬時間）。
     NoTime,
+    /// 前面有長度 0:00 的直進／LIVE 已經開始播：它播多久沒人知道，依 0:00 推算的
+    /// 「已播出」不可信，等製作人重設硬時間（見 `hold_after_open_live`）。
+    HeldByOpenLive,
 }
 
 /// 新規則的「已播出」：累積時間 ≤ 現在、< 下一個有效節次的開始時間、而且不是殘留稿。
@@ -879,6 +885,8 @@ pub struct Selection {
     pub rule: CutoffRule,
     /// 範圍內但還沒播到的列數。
     pub pending: usize,
+    /// 因為前面的直進／LIVE 還沒結束而暫緩的列數。
+    pub held: usize,
     /// 沒處理的非 float 列數（還沒播、預備稿、殘留、截止點以下）。
     pub excluded: usize,
 }
@@ -932,7 +940,84 @@ pub fn select_rows(
             _ => excluded += 1,
         }
     }
-    Selection { rows: picked, cume, fates, cutoff, rule, pending, excluded }
+    Selection { rows: picked, cume, fates, cutoff, rule, pending, held: 0, excluded }
+}
+
+/// 現場類樣式（比對前照 `clean::style_key` 正規化）。長度 0:00 的這類列播多久要看現場。
+pub const LIVE_STYLES: [&str; 7] = ["LIVE", "直進", "SLIVE", "SL", "DLIVE", "SNG", "連線"];
+
+fn is_open_live(row: &RundownRow) -> bool {
+    !row.floated
+        && row.total == 0
+        && LIVE_STYLES.iter().any(|s| crate::clean::style_key(s) == crate::clean::style_key(&row.style))
+}
+
+/// 一次直進暫緩（給決策紀錄用）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenLiveHold {
+    /// 直進那一列。
+    pub live: usize,
+    pub live_cume: i64,
+    /// 暫緩的列。
+    pub held: Vec<usize>,
+    /// 超過上限仍沒有新的硬時間，已恢復一般判定（`held` 是空的）。
+    pub expired: bool,
+}
+
+/// 長度 0:00 的直進／LIVE 播出後，後面的列暫緩判定。
+///
+/// 直進實際播多久要看現場，製作人通常播完才重設硬時間。在那之前後面的稿依 0:00 推算
+/// 會被提前判成「已播出」，直進拉長被抽掉的稿就會多寫進文件。規則：
+/// - 直進本身照常（已播出）。
+/// - 它後面到下一個硬時間之前的列改成 `HeldByOpenLive`，直到現在時間到達那個硬時間
+///   推算的累積時間（下一個硬時間之後的列本來就照硬時間判斷）。
+/// - 直進開始 `max_minutes` 分鐘後仍沒到，恢復一般判定（回傳 `expired`，呼叫端寫警告）。
+///
+/// 只用在看現在時間的判斷；延遲補掃不看現在時間，不受影響。
+pub fn hold_after_open_live(
+    rows: &[RundownRow],
+    sel: &mut Selection,
+    now: u32,
+    window: &Window,
+    max_minutes: u32,
+) -> Vec<OpenLiveHold> {
+    let n = window.slot.axis(now as i64);
+    let reached = |k: usize| sel.cume[k].is_some_and(|c| window.slot.axis(c) <= n);
+    let mut holds = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let live_cume = sel.cume[i].map(|c| window.slot.axis(c));
+        let (Some(live_cume), Some(RowFate::Aired)) = (live_cume, sel.fates[i]) else {
+            i += 1;
+            continue;
+        };
+        if !is_open_live(&rows[i]) {
+            i += 1;
+            continue;
+        }
+        let next_hard = (i + 1..rows.len()).find(|&j| rows[j].hard.is_some());
+        let end = next_hard.unwrap_or(rows.len());
+        if !next_hard.is_some_and(reached) {
+            let affected: Vec<usize> = (i + 1..end)
+                .filter(|&j| matches!(sel.fates[j], Some(RowFate::Aired | RowFate::Pending)))
+                .collect();
+            if !affected.is_empty() {
+                let expired = n >= live_cume + max_minutes as i64 * 60;
+                if !expired {
+                    for &j in &affected {
+                        sel.fates[j] = Some(RowFate::HeldByOpenLive);
+                    }
+                }
+                holds.push(OpenLiveHold { live: i, live_cume, held: if expired { Vec::new() } else { affected }, expired });
+            }
+        }
+        i = end;
+    }
+    sel.rows = (0..rows.len()).filter(|&j| sel.fates[j] == Some(RowFate::Aired)).collect();
+    sel.pending = sel.fates.iter().filter(|f| **f == Some(RowFate::Pending)).count();
+    sel.held = sel.fates.iter().filter(|f| **f == Some(RowFate::HeldByOpenLive)).count();
+    sel.excluded = sel.fates.iter().filter(|f| matches!(f, Some(f) if *f != RowFate::Aired)).count();
+    holds
 }
 
 /// 匯入時用的檔名：標題加 `.txt`，同名的加 `_2`、`_3`。檔名不能有的字元換成 `_`。
@@ -968,7 +1053,7 @@ mod tests {
     use super::*;
 
     fn row(page: &str, title: &str, total: u32, hard: Option<u32>, floated: bool) -> RundownRow {
-        RundownRow { floated, page: page.into(), title: title.into(), total, hard, styled: false }
+        RundownRow { floated, page: page.into(), title: title.into(), total, hard, styled: false, style: String::new() }
     }
 
     #[test]
@@ -1041,7 +1126,7 @@ mod tests {
     }
 
     fn styled(page: &str, title: &str, total: u32, hard: Option<u32>) -> RundownRow {
-        RundownRow { floated: false, page: page.into(), title: title.into(), total, hard, styled: true }
+        RundownRow { floated: false, page: page.into(), title: title.into(), total, hard, styled: true, style: "SOT".into() }
     }
 
     /// 合成的一天，重現使用者用真實 rundown 量到的數據：
@@ -1326,4 +1411,97 @@ mod tests {
         let nsml = "<body><p>前<pi>（主播）</pi>後</p><p></p></body>";
         assert_eq!(parse_nsml(nsml).body_lines, ["前（主播）後", ""]);
     }
+
+    fn live(page: &str, title: &str, style: &str, hard: Option<u32>) -> RundownRow {
+        RundownRow { style: style.into(), ..styled(page, title, 0, hard) }
+    }
+
+    /// 1600 節：直進 0:00 在 15:59，後面三則依 0:00 推算為 15:59、16:00、16:02。
+    fn live_show(new_hard: Option<u32>) -> HashMap<String, Vec<RundownRow>> {
+        let mut d = HashMap::new();
+        d.insert("1600".to_string(), vec![
+            styled("", "片頭", 60, Some(clock(15, 55, 0))),
+            styled("A1", "合成前稿1600", 180, None),
+            live("A2", "蔣萬安直進", "直進", None),
+            styled("A3", "木條擊落車1600", 60, new_hard),
+            styled("A4", "單車砸騎士1200", 120, None),
+            styled("A5", "合成後稿1600", 60, None),
+        ]);
+        d.insert("1500".to_string(), vec![styled("", "片頭", 60, Some(clock(14, 55, 0)))]);
+        d.insert("1700".to_string(), vec![styled("", "片頭", 60, Some(clock(16, 55, 0)))]);
+        d
+    }
+
+    fn held_selection(d: &HashMap<String, Vec<RundownRow>>, now: u32) -> (Selection, Vec<OpenLiveHold>) {
+        let p = plan_at(d, now, &Default::default());
+        assert_eq!(p.current.slot.show, "1600");
+        let rows = &d["1600"];
+        let mut sel = select_rows(rows, Some(now), &p.current, false, None);
+        let holds = hold_after_open_live(rows, &mut sel, now, &p.current, 30);
+        (sel, holds)
+    }
+
+    #[test]
+    fn rows_after_an_open_live_wait_for_a_new_hard_time() {
+        let d = live_show(None);
+        let (sel, holds) = held_selection(&d, clock(16, 5, 0));
+        assert_eq!(titles(&d["1600"], &sel), ["片頭", "合成前稿1600", "蔣萬安直進"]);
+        assert_eq!(sel.fates[3], Some(RowFate::HeldByOpenLive));
+        assert_eq!(sel.fates[5], Some(RowFate::HeldByOpenLive));
+        assert_eq!(sel.held, 3);
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].live, 2);
+        assert_eq!(holds[0].held, vec![3, 4, 5]);
+        assert!(!holds[0].expired);
+    }
+
+    #[test]
+    fn a_new_hard_time_after_the_live_restores_the_normal_rule() {
+        // 16:10 製作人在下一則設了 16:11:00 硬時間；現在 16:13。
+        let d = live_show(Some(clock(16, 11, 0)));
+        let (sel, holds) = held_selection(&d, clock(16, 13, 0));
+        assert!(holds.is_empty());
+        assert_eq!(titles(&d["1600"], &sel), ["片頭", "合成前稿1600", "蔣萬安直進", "木條擊落車1600", "單車砸騎士1200"]);
+        assert_eq!(sel.fates[5], Some(RowFate::Pending), "16:14:00 還沒播");
+        // 硬時間設了但還沒到（16:10）：直進後面的列照樣是還沒播。
+        let (sel, holds) = held_selection(&d, clock(16, 10, 0));
+        assert!(holds.is_empty());
+        assert_eq!(sel.fates[3], Some(RowFate::Pending));
+    }
+
+    #[test]
+    fn the_hold_gives_up_after_thirty_minutes_without_a_hard_time() {
+        let d = live_show(None);
+        // 直進 15:59:00 開始。
+        let (sel, holds) = held_selection(&d, clock(16, 28, 59));
+        assert_eq!(sel.held, 3);
+        assert!(!holds[0].expired);
+        let (sel, holds) = held_selection(&d, clock(16, 29, 0));
+        assert_eq!(sel.held, 0);
+        assert!(holds[0].expired);
+        assert_eq!(sel.rows.len(), 6);
+    }
+
+    #[test]
+    fn a_live_with_a_length_or_a_non_live_style_does_not_hold() {
+        let mut d = live_show(None);
+        d.get_mut("1600").unwrap()[2].total = 300;
+        assert!(held_selection(&d, clock(16, 5, 0)).1.is_empty());
+        let mut d = live_show(None);
+        d.get_mut("1600").unwrap()[2].style = "SOT".into();
+        assert!(held_selection(&d, clock(16, 5, 0)).1.is_empty());
+        // Spelling variants of the live styles count.
+        let mut d = live_show(None);
+        d.get_mut("1600").unwrap()[2].style = "d-live".into();
+        assert_eq!(held_selection(&d, clock(16, 5, 0)).0.held, 3);
+    }
+
+    #[test]
+    fn a_live_that_has_not_started_holds_nothing() {
+        let d = live_show(None);
+        let (sel, holds) = held_selection(&d, clock(15, 58, 0));
+        assert!(holds.is_empty());
+        assert_eq!(sel.held, 0);
+    }
+
 }

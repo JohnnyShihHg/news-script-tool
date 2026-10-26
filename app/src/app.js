@@ -54,6 +54,23 @@ let hasCompared = false;
 /** Slugs this session has already pushed into the shared doc, so a stale outline
  *  (it re-renders on a debounce) can never let the same entry be written twice. */
 const writtenSlugs = new Set();
+/** Today's date divider, owed before the next write because the last compare found
+ *  no section for today yet (v0.3.2). Cleared once a write carries it. */
+let dateHeaderOwed = "";
+/** Day (MMDD) of the last compare, and the day whose divider this session already
+ *  wrote: the scraped doc can lag behind a write, and a stale compare must not ask
+ *  for the same divider twice. */
+let compareDay = "";
+let dateHeaderWrittenFor = "";
+
+function withDateHeader(text) {
+  return dateHeaderOwed ? `${dateHeaderOwed}\n${text}` : text;
+}
+
+function dateHeaderWritten() {
+  if (dateHeaderOwed) dateHeaderWrittenFor = compareDay;
+  dateHeaderOwed = "";
+}
 const KEYWORD_COUNT = 4;
 /** Max entries one keyword run may send; overwritten from config on startup.
  *  Matches the free tier's per-minute request cap. 0 = no cap. */
@@ -357,6 +374,7 @@ function cardHtml(item) {
         <span class="badge ${bucket}">${badgeLabel}</span>
         ${marker ? `<span class="badge marker">${escapeHtml(marker)}</span>` : ""}
         ${matchLabel ? `<span class="badge ${matchClass}" title="${escapeHtml(item.matchedLine ?? "")}">${matchLabel}</span>` : ""}
+        ${item.crossDay ? `<span class="badge marker" title="${escapeHtml(item.matchedLine ?? "")}">前一天已上傳的重播</span>` : ""}
         <span>${escapeHtml(fields.style)}</span>
         <span>${escapeHtml(fields.time)}</span>
         <span>${escapeHtml(fields.group)}</span>
@@ -752,6 +770,7 @@ async function writeBackToCollab() {
   }
   const ok = window.confirm(
     `即將把 ${outgoing.length} 則稿件（共 ${text.split("\n").length} 行）附加到協作工具文件的「最下方」。\n\n` +
+      (dateHeaderOwed ? `文件裡還沒有今天的日期分隔線，會先補上「${dateHeaderOwed}」。\n\n` : "") +
       `這會即時同步給所有正在編輯的同事，且不會刪除或覆蓋任何既有內容。\n\n確定要寫入嗎？`
   );
   if (!ok) return;
@@ -763,7 +782,8 @@ async function writeBackToCollab() {
   status.textContent = "寫入中…";
   btn.disabled = true;
   try {
-    const msg = await invoke("append_to_collab_doc", { text });
+    const msg = await invoke("append_to_collab_doc", { text: withDateHeader(text) });
+    dateHeaderWritten();
     outgoing.forEach((i) => {
       writtenSlugs.add(slugOf(i));
       const key = writtenKey(i);
@@ -1015,7 +1035,8 @@ async function writeInewsItems(ready) {
   status.className = "compare-status";
   status.textContent = written.length ? `寫入 ${written.length} 則到協作文件中…` : "寫入節次分隔線中…";
   try {
-    const msg = await invoke("append_to_collab_doc", { text });
+    const msg = await invoke("append_to_collab_doc", { text: withDateHeader(text) });
+    dateHeaderWritten();
     for (const i of written) {
       const key = writtenKey(i);
       if (key) writtenKeys.add(key);
@@ -1153,14 +1174,18 @@ async function compareWithCollabDoc({ silent = false } = {}) {
   // written out has to be checked against the doc like any other, or the duplicate
   // guard would have nothing to go on for exactly the entries a human picked by hand.
   const targets = items.filter((i) => canOutputBucket(i.bucket));
-  // 累積時間 goes along so a (抓新) line is only a re-grab for a *different* version.
+  // 累積時間 goes along so a (抓新) line is only a re-grab for a *different* version;
+  // the title so a slug reused from yesterday only counts as a re-run when the
+  // headline matches too.
   const entries = targets.map((i) => {
     const f = i.dto[i.kind] ?? i.dto;
-    return { slug: f.slug, time: f.time ?? "" };
+    return { slug: f.slug, time: f.time ?? "", title: i.title ?? "" };
   });
 
   try {
-    const results = await invoke("compare_with_collab_doc", { entries });
+    const { results, day } = await invoke("compare_with_collab_doc", { entries });
+    compareDay = day.today;
+    dateHeaderOwed = day.header_to_add && dateHeaderWrittenFor !== day.today ? day.header_to_add : "";
     const matched = [];
     // Paired by position, not slug: two versions of one slug can now differ.
     for (const [n, item] of targets.entries()) {
@@ -1168,6 +1193,7 @@ async function compareWithCollabDoc({ silent = false } = {}) {
       if (!r) continue;
       item.matchStatus = r.status;
       item.matchedLine = r.matched_line;
+      item.crossDay = !!r.cross_day;
       item.alreadyInDoc = isAlreadyInDoc(r);
       item.included = decideInclusion(r, item.defaultIncluded);
       // 已濾除 entries are matched so their badge and the duplicate guard are right,
@@ -1178,9 +1204,14 @@ async function compareWithCollabDoc({ silent = false } = {}) {
     const { toCut, keepRefresh, removed, alreadyIn } = summarizeMatches(matched);
     hasCompared = true;
     const autoUnticked = removed + alreadyIn;
+    const crossDay = targets.filter((i) => i.crossDay).length;
+    status.className = day.warning ? "compare-status warn" : "compare-status";
     status.textContent =
-      `比對完成：待處理 ${toCut}・要重貼 ${keepRefresh}・已剔除 ${removed}・已在文件中 ${alreadyIn}` +
-      (autoUnticked > 0 ? `（已剔除／已在文件中的 ${autoUnticked} 則已自動取消勾選，可手動改回）` : "");
+      `比對完成（今天 ${day.today} 的段落）：待處理 ${toCut}・要重貼 ${keepRefresh}・已剔除 ${removed}・已在文件中 ${alreadyIn}` +
+      (crossDay > 0 ? `（其中 ${crossDay} 則是前一天已上傳的重播）` : "") +
+      (autoUnticked > 0 ? `（已剔除／已在文件中的 ${autoUnticked} 則已自動取消勾選，可手動改回）` : "") +
+      (dateHeaderOwed ? `\n今天的日期分隔線還不存在，第一次寫入時會先補上「${dateHeaderOwed}」。` : "") +
+      (day.warning ? `\n⚠ ${day.warning}` : "");
     renderFunnel();
     render();
   } catch (err) {
@@ -1404,6 +1435,13 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <div class="field"><label>標記式截止：預告關鍵字</label><input type="text" data-cfg="inews.cutoff_preview_keyword" value="${escapeHtml(inewsSettings.cutoff_preview_keyword)}" /></div>
             <div class="field"><label>標記式截止：廣告列序號開頭</label><input type="text" data-cfg="inews.cutoff_page_prefix" value="${escapeHtml(inewsSettings.cutoff_page_prefix)}" /></div>
             <div class="muted">打開時，最後一則標題含預告關鍵字的稿之後第一個序號以這個開頭的列（例：<code>=CM 3==</code>）以下也不處理。1200 播到 1400 這種 rundown 中間有好幾個 CM，打開會切在一半，建議維持關閉。</div>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.hold_after_open_live" ${inewsSettings.hold_after_open_live !== false ? "checked" : ""} /> 長度 0:00 的直進／LIVE 播出後，後面的稿等製作人重設硬時間再判定</label>
+            <div class="field"><label>直進暫緩上限（分鐘，超過仍沒有新的硬時間就恢復一般判定）</label><input type="number" min="1" data-cfg-num="inews.open_live_max_minutes" value="${inewsSettings.open_live_max_minutes ?? 30}" /></div>
+            <div class="muted">直進實際播多久要看現場，依 0:00 推算會把後面的稿提前判成已播出；直進拉長被抽掉的稿就會多寫進文件。延遲補掃不受影響。</div>
+            <div class="field"><label>播出日分界（HH:MM，這個時間之前播出的稿算前一天）</label><input type="text" data-cfg="inews.broadcast_day_start" value="${escapeHtml(inewsSettings.broadcast_day_start ?? "02:00")}" /></div>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_date_header" ${inewsSettings.auto_date_header !== false ? "checked" : ""} /> 協作文件還沒有今天的日期分隔線時，第一次寫入前自動補上</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.cross_day_title_match" ${inewsSettings.cross_day_title_match !== false ? "checked" : ""} /> 前一天段落裡 slug 和標題都相同的才算重播（不勾 = 完全不看前一天）</label>
+            <div class="muted">比對協作文件（包含手動匯入的比對）只看今天的日期段落（<code>==========MMDD==========</code> 到下一條日期分隔線）：同一天內重播照舊算已上傳。slug 會跨天重複使用（例：每天的 <code>季瑩氣象2100</code>），所以前一天的段落要標題也相同才算重複；標題比對會忽略空白、標點、<code>最新》</code>／<code>獨家》</code> 和 <code>(勿上網)</code> 這類標記。文件裡完全沒有日期分隔線時退回比對整份，並提醒你。</div>
             <div class="field">
               <label>決策紀錄（每次同步選了哪一節、範圍、納入／排除，保留 14 天）</label>
               <div class="keywords-row"><button id="openInewsLogBtn" type="button">開啟紀錄資料夾</button><span id="inewsLogStatus" class="muted"></span></div>
@@ -1475,8 +1513,10 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <div class="muted">有些稿件不填「樣式」，直接把類型寫在新聞名稱裡（例：心喻14推播）。樣式欄真的空白時才會用這裡的詞去比對 slug，比中就當成該樣式處理並在該則標上提醒；樣式欄有填就一律以樣式欄為準。同樣只比對完整詞。</div>
             ${styleField("樣式空白時看影像編號尾碼 video_id_styles（尾碼=樣式）", "filter.video_id_styles", config.filter.video_id_styles)}
             <div class="muted">樣式空白、slug 也判斷不出來時，看影像編號最後一段（例：20261023-585-X5 的 X5）。格式「尾碼=樣式」，例：X5=SL。</div>
-            ${styleField("樣式空白時 slug 含這些詞就保留 slug_keep_terms", "filter.slug_keep_terms", config.filter.slug_keep_terms)}
-            <div class="muted">樣式空白、slug 又判斷不出樣式時，slug 含這裡的詞（例：專）就不丟進「解析失敗」，改放「未知樣式」讓你決定；樣式欄維持空白。</div>
+            ${styleField("slug 以這些字開頭就一律通過 force_pass_slug_prefixes", "filter.force_pass_slug_prefixes", config.filter.force_pass_slug_prefixes ?? ["專"])}
+            <div class="muted">slug 開頭是這裡的字（例：專）就當成專題，不管樣式是什麼（空白、未知、BS、乾稿）都放進「通過」。開頭的 <code>(寰)</code>、<code>【xx】</code> 這類括號標記會先去掉再判斷；只看開頭，<code>記者專訪</code> 這種中間有「專」的不算。slug 結尾 SOU、編輯備註含「預告」仍然優先。</div>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="filter.blank_style_timecode_pass" ${config.filter.blank_style_timecode_pass !== false ? "checked" : ""} /> 樣式空白、slug 以時間標結尾（例：<code>北投強風垮1800</code>、<code>季瑩氣象2100(ok)</code>）的視為新聞稿並通過</label>
+            <div class="muted">樣式欄留空，卡片會註明「依 slug 時間標判定為新聞」。<code>==2200</code> 這類 <code>=</code> 開頭或含 <code>==</code> 的是節目結構，不適用。樣式 <code>D</code> 會看 slug／編輯備註：有 DL、DLIVE、SL、連線、延遲 的當 DLIVE（通過），沒有的當 DRY（擋掉）。比對樣式時連字號和空白不算，<code>D-LIVE</code>、<code>D LIVE</code>、<code>DLIVE</code> 是同一種。</div>
             ${styleField("編輯備註含這些詞就濾除 blocked_note_terms", "filter.blocked_note_terms", config.filter.blocked_note_terms)}
             <div class="muted">編輯備註裡出現這裡的詞（例：預告），不管樣式是什麼都直接放進「已濾除」，需要時仍可在已濾除勾回來。</div>
           </section>
@@ -1558,7 +1598,7 @@ const LIST_FIELDS = new Set([
   "filter.excluded_slug_suffixes",
   "filter.flag_styles",
   "filter.slug_style_terms",
-  "filter.slug_keep_terms",
+  "filter.force_pass_slug_prefixes",
   "filter.video_id_styles",
   "filter.blocked_note_terms",
   "markers.refresh_keywords",

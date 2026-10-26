@@ -151,7 +151,7 @@ pub fn title_prefix(editor_note: &str, style: &str, title: &str, cfg: &Annotatio
 
     let chosen = if is_exclusive {
         &cfg.exclusive_prefix
-    } else if cfg.latest_styles.iter().any(|s| eq_ci(s, style)) {
+    } else if cfg.latest_styles.iter().any(|s| style_eq(s, style)) {
         &cfg.latest_prefix
     } else {
         return String::new();
@@ -188,10 +188,20 @@ fn eq_ci(a: &str, b: &str) -> bool {
     fold(a) == fold(b)
 }
 
+/// 樣式比對用的鍵：`fold` 之後再去掉連字號和空白，`D-LIVE`、`D LIVE`、`DLIVE` 視為
+/// 同一種。
+pub fn style_key(s: &str) -> String {
+    fold(s).chars().filter(|c| *c != '-' && !c.is_whitespace()).collect()
+}
+
+fn style_eq(a: &str, b: &str) -> bool {
+    style_key(a) == style_key(b)
+}
+
 pub fn classify_style(style: &str, cfg: &FilterConfig) -> StyleClass {
-    if cfg.allowed_styles.iter().any(|s| eq_ci(s, style)) {
+    if cfg.allowed_styles.iter().any(|s| style_eq(s, style)) {
         StyleClass::Allowed
-    } else if cfg.blocked_styles.iter().any(|s| eq_ci(s, style)) {
+    } else if cfg.blocked_styles.iter().any(|s| style_eq(s, style)) {
         StyleClass::Blocked
     } else {
         StyleClass::Unknown
@@ -199,7 +209,26 @@ pub fn classify_style(style: &str, cfg: &FilterConfig) -> StyleClass {
 }
 
 pub fn is_flagged_style(style: &str, cfg: &FilterConfig) -> bool {
-    cfg.flag_styles.iter().any(|s| eq_ci(s, style))
+    cfg.flag_styles.iter().any(|s| style_eq(s, style))
+}
+
+/// 一個樣式可能代表兩種東西（`D` = DLIVE 或 DRY）時，依 slug／編輯備註決定實際樣式。
+/// 回傳 (實際樣式, 判斷依據的詞)；樣式不在 `ambiguous_styles` 裡就是 None。
+pub fn resolve_ambiguous_style(
+    style: &str,
+    slug: &str,
+    editor_note: &str,
+    cfg: &FilterConfig,
+) -> Option<(String, Option<String>)> {
+    let (_, rule) = cfg.ambiguous_styles.iter().find(|(k, _)| style_eq(k, style))?;
+    let hay = format!("{} {}", fold(slug), fold(editor_note));
+    let hit = rule
+        .live_terms
+        .iter()
+        .find(|t| !t.trim().is_empty() && hay.contains(&fold(t)))
+        .map(|t| t.trim().to_string());
+    let chosen = if hit.is_some() { &rule.live_style } else { &rule.else_style };
+    Some((chosen.trim().to_string(), hit))
 }
 
 /// Style inferred from the slug, for rows that leave 樣式 blank and write the format
@@ -238,13 +267,48 @@ pub fn style_from_video_id(video_id: &str, cfg: &FilterConfig) -> Option<String>
     })
 }
 
-/// A slug term that marks a blank-樣式 row as a story without naming its format
-/// (`專`), so it lands in 未知樣式 instead of 解析失敗.
-pub fn slug_keep_term(slug: &str, cfg: &FilterConfig) -> Option<String> {
-    cfg.slug_keep_terms
+/// slug 去掉開頭的括號標記（`(寰)`、`（寰）`、`[xx]`、`【xx】`，可以連續好幾個）。
+fn strip_leading_tags(slug: &str) -> &str {
+    let mut s = slug.trim_start();
+    loop {
+        let close = match s.chars().next() {
+            Some('(') => ')',
+            Some('（') => '）',
+            Some('[') => ']',
+            Some('【') => '】',
+            _ => return s,
+        };
+        match s.find(close) {
+            Some(i) => s = s[i + close.len_utf8()..].trim_start(),
+            None => return s,
+        }
+    }
+}
+
+/// slug（去掉開頭的括號標記後）以 `force_pass_slug_prefixes` 其中一個開頭：不管樣式
+/// 一律通過。只看開頭 —— `含有專` 會把 `記者專訪` 之類的也收進來。
+pub fn force_pass_prefix(slug: &str, cfg: &FilterConfig) -> Option<String> {
+    let head = fold(strip_leading_tags(slug));
+    cfg.force_pass_slug_prefixes
         .iter()
-        .find(|t| !t.trim().is_empty() && fold(slug).contains(&fold(t)))
-        .map(|t| t.trim().to_string())
+        .find(|p| !p.trim().is_empty() && head.starts_with(&fold(p)))
+        .map(|p| p.trim().to_string())
+}
+
+/// slug 以 4 位數時間標結尾（`0000`～`2459`，後面可以接 `(ok)`、`-1` 這類尾巴），
+/// 回傳那個時間標。`=` 開頭或含 `==` 的是節目結構（`==2200`、`=算好2255進23`）。
+pub fn slug_timecode(slug: &str) -> Option<String> {
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"^(.*?\D)(\d{4})(?:\([^()]*\)|-\d{1,2})*$").unwrap()
+    });
+    let s = fold(slug);
+    if s.starts_with('=') || s.contains("==") {
+        return None;
+    }
+    let caps = RE.captures(&s)?;
+    let digits = &caps[2];
+    let (hh, mm): (u32, u32) = (digits[..2].parse().ok()?, digits[2..].parse().ok()?);
+    (hh <= 24 && mm <= 59 && !caps[1].trim().is_empty()).then(|| digits.to_string())
 }
 
 fn style_term_in(text: &str, cfg: &FilterConfig) -> Option<String> {

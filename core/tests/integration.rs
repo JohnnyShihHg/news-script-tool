@@ -196,12 +196,23 @@ fn empty_rundown_placeholder_goes_to_parse_failed_instead_of_vanishing() {
 #[test]
 fn blank_style_rows_keep_their_parsed_body_in_parse_failed() {
     let files = load_fixtures();
-    // Carries body text but an empty 樣式 field. A blank style still means "probably
-    // not a news script", but the body is kept so a wrong call costs one tick.
+    // Carries body text but an empty 樣式 field. With the 時間標 rule off, a blank
+    // style still means "probably not a news script", but the body is kept so a wrong
+    // call costs one tick.
     let (name, text) = fixture(&files, "合成空白樣式0800.txt");
-    let cfg = Config::default();
+    let mut cfg = Config::default();
+    cfg.filter.blank_style_timecode_pass = false;
     let entry = assert_demoted(process_text(name, text, &cfg), "樣式空白");
     assert!(!entry.body.is_empty(), "the parsed body must survive the demotion");
+
+    // The slug ends in 0800, so by default it reads as a real story.
+    match process_text(name, text, &Config::default()) {
+        Outcome::Passed(e) => {
+            assert_eq!(e.style, "");
+            assert!(e.warnings.iter().any(|w| w.contains("時間標")), "{:?}", e.warnings);
+        }
+        other => panic!("expected Passed, got {other:?}"),
+    }
 }
 
 #[test]
@@ -362,19 +373,19 @@ fn blank_style_with_lianxian_in_the_slug_is_recovered_as_lianxian() {
 }
 
 #[test]
-fn blank_style_with_zhuan_in_the_slug_is_kept_in_unknown_style() {
-    // 專 is not a format, so the style stays blank for a human to set -- but the row
-    // is a story and must not sink into 解析失敗.
+fn blank_style_with_zhuan_at_the_start_of_the_slug_passes() {
+    // 專 at the start names a 專題: it passes whatever the style (v0.3.2), but keeps
+    // a note so the reason is visible on the card.
     let text = "新聞名稱(標題): 專合成長照調查\n樣式:\n累積時間: 18:10:00\n\
                 _______________________________________________________________\n\
                 [<\n[BAR_最新大]\nT2合成標題\n>]\n合成內文。\n";
     let cfg = Config::default();
     match process_text("zhuan.txt", text, &cfg) {
-        Outcome::UnknownStyle(e) => {
+        Outcome::Passed(e) => {
             assert_eq!(e.style, "");
-            assert!(e.warnings.iter().any(|w| w.contains("slug 含「專」")), "{:?}", e.warnings);
+            assert!(e.warnings.iter().any(|w| w.contains("以「專」開頭")), "{:?}", e.warnings);
         }
-        other => panic!("expected UnknownStyle, got {other:?}"),
+        other => panic!("expected Passed, got {other:?}"),
     }
 }
 
@@ -600,4 +611,116 @@ fn one_unparseable_file_does_not_take_the_rest_of_the_batch_with_it() {
         Outcome::ParseFailed { file_name, .. } => assert_eq!(file_name, "合成無標記失敗0900.txt"),
         other => panic!("expected ParseFailed, got {other:?}"),
     }
+}
+
+// --- v0.3.2 收錄規則 --------------------------------------------------------------
+
+/// A synthetic script: header with the given slug / 樣式 / 編輯備註, a [BAR_最新大]
+/// title card and a body.
+fn script(slug: &str, style: &str, note: &str) -> String {
+    format!(
+        "編輯備註: {note}\n新聞名稱(標題): {slug}\n樣式: {style}\n累積時間: 18:10:00\n\
+         _______________________________________________________________\n\
+         [<\n[BAR_最新大]\nT2合成標題文字\n>]\n合成內文第一句。\n"
+    )
+}
+
+fn outcome_of(slug: &str, style: &str, note: &str) -> Outcome {
+    process_text("v032.txt", &script(slug, style, note), &Config::default())
+}
+
+fn passed(o: Outcome) -> news_script_core::model::NewsEntry {
+    match o {
+        Outcome::Passed(e) => e,
+        other => panic!("expected Passed, got {other:?}"),
+    }
+}
+
+#[test]
+fn zhuan_prefixed_slugs_pass_whatever_the_style() {
+    passed(outcome_of("專颱風整備1900", "BS", ""));
+    passed(outcome_of("(寰)專油價戰1800", "", ""));
+    passed(outcome_of("（寰）【二】專油價戰1800", "乾稿", ""));
+    // Confirmed by the user: ordinary words starting with 專 pass too.
+    passed(outcome_of("專機返台1800", "BS", ""));
+    // Only the start counts.
+    assert!(matches!(outcome_of("記者專訪", "BS", ""), Outcome::FilteredByStyle(_)));
+}
+
+#[test]
+fn sou_and_preview_still_beat_the_zhuan_rule() {
+    assert_demoted(outcome_of("專題SOU", "SOT", ""), "排除字尾");
+    match outcome_of("專災後整備1900", "SOT", "預告") {
+        Outcome::FilteredByStyle(e) => assert!(e.warnings.iter().any(|w| w.contains("預告"))),
+        other => panic!("expected FilteredByStyle, got {other:?}"),
+    }
+}
+
+#[test]
+fn delayed_live_spellings_all_pass_with_the_latest_prefix() {
+    for style in ["D-LIVE", "D LIVE", "DLIVE", "DL", "ｄ－ｌｉｖｅ", "直進"] {
+        let e = passed(outcome_of("合成延遲連線1800", style, ""));
+        assert!(e.title.starts_with("最新》"), "{style}: {:?}", e.title);
+    }
+}
+
+#[test]
+fn dianlian_passes_but_asks_for_a_check() {
+    let e = passed(outcome_of("合成電話連線1800", "電聯", ""));
+    assert!(e.warnings.iter().any(|w| w.contains("可回寫但請確認")), "{:?}", e.warnings);
+}
+
+#[test]
+fn video_call_stays_unknown() {
+    assert!(matches!(outcome_of("合成視訊訪問1800", "視訊", ""), Outcome::UnknownStyle(_)));
+}
+
+#[test]
+fn style_d_is_read_from_the_slug() {
+    match outcome_of("食安查油1000", "D", "") {
+        Outcome::FilteredByStyle(e) => assert_eq!(e.style, "DRY"),
+        other => panic!("expected FilteredByStyle, got {other:?}"),
+    }
+    let e = passed(outcome_of("可親連萬安DL10", "D", ""));
+    assert_eq!(e.style, "DLIVE");
+    assert!(e.title.starts_with("最新》"));
+    // The note counts too.
+    assert_eq!(passed(outcome_of("合成記者會1000", "D", "延遲10分")).style, "DLIVE");
+}
+
+#[test]
+fn dry_and_promo_styles_are_filtered_not_unknown() {
+    for style in ["乾稿", "乾", "DRY", "改BS", "SOBS", "PRO", "PROMO", "片頭"] {
+        assert!(matches!(outcome_of("合成乾稿1800", style, ""), Outcome::FilteredByStyle(_)), "{style}");
+    }
+}
+
+#[test]
+fn blank_style_with_a_timecode_slug_passes_with_the_style_left_blank() {
+    for slug in ["北投強風垮1800", "季瑩氣象2100(ok)", "合成颱風快報0930-1", "合成午夜2400"] {
+        let e = passed(outcome_of(slug, "", ""));
+        assert_eq!(e.style, "", "{slug}");
+        assert!(e.warnings.iter().any(|w| w.contains("依 slug 時間標判定為新聞")), "{slug}: {:?}", e.warnings);
+    }
+}
+
+#[test]
+fn blank_style_structure_rows_stay_parse_failures() {
+    for slug in ["==2200", "=算好2255進23", "主編：郁婷", "合成時間錯2575", "2200"] {
+        assert_demoted(outcome_of(slug, "", ""), "節目結構");
+    }
+}
+
+#[test]
+fn a_timecode_slug_without_a_body_goes_to_needs_manual() {
+    let text = "新聞名稱(標題): 北投強風垮1800\n樣式:\n累積時間: 18:10:00\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成標題\n>]\n";
+    assert!(matches!(process_text("t.txt", text, &Config::default()), Outcome::NeedsManualContent(_)));
+}
+
+#[test]
+fn a_zhijin_story_passes_with_the_latest_prefix() {
+    let e = passed(outcome_of("蔣萬安直進", "直進", ""));
+    assert_eq!(e.title, "最新》合成標題文字");
 }
