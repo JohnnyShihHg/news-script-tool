@@ -14,9 +14,9 @@ use model::{Header, NewsEntry, Outcome, StyleClass};
 /// An entry that still needs its script filled in by hand -- unless its style is on
 /// the blocklist. Without this check only fully parsed entries were ever filtered, so
 /// a blocked style with no 稿頭內文 slipped past the blocklist into 待補稿.
-fn needs_manual(entry: NewsEntry, cfg: &Config) -> Outcome {
+fn needs_manual(entry: NewsEntry, force: bool, cfg: &Config) -> Outcome {
     match clean::classify_style(&entry.style, &cfg.filter) {
-        StyleClass::Blocked => Outcome::FilteredByStyle(entry),
+        StyleClass::Blocked if !force => Outcome::FilteredByStyle(entry),
         _ => Outcome::NeedsManualContent(entry),
     }
 }
@@ -127,9 +127,23 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
         skip_reason = Some("slug 結尾是排除字尾（如 SOU），判定為非新聞稿".to_string());
     }
 
+    // 「專」開頭的 slug（專題）不管樣式一律通過。SOU 字尾（上面）和編輯備註「預告」
+    // （process_text）仍然優先。
+    let mut pass_reason = clean::force_pass_prefix(&slug, &cfg.filter)
+        .map(|p| format!("slug 以「{p}」開頭，不論樣式一律通過"));
+
+    // `D` 可能是 DLIVE 也可能是 DRY：看 slug／編輯備註有沒有連線類的詞。
+    let mut inferred_style = None;
+    if let Some((resolved, hit)) = clean::resolve_ambiguous_style(&style, &slug, &editor_note, &cfg.filter) {
+        inferred_style = Some(match hit {
+            Some(t) => format!("樣式「{style}」，slug／編輯備註含「{t}」，判定為「{resolved}」"),
+            None => format!("樣式「{style}」，slug／編輯備註沒有連線類的詞，判定為「{resolved}」"),
+        });
+        style = resolved;
+    }
+
     // Some rows leave 樣式 blank and write the format into the slug instead
     // (`心喻14推播`). Recover it before the blank-樣式 check below.
-    let mut inferred_style = None;
     if style.is_empty() {
         if let Some(from_slug) = clean::style_from_slug(&slug, &cfg.filter) {
             inferred_style = Some(format!("樣式空白，依 slug 判定為「{from_slug}」"));
@@ -144,25 +158,24 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     }
 
     // A blank 樣式 with nothing in the slug usually means this row is rundown
-    // structure (bumper/sponsor-spot/producer note), not a news script -- unless
+    // structure (bumper/sponsor-spot/producer note), not a news script -- unless the
+    // slug ends in a 時間標 (`北投強風垮1800`), which only real stories carry, or
     // 編輯備註 names a format. The remark is prose, not a field, so it is not trusted
     // to set the style (「推播預告」 and 「不推播」 both contain the term); it only
-    // keeps the row in 未知樣式 for a human to call. A slug keep term (`專`) does the
-    // same from the slug side.
+    // keeps the row in 未知樣式 for a human to call.
     let mut note_style_hint = None;
-    if style.is_empty() {
-        let hint = clean::slug_keep_term(&slug, &cfg.filter)
-            .map(|t| format!("樣式空白，slug 含「{t}」，保留但未判定樣式，請人工確認"))
-            .or_else(|| {
-                clean::note_style_term(&editor_note, &cfg.filter)
-                    .map(|t| format!("樣式空白，編輯備註含「{t}」，未自動判定樣式，請人工確認"))
-            });
-        match hint {
-            Some(h) => note_style_hint = Some(h),
-            None if skip_reason.is_none() => {
-                skip_reason = Some("樣式空白，slug 與編輯備註也判斷不出樣式，判定為節目結構".to_string())
+    if style.is_empty() && pass_reason.is_none() {
+        let timecode = cfg.filter.blank_style_timecode_pass.then(|| clean::slug_timecode(&slug)).flatten();
+        if timecode.is_some() {
+            pass_reason = Some("樣式空白，依 slug 時間標判定為新聞".to_string());
+        } else {
+            match clean::note_style_term(&editor_note, &cfg.filter) {
+                Some(t) => note_style_hint = Some(format!("樣式空白，編輯備註含「{t}」，未自動判定樣式，請人工確認")),
+                None if skip_reason.is_none() => {
+                    skip_reason = Some("樣式空白，slug 與編輯備註也判斷不出樣式，判定為節目結構".to_string())
+                }
+                None => {}
             }
-            None => {}
         }
     }
 
@@ -174,6 +187,7 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
         style,
         inferred_style,
         note_style_hint,
+        pass_reason,
         cfg,
     );
     match skip_reason {
@@ -191,8 +205,11 @@ fn classify_body(
     style: String,
     inferred_style: Option<String>,
     note_style_hint: Option<String>,
+    // Some = 不看樣式一律通過（專題、slug 帶時間標），內容是給使用者看的理由。
+    pass_reason: Option<String>,
     cfg: &Config,
 ) -> Outcome {
+    let force = pass_reason.is_some();
     let slug = header_value(&header, "新聞名稱(標題)");
     let time = header_value(&header, "累積時間");
     let group = header_value(&header, "組");
@@ -225,7 +242,7 @@ fn classify_body(
                     keywords: Vec::new(),
                     warnings: vec!["TEL 無稿頭內容，需人工補稿".to_string()],
                 };
-                return needs_manual(entry, cfg);
+                return needs_manual(entry, force, cfg);
             }
             return parse_failed(file_name, header, &rest, "找不到製作區（[< ... >]）".to_string(), cfg);
         }
@@ -249,6 +266,9 @@ fn classify_body(
         }
         if let Some(ref h) = note_style_hint {
             warnings.push(h.clone());
+        }
+        if let Some(ref p) = pass_reason {
+            warnings.push(p.clone());
         }
         // Plain [BAR] is the long-standing weather-rundown case and needs no nagging;
         // a [BAR_xxx] segment card standing in for the headline is a guess to check.
@@ -295,7 +315,7 @@ fn classify_body(
                     w
                 },
             };
-            return needs_manual(entry, cfg);
+            return needs_manual(entry, force, cfg);
         }
         // The title card is there but its T2 was never filled in, while the script
         // itself is real: keep the body and let a human supply the title.
@@ -322,7 +342,7 @@ fn classify_body(
                 keywords: Vec::new(),
                 warnings,
             };
-            return needs_manual(entry, cfg);
+            return needs_manual(entry, force, cfg);
         }
         (None, false) => {
             return parse_failed(file_name, header, &body_cleaned, "找不到標題標記".to_string(), cfg);
@@ -358,7 +378,7 @@ fn classify_body(
                 keywords: Vec::new(),
                 warnings,
             };
-            return needs_manual(entry, cfg);
+            return needs_manual(entry, force, cfg);
         }
         (Some(title), false) => {
             let (title_norm, mut warnings) = {
@@ -397,6 +417,9 @@ fn classify_body(
                 warnings,
             };
 
+            if force {
+                return Outcome::Passed(entry);
+            }
             match clean::classify_style(&style, &cfg.filter) {
                 StyleClass::Allowed => Outcome::Passed(entry),
                 StyleClass::Blocked => Outcome::FilteredByStyle(entry),

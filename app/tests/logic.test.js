@@ -17,6 +17,19 @@ test("a marked entry is not reported as already-in-doc, it is reported as remove
   assert.equal(L.isAlreadyInDoc(marked), false);
 });
 
+test("a story a person added by hand (in_doc) is never written again", () => {
+  // 2026/10/26 蔣萬安直進: not written automatically (unknown style), typed in by hand.
+  const r = { status: "in_doc", matched_line: "蔣萬安直進 直進 16:00:00", cross_day: false };
+  assert.equal(L.isAlreadyInDoc(r), true);
+  assert.equal(L.decideInclusion(r, true), false);
+  assert.deepEqual(L.summarizeMatches([r, { status: "to_cut", matched_line: null }]), {
+    toCut: 1, keepRefresh: 0, removed: 0, alreadyIn: 1,
+  });
+  const item = { bucket: "passed", included: false, alreadyInDoc: true, matchStatus: "in_doc", keywords: "k", body: "b" };
+  assert.equal(L.isPendingWrite(item, new Set()), false);
+  assert.deepEqual(L.autoWriteCandidates([item], new Set(), "(勿上網)"), []);
+});
+
 // --- decideInclusion: regression tests for the "tick only ever cleared" bug ---
 
 test("comparing again re-ticks an entry that has since been removed from the doc", () => {

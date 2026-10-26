@@ -42,7 +42,8 @@
    * `matched_line` distinguishes them.
    */
   function isAlreadyInDoc(result) {
-    return result.status === "to_cut" && !!result.matched_line;
+    // "in_doc" since v0.3.2; a to_cut that still names a line is the older shape.
+    return result.status === "in_doc" || (result.status === "to_cut" && !!result.matched_line);
   }
 
   /**

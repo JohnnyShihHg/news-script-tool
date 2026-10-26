@@ -1,9 +1,15 @@
 /// Status of one iNews slug against the work-doc text, per spec §6.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchStatus {
-    /// Not found in the doc at all, or found with nothing but whitespace before it
-    /// on that line — today's news to cut.
+    /// Not found in the doc at all — today's news to cut.
     ToCut,
+    /// Found with nothing but whitespace before it (a line this tool wrote, or one a
+    /// person added by hand), or a `(抓新)` line for the same 累積時間 — already in the
+    /// doc, never written again.
+    ///
+    /// Used to be folded into ToCut with `matched_line` set, which left every caller
+    /// one forgotten check away from writing a hand-added story a second time.
+    InDoc,
     /// Found with a prefix containing a refresh keyword (e.g. "抓新") — already
     /// uploaded once but flagged to re-paste.
     KeepRefresh,
@@ -16,6 +22,15 @@ pub struct MatchResult {
     pub status: MatchStatus,
     /// The doc line that matched, if any (for the user to double-check the call).
     pub matched_line: Option<String>,
+    /// The match came from the previous day's section (same slug and same title): a
+    /// re-run of yesterday's story, not a new one.
+    pub cross_day: bool,
+}
+
+impl MatchResult {
+    fn miss() -> Self {
+        MatchResult { status: MatchStatus::ToCut, matched_line: None, cross_day: false }
+    }
 }
 
 /// Fold fullwidth ASCII (｜FF01–FF5E) and the fullwidth space (U+3000) down to their
@@ -79,31 +94,33 @@ pub fn match_slug(slug: &str, doc_text: &str, refresh_keywords: &[String]) -> Ma
 pub fn match_entry(slug: &str, time: &str, doc_text: &str, refresh_keywords: &[String]) -> MatchResult {
     let needle = normalize_for_match(slug);
     if needle.is_empty() {
-        return MatchResult { status: MatchStatus::ToCut, matched_line: None };
+        return MatchResult::miss();
     }
     let entry_time = padded_time(time);
+    doc_text
+        .lines()
+        .rev()
+        .find_map(|line| line_status(line, &needle, entry_time.as_deref(), refresh_keywords))
+        .unwrap_or_else(MatchResult::miss)
+}
 
-    let mut result = None;
-    for line in doc_text.lines() {
-        let hay = normalize_for_match(line);
-        if let Some(idx) = hay.find(&needle) {
-            let prefix = hay[..idx].trim();
-            let status = if prefix.is_empty() {
-                MatchStatus::ToCut
-            } else if refresh_keywords.iter().any(|k| prefix.contains(normalize_for_match(k).as_str())) {
-                let line_time = time_after(&hay[idx + needle.len()..]);
-                match (&entry_time, line_time) {
-                    (Some(e), Some(l)) if *e == l => MatchStatus::ToCut,
-                    _ => MatchStatus::KeepRefresh,
-                }
-            } else {
-                MatchStatus::Removed
-            };
-            result = Some(MatchResult { status, matched_line: Some(line.trim().to_string()) });
+/// How one doc line reads for the slug `needle` (already normalized), or None when
+/// the slug is not on it.
+fn line_status(line: &str, needle: &str, entry_time: Option<&str>, refresh_keywords: &[String]) -> Option<MatchResult> {
+    let hay = normalize_for_match(line);
+    let idx = hay.find(needle)?;
+    let prefix = hay[..idx].trim();
+    let status = if prefix.is_empty() {
+        MatchStatus::InDoc
+    } else if refresh_keywords.iter().any(|k| prefix.contains(normalize_for_match(k).as_str())) {
+        match (entry_time, time_after(&hay[idx + needle.len()..])) {
+            (Some(e), Some(l)) if e == l => MatchStatus::InDoc,
+            _ => MatchStatus::KeepRefresh,
         }
-    }
-
-    result.unwrap_or(MatchResult { status: MatchStatus::ToCut, matched_line: None })
+    } else {
+        MatchStatus::Removed
+    };
+    Some(MatchResult { status, matched_line: Some(line.trim().to_string()), cross_day: false })
 }
 
 /// Classify every (slug, 累積時間) entry against the work-doc text in one pass.
@@ -116,6 +133,110 @@ pub fn match_all<'a>(
         .into_iter()
         .map(|(slug, time)| (slug, match_entry(slug, time, doc_text, refresh_keywords)))
         .collect()
+}
+
+// --- 只比對今天的段落（v0.3.2） ---------------------------------------------------
+//
+// 協作文件通常同時留著今天和前一天的內容，slug 又會跨天重複使用（每天都有
+// `季瑩氣象2100`），掃整份會把今天的新稿當成「已上傳」。所以今天的段落照原本的規則
+// 比對；前一天的段落只有 slug 和標題都相同才算重複（真的重播）。
+
+/// 協作文件依日期分隔線切出來的兩段。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DaySections {
+    /// 今天的段落；文件裡還沒有今天的分隔線是 None。
+    pub today: Option<String>,
+    /// 前一天的段落。
+    pub previous: Option<String>,
+    /// 文件裡至少有一條日期分隔線。沒有的話只能退回掃整份。
+    pub has_dividers: bool,
+    /// 照文件裡最後一條日期分隔線的格式，換成今天日期的分隔線（今天的段落不存在時
+    /// 寫入前補上）。
+    pub today_header: Option<String>,
+}
+
+pub fn day_sections(doc_text: &str, today: &str, previous: &str) -> DaySections {
+    let last_divider = doc_text.lines().rev().find(|l| date_divider(l).is_some());
+    let today_header = last_divider.map(|line| {
+        let line = line.trim();
+        let mmdd = date_divider(line).unwrap_or_default();
+        // The digits may have been typed fullwidth; replace whichever form is there.
+        match line.rfind(&mmdd) {
+            Some(i) => format!("{}{}{}", &line[..i], today, &line[i + mmdd.len()..]),
+            None => {
+                let wide: String = mmdd.chars().map(|c| char::from_u32(c as u32 + 0xFEE0).unwrap_or(c)).collect();
+                line.replacen(&wide, today, 1)
+            }
+        }
+    });
+    DaySections {
+        today: date_section(doc_text, today),
+        previous: date_section(doc_text, previous),
+        has_dividers: last_divider.is_some(),
+        today_header,
+    }
+}
+
+/// 標題比對前的正規化：全形轉半形，去掉工具自己加的前綴（`最新》`、`獨家》`）和標記
+/// （`(勿上網)` 等），再去掉所有空白和標點符號。只留文字和數字，完全相同才算同一則。
+pub fn normalize_title(title: &str, strip: &[String]) -> String {
+    let mut s = normalize_for_match(title);
+    for tag in strip {
+        let tag = normalize_for_match(tag);
+        if !tag.is_empty() {
+            s = s.replace(&tag, "");
+        }
+    }
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// 比對一則稿件需要的東西。
+#[derive(Debug, Clone, Copy)]
+pub struct EntryQuery<'a> {
+    pub slug: &'a str,
+    pub time: &'a str,
+    pub title: &'a str,
+}
+
+/// 以日期段落為範圍比對一則稿件。
+///
+/// - 文件沒有任何日期分隔線：退回掃整份（呼叫端要提醒使用者）。
+/// - 今天的段落有這個 slug：照 `match_entry` 的規則（同一天重播 = 已上傳）。
+/// - 今天沒有、前一天有：`title_strip` 是 Some（有開跨天標題比對）而且兩邊都抓得到
+///   標題、正規化後相同，才照前一天那一行判斷（`cross_day`）；否則當成新稿。
+///   標題取那一行下面第一個非空白行 —— 這個工具寫進文件的第二行就是標題。
+pub fn match_in_days(
+    q: EntryQuery,
+    days: &DaySections,
+    whole_doc: &str,
+    refresh_keywords: &[String],
+    title_strip: Option<&[String]>,
+) -> MatchResult {
+    if !days.has_dividers {
+        return match_entry(q.slug, q.time, whole_doc, refresh_keywords);
+    }
+    let today = match_entry(q.slug, q.time, days.today.as_deref().unwrap_or(""), refresh_keywords);
+    if today.matched_line.is_some() {
+        return today;
+    }
+    let (Some(strip), Some(previous)) = (title_strip, days.previous.as_deref()) else {
+        return today;
+    };
+    let wanted = normalize_title(q.title, strip);
+    let needle = normalize_for_match(q.slug);
+    if wanted.is_empty() || needle.is_empty() {
+        return today;
+    }
+    let lines: Vec<&str> = previous.lines().collect();
+    let entry_time = padded_time(q.time);
+    (0..lines.len())
+        .rev()
+        .find_map(|i| {
+            let r = line_status(lines[i], &needle, entry_time.as_deref(), refresh_keywords)?;
+            let doc_title = lines[i + 1..].iter().find(|l| !l.trim().is_empty())?;
+            (normalize_title(doc_title, strip) == wanted).then_some(MatchResult { cross_day: true, ..r })
+        })
+        .unwrap_or(today)
 }
 
 // --- 晚報 (evening bulletin) ---------------------------------------------------
@@ -365,9 +486,9 @@ YH 合成氣象 06：24：02
 ";
 
     #[test]
-    fn slug_with_no_prefix_is_to_cut() {
+    fn slug_with_no_prefix_is_already_in_the_doc() {
         let r = match_slug("合成颱風報導1530", DOC_TEXT, &refresh());
-        assert_eq!(r.status, MatchStatus::ToCut);
+        assert_eq!(r.status, MatchStatus::InDoc);
         assert!(r.matched_line.is_some());
     }
 
@@ -432,7 +553,7 @@ YH 合成氣象 06：24：02
         // The first-line-wins rule used to keep reporting KeepRefresh forever and
         // re-append the story on every re-run; the last line is what is actually true.
         let r = match_slug("為鸚鵡砸親1100", REPEAT_DOC, &refresh());
-        assert_eq!(r.status, MatchStatus::ToCut);
+        assert_eq!(r.status, MatchStatus::InDoc);
         assert_eq!(r.matched_line.as_deref(), Some("為鸚鵡砸親1100 slive 11:02:06"));
     }
 
@@ -463,7 +584,7 @@ YH 合成氣象 06：24：02
         // line. The entry still at 12:40:00 is the version that line is about.
         let doc = "(抓新) 合成重貼新聞1200 SOT 12:40:00 生活\n";
         let r = match_entry("合成重貼新聞1200", "12:40:00", doc, &refresh());
-        assert_eq!(r.status, MatchStatus::ToCut);
+        assert_eq!(r.status, MatchStatus::InDoc);
         assert!(r.matched_line.is_some(), "must read as already in the doc, not as new");
     }
 
@@ -474,7 +595,7 @@ YH 合成氣象 06：24：02
         assert_eq!(r.status, MatchStatus::KeepRefresh);
         // Single-digit hours and fullwidth colons still compare.
         let doc = "(抓新) 合成重貼新聞0900 SOT 9：05：00\n";
-        assert_eq!(match_entry("合成重貼新聞0900", "09:05:00", doc, &refresh()).status, MatchStatus::ToCut);
+        assert_eq!(match_entry("合成重貼新聞0900", "09:05:00", doc, &refresh()).status, MatchStatus::InDoc);
     }
 
     #[test]
@@ -492,5 +613,147 @@ YH 合成氣象 06：24：02
         // will still find it -- prefix is "========" (non-empty, no refresh
         // keyword), so it resolves to Removed rather than crashing or panicking.
         assert_eq!(r.status, MatchStatus::Removed);
+    }
+}
+
+#[cfg(test)]
+mod day_tests {
+    use super::*;
+
+    fn refresh() -> Vec<String> {
+        vec!["抓新".to_string()]
+    }
+
+    fn strip() -> Vec<String> {
+        ["最新》", "獨家》", "(勿上網)", "(版權問題)", "(可上網)"].iter().map(|s| s.to_string()).collect()
+    }
+
+    // Two days in the doc, the same slugs reused across them, in the tool's own
+    // four-line write format (header, title, body, keywords).
+    const DOC: &str = "\
+==========1025==========
+季瑩氣象2100 SOT 21:05:00 生活
+明天北部轉涼 早晚溫差大
+合成昨日氣象內文。
+氣象 轉涼
+
+UP 北投強風垮1800 SOT 18:10:00 社會
+最新》北投強風！路樹倒塌「壓車」
+合成昨日強風內文。
+強風 路樹
+
+(抓新) 合成重貼新聞1800 SOT 18:30:00
+合成重貼標題
+合成內文。
+
+北投路樹1800 SOT 18:40:00
+==========1026==========
+淑麗氣象0900 SOT 09:05:00 生活
+今天各地回溫
+合成今日內文。
+
+蔣萬安直進 直進 16:00:00
+";
+
+    fn days() -> DaySections {
+        day_sections(DOC, "1026", "1025")
+    }
+
+    fn q<'a>(slug: &'a str, title: &'a str) -> EntryQuery<'a> {
+        EntryQuery { slug, time: "", title }
+    }
+
+    fn check(slug: &str, title: &str) -> MatchResult {
+        match_in_days(q(slug, title), &days(), DOC, &refresh(), Some(&strip()))
+    }
+
+    #[test]
+    fn yesterdays_slug_with_a_different_title_is_new() {
+        let r = check("季瑩氣象2100", "今晚雨勢趨緩 明起回暖");
+        assert_eq!(r.status, MatchStatus::ToCut);
+        assert_eq!(r.matched_line, None);
+    }
+
+    #[test]
+    fn yesterdays_story_with_the_same_title_is_a_rerun_already_uploaded() {
+        // Only punctuation and the 最新》 prefix differ.
+        let r = check("北投強風垮1800", "北投強風 路樹倒塌壓車");
+        assert_eq!(r.status, MatchStatus::Removed);
+        assert!(r.cross_day);
+        assert_eq!(r.matched_line.as_deref(), Some("UP 北投強風垮1800 SOT 18:10:00 社會"));
+    }
+
+    #[test]
+    fn a_rerun_flagged_for_regrab_yesterday_still_asks_for_a_re_paste() {
+        let r = check("合成重貼新聞1800", "合成重貼標題");
+        assert_eq!(r.status, MatchStatus::KeepRefresh);
+        assert!(r.cross_day);
+    }
+
+    #[test]
+    fn without_a_title_on_either_side_only_today_counts() {
+        assert_eq!(check("北投強風垮1800", "").status, MatchStatus::ToCut);
+        // Yesterday's line is the last one of its day: no title under it.
+        assert_eq!(check("北投路樹1800", "北投路樹").status, MatchStatus::ToCut);
+    }
+
+    #[test]
+    fn todays_section_decides_when_the_slug_is_there() {
+        let r = check("淑麗氣象0900", "完全不同的標題");
+        assert_eq!(r.status, MatchStatus::InDoc);
+        assert!(!r.cross_day);
+    }
+
+    #[test]
+    fn a_hand_added_line_without_a_prefix_reads_as_already_in_the_doc() {
+        // The user typed it in by hand after it never got written automatically.
+        let r = check("蔣萬安直進", "最新》蔣萬安直進標題");
+        assert_eq!(r.status, MatchStatus::InDoc);
+        assert_eq!(r.matched_line.as_deref(), Some("蔣萬安直進 直進 16:00:00"));
+    }
+
+    #[test]
+    fn turning_cross_day_matching_off_ignores_yesterday() {
+        let r = match_in_days(q("北投強風垮1800", "北投強風路樹倒塌壓車"), &days(), DOC, &refresh(), None);
+        assert_eq!(r.status, MatchStatus::ToCut);
+    }
+
+    #[test]
+    fn a_missing_today_section_means_nothing_from_today_matches() {
+        let d = day_sections(DOC, "1027", "1026");
+        assert_eq!(d.today, None);
+        assert!(d.has_dividers);
+        assert_eq!(d.today_header.as_deref(), Some("==========1027=========="));
+        // 淑麗氣象0900 is in 1026 (now the previous day) with this title.
+        let r = match_in_days(q("淑麗氣象0900", "今天各地回溫"), &d, DOC, &refresh(), Some(&strip()));
+        assert!(r.cross_day);
+        assert_eq!(r.status, MatchStatus::InDoc);
+    }
+
+    #[test]
+    fn the_header_copies_the_last_dividers_shape() {
+        let doc = "＝＝＝＝ 1025 ＝＝＝＝\n內容\n=====1026=====\n";
+        assert_eq!(day_sections(doc, "1027", "1026").today_header.as_deref(), Some("=====1027====="));
+        let wide = "＝＝＝＝ １０２６ ＝＝＝＝\n";
+        assert_eq!(day_sections(wide, "1027", "1026").today_header.as_deref(), Some("＝＝＝＝ 1027 ＝＝＝＝"));
+    }
+
+    #[test]
+    fn a_doc_without_any_date_divider_falls_back_to_the_whole_doc() {
+        let doc = "UP 北投強風垮1800 SOT\n";
+        let d = day_sections(doc, "1026", "1025");
+        assert!(!d.has_dividers);
+        assert_eq!(d.today_header, None);
+        let r = match_in_days(q("北投強風垮1800", ""), &d, doc, &refresh(), Some(&strip()));
+        assert_eq!(r.status, MatchStatus::Removed);
+    }
+
+    #[test]
+    fn title_normalization_drops_prefixes_markers_spaces_and_punctuation() {
+        assert_eq!(
+            normalize_title("最新》 北投強風！路樹倒塌「壓車」(勿上網)", &strip()),
+            normalize_title("北投強風 路樹倒塌壓車", &strip())
+        );
+        assert_eq!(normalize_title("ＡＢＣ．測試，", &strip()), "abc測試");
     }
 }

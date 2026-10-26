@@ -420,6 +420,9 @@ fn save_config_inner(state: &tauri::State<AppState>, config: Config) -> Result<(
     if config.inews.poll_seconds < 3 {
         return Err("iNEWS 自動刷新間隔至少 3 秒".to_string());
     }
+    if chrono::NaiveTime::parse_from_str(config.inews.broadcast_day_start.trim(), "%H:%M").is_err() {
+        return Err(format!("播出日分界「{}」格式錯誤，要寫成 HH:MM，例：02:00", config.inews.broadcast_day_start));
+    }
     for (from, to) in &config.inews.slot_spans {
         if news_script_core::inews::show_start(from).is_none() || news_script_core::inews::show_start(to).is_none() {
             return Err(format!("跨節合併「{from}={to}」格式錯誤，要寫成 4 位數節次，例：1200=1400"));
@@ -655,8 +658,29 @@ async fn generate_group_keywords(
 #[derive(Serialize)]
 struct MatchResultDto {
     slug: String,
-    status: String, // "to_cut" | "keep_refresh" | "removed"
+    status: String, // "to_cut" | "in_doc" | "keep_refresh" | "removed"
     matched_line: Option<String>,
+    /// 前一天段落裡 slug 和標題都相同：前一天已上傳的重播。
+    cross_day: bool,
+}
+
+/// 比對時用的日期段落。
+#[derive(Serialize)]
+struct CompareDayDto {
+    /// 今天（播出日）的 MMDD。
+    today: String,
+    /// 文件裡已經有今天的日期分隔線。
+    today_found: bool,
+    /// 今天的分隔線不存在、而且開了自動補上時，寫入前要先寫的那一行。
+    header_to_add: Option<String>,
+    /// 文件裡找不到任何日期分隔線（退回掃整份）等情況的警告。
+    warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CompareDto {
+    results: Vec<MatchResultDto>,
+    day: CompareDayDto,
 }
 
 #[tauri::command]
@@ -955,6 +979,9 @@ struct CompareEntry {
     slug: String,
     #[serde(default)]
     time: String,
+    /// 跨天比對用：前一天段落裡同一個 slug，標題也相同才算重播。
+    #[serde(default)]
+    title: String,
 }
 
 #[tauri::command]
@@ -963,32 +990,59 @@ async fn compare_with_collab_doc(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     entries: Vec<CompareEntry>,
-) -> Result<Vec<MatchResultDto>, String> {
+) -> Result<CompareDto, String> {
+    use news_script_core::doc_match::{day_sections, match_in_days, EntryQuery, MatchStatus};
     require_main_window(&window)?;
     let doc_text = scrape_collab_text(&app, &state).await?;
 
-    let refresh_keywords = state.config.lock().unwrap().markers.refresh_keywords.clone();
-    // Results come back in the order sent: the UI pairs them by position, since two
-    // versions of one slug (different 累積時間) can now get different answers.
-    let results = news_script_core::doc_match::match_all(
-        entries.iter().map(|e| (e.slug.as_str(), e.time.as_str())),
-        &doc_text,
-        &refresh_keywords,
-    );
-
-    Ok(results
+    let cfg = state.config.lock().unwrap().clone();
+    let (today, previous) = inews::broadcast_days(inews::taipei_now(), &cfg.inews.broadcast_day_start);
+    let days = day_sections(&doc_text, &today, &previous);
+    // 工具自己加在標題前面的前綴和 slug 標記，跨天比對標題時不算。
+    let a = &cfg.annotations;
+    let strip: Vec<String> = [&a.latest_prefix, &a.exclusive_prefix, &a.no_upload_label, &a.copyright_label, &a.allowed_upload_label]
         .into_iter()
-        .map(|(slug, r)| MatchResultDto {
-            slug: slug.to_string(),
-            status: match r.status {
-                news_script_core::doc_match::MatchStatus::ToCut => "to_cut",
-                news_script_core::doc_match::MatchStatus::KeepRefresh => "keep_refresh",
-                news_script_core::doc_match::MatchStatus::Removed => "removed",
+        .cloned()
+        .collect();
+    let title_strip = cfg.inews.cross_day_title_match.then_some(strip.as_slice());
+
+    let warning = (!days.has_dividers).then(|| {
+        "協作文件裡找不到任何日期分隔線（==========MMDD==========），改成比對整份文件：跨天重複使用的 slug 可能被誤判為已上傳。".to_string()
+    });
+    if let (Some(w), Some(dir)) = (&warning, inews_log_dir()) {
+        inews::append_log(&dir, &format!("[比對] 警告：{w}"));
+    }
+    let header_to_add = match (&days.today, cfg.inews.auto_date_header) {
+        (None, true) => days.today_header.clone(),
+        _ => None,
+    };
+
+    // Results come back in the order sent: the UI pairs them by position, since two
+    // versions of one slug (different 累積時間) can get different answers.
+    let results = entries
+        .iter()
+        .map(|e| {
+            let q = EntryQuery { slug: &e.slug, time: &e.time, title: &e.title };
+            let r = match_in_days(q, &days, &doc_text, &cfg.markers.refresh_keywords, title_strip);
+            MatchResultDto {
+                slug: e.slug.clone(),
+                status: match r.status {
+                    MatchStatus::ToCut => "to_cut",
+                    MatchStatus::InDoc => "in_doc",
+                    MatchStatus::KeepRefresh => "keep_refresh",
+                    MatchStatus::Removed => "removed",
+                }
+                .to_string(),
+                matched_line: r.matched_line,
+                cross_day: r.cross_day,
             }
-            .to_string(),
-            matched_line: r.matched_line,
         })
-        .collect())
+        .collect();
+
+    Ok(CompareDto {
+        results,
+        day: CompareDayDto { today, today_found: days.today.is_some(), header_to_add, warning },
+    })
 }
 
 // --- 晚報 (evening bulletin) list ---
