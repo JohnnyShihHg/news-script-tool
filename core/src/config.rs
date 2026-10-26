@@ -228,7 +228,12 @@ impl Default for AnnotationsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PunctuationConfig {
     pub quotes_to_corner: bool,
+    /// 內文的 `.` 轉頓號（數字間除外）。
     pub dot_to_enumeration: bool,
+    /// 標題的 `.` 轉頓號（v0.3.3 起預設關閉：公司標題一律保留 `.`）。舊設定檔沒有這個
+    /// 欄位，serde 補成 false。
+    #[serde(default)]
+    pub title_dot_to_enumeration: bool,
     pub protect_urls: bool,
     pub preserve_halfwidth_space: bool,
     pub map: BTreeMap<String, String>,
@@ -247,6 +252,7 @@ impl Default for PunctuationConfig {
         Self {
             quotes_to_corner: true,
             dot_to_enumeration: true,
+            title_dot_to_enumeration: false,
             protect_urls: true,
             preserve_halfwidth_space: true,
             map,
@@ -434,6 +440,14 @@ pub struct InewsConfig {
     pub hold_after_open_live: bool,
     /// 暫緩上限：直進開始後幾分鐘仍沒有新的硬時間就恢復一般判定（並寫警告）。
     pub open_live_max_minutes: u32,
+    /// 停播節次（v0.3.3）：緊接在有稿節次後面的空節次（平日 2200 關鍵時刻、0100
+    /// 收播）當作停播，前一節在它的開始時間結束、補掃。關掉 = 空節次一律跳過。
+    pub off_air_on_empty: bool,
+    /// 停播節次的 slug 開頭 → 節目名稱（`關鍵KS` → 關鍵時刻）。對得到就在前一節的
+    /// 分隔線之後再寫一條節目分隔線。
+    pub programs: BTreeMap<String, String>,
+    /// 節目分隔線，`{hh}` = 節次小時，`{name}` = 節目名稱。
+    pub program_divider_format: String,
 }
 
 impl Default for InewsConfig {
@@ -452,7 +466,7 @@ impl Default for InewsConfig {
             divider_position: DividerPosition::After,
             auto_write: false,
             fill_computed_time: true,
-            slot_spans: [("1200", "1400"), ("1800", "2000")]
+            slot_spans: [("1200", "1400"), ("1800", "2000"), ("2000", "2200")]
                 .into_iter()
                 .map(|(a, b)| (a.to_string(), b.to_string()))
                 .collect(),
@@ -463,13 +477,16 @@ impl Default for InewsConfig {
             cross_day_title_match: true,
             hold_after_open_live: true,
             open_live_max_minutes: 30,
+            off_air_on_empty: true,
+            programs: [("關鍵KS".to_string(), "關鍵時刻".to_string())].into_iter().collect(),
+            program_divider_format: "==== {hh} {name} ====".into(),
         }
     }
 }
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 8;
+pub const CURRENT_CONFIG_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -560,6 +577,12 @@ pub fn migrate(cfg: &mut Config) -> bool {
     // there is no list to union, so nothing else to do for it here.
     // v8 (v0.3.2) widened allowed/blocked/flag/latest styles (unioned above); the new
     // scalar and map settings come from serde defaults.
+
+    // v9 (v0.3.3): 2000 的 rundown 一路用到 2200。已存的跨節設定是 map，serde 不會補，
+    // 只在 2000 沒有自訂過的時候加上。
+    if cfg.config_version < 9 {
+        cfg.inews.slot_spans.entry("2000".into()).or_insert_with(|| "2200".into());
+    }
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -790,6 +813,33 @@ theme = "warm"
         // And it round-trips with the new keys.
         let back = load_from_str(&toml::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.inews.slot_spans, cfg.inews.slot_spans);
+    }
+
+    #[test]
+    fn a_version_8_config_gains_the_2000_span_and_keeps_its_own_spans() {
+        let mut old = Config::default();
+        old.config_version = 8;
+        old.inews.slot_spans = [("1200", "1400"), ("1800", "2000")]
+            .into_iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
+        old.punctuation.dot_to_enumeration = true;
+        let text = toml::to_string(&old).unwrap().replace("title_dot_to_enumeration = false\n", "");
+        assert!(!text.contains("title_dot_to_enumeration"));
+        let mut cfg = load_from_str(&text).unwrap();
+        assert!(migrate(&mut cfg));
+        assert_eq!(cfg.inews.slot_spans.get("2000").map(String::as_str), Some("2200"));
+        assert_eq!(cfg.inews.slot_spans.len(), 3);
+        assert!(cfg.punctuation.dot_to_enumeration, "內文照舊轉頓號");
+        assert!(!cfg.punctuation.title_dot_to_enumeration, "標題保留 .");
+        assert!(cfg.inews.off_air_on_empty);
+        assert_eq!(cfg.inews.programs.get("關鍵KS").map(String::as_str), Some("關鍵時刻"));
+
+        // 使用者自己改過 2000 的跨節就不動。
+        let mut custom = old.clone();
+        custom.inews.slot_spans.insert("2000".into(), "2300".into());
+        assert!(migrate(&mut custom));
+        assert_eq!(custom.inews.slot_spans.get("2000").map(String::as_str), Some("2300"));
     }
 
     #[test]

@@ -163,8 +163,10 @@
   }
 
   /**
-   * The four-line-per-entry output of spec §5, entries separated by a blank line.
-   * Header fields are slug / style / time / group; blank fields are dropped.
+   * The per-entry output of spec §5, entries separated by a blank line: header,
+   * title, a blank line (v0.3.3), body, keywords. The blank line is left out when
+   * there is no body yet. Header fields are slug / style / time / group; blank
+   * fields are dropped.
    */
   function buildOutputText(items) {
     return items
@@ -178,7 +180,8 @@
         // otherwise leave a double space in the middle of the header line.
         const head = [`${i.slug_marker ?? ""}${i.slug}`, i.style, i.time, i.group]
           .filter((f) => (f ?? "").trim() !== "");
-        return [head.join(" "), i.title, i.body, i.keywords].join("\n");
+        const body = (i.body ?? "").trim() !== "" ? ["", i.body] : [i.body];
+        return [head.join(" "), i.title, ...body, i.keywords].join("\n");
       })
       .join("\n\n");
   }
@@ -595,6 +598,18 @@
     return Object.entries(spans ?? {}).map(([a, b]) => `${a}=${b}`).join(", ");
   }
 
+  /** `關鍵KS=關鍵時刻, XX=某節目` -> { 關鍵KS: "關鍵時刻", ... }; null on a malformed part. */
+  function parsePrograms(text) {
+    const programs = {};
+    for (const part of String(text ?? "").split(/[,，、;；\n]+/)) {
+      if (!part.trim()) continue;
+      const m = part.match(/^\s*([^=＝]+?)\s*[=＝]\s*(.+?)\s*$/);
+      if (!m) return null;
+      programs[m[1]] = m[2];
+    }
+    return programs;
+  }
+
   /** `==== {hh} ====` with `{hh}` = the show's hour (`0800` -> `08`) and `{show}` = its folder name. */
   function formatDivider(format, show) {
     const s = String(show ?? "");
@@ -616,11 +631,13 @@
    *   after    -- once `lastShow` is closed and nothing of it is pending, a divider
    *               naming it goes in, even if no new story comes with it
    *   before   -- a divider naming the new show goes in before its first story
+   *   programs -- show -> 節目分隔線 (`==== 22 關鍵時刻 ====`) that follows that
+   *               show's own divider (after-position only, v0.3.3)
    *
    * Stories of a show already closed and left behind arrive late (edited after the
    * sweep); they are written where they are, with no divider of their own.
    */
-  function composeInewsWrite(items, { lastShow = "", closed = new Set(), pending = new Set() } = {}, { format, position }, toText) {
+  function composeInewsWrite(items, { lastShow = "", closed = new Set(), pending = new Set(), programs = new Map() } = {}, { format, position }, toText) {
     const groups = [];
     for (const i of items) {
       const show = i.inews?.show ?? "";
@@ -637,8 +654,10 @@
     const dividers = [];
     const divider = (show) => {
       const d = formatDivider(format, show);
-      parts.push(d);
+      const program = position !== "before" ? programs.get(show) : undefined;
+      parts.push(program ? `${d}\n\n${program}` : d);
       dividers.push(d);
+      if (program) dividers.push(program);
     };
     let current = lastShow ?? "";
     const done = (show) => closed.has(show) && !pending.has(show);
@@ -676,6 +695,7 @@
     formatDivider,
     parseSlotSpans,
     formatSlotSpans,
+    parsePrograms,
     composeInewsWrite,
     eveningItemFromDto,
     isEveningHit,

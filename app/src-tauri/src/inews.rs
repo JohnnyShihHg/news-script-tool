@@ -298,6 +298,12 @@ pub struct InewsMeta {
     pub switched_from: Option<String>,
     /// 這一輪完成了這一節的延遲補掃：它的分隔線現在可以寫了。
     pub closed_show: Option<String>,
+    /// 目前節次是停播節次（關鍵時刻、收播），不匯入。
+    pub off_air: bool,
+    /// 停播節次對到的節目名稱（slug 開頭對 `programs`）。
+    pub program: Option<String>,
+    /// 跟 `closed_show` 一起來：那一節的分隔線之後接著寫這條節目分隔線。
+    pub program_divider: Option<String>,
     /// 標記式截止（預設關閉）："after_preview" | "last_prefixed" | "none"
     pub cutoff_rule: String,
     pub cutoff_title: Option<String>,
@@ -377,6 +383,18 @@ fn select_now(
         }
     }
     s
+}
+
+/// 停播節次的節目名稱：第一個 slug 開頭對得到 `programs` 的列。
+fn program_of(cfg: &InewsConfig, rundown: &Rundown) -> Option<String> {
+    rundown.iter().find_map(|(entry, story)| {
+        let slugs = [story.title().trim(), entry.slug()];
+        cfg.programs.iter().find(|(prefix, _)| {
+            let prefix = prefix.trim();
+            !prefix.is_empty() && slugs.iter().any(|s| s.starts_with(prefix))
+        })
+        .map(|(_, name)| name.clone())
+    })
 }
 
 fn describe_row(rows: &[RundownRow], sel: &inews::Selection, i: Option<usize>) -> String {
@@ -484,7 +502,7 @@ impl InewsState {
                 let rows: Vec<RundownRow> = rundowns[show].iter().map(|(e, s)| RundownRow::from_story(s, e.floated)).collect();
                 inews::ShowProbe::of(&rows)
             };
-            inews::plan_slots(&names, now, &cfg.slot_spans, cfg.lead_minutes, &mut probe)
+            inews::plan_slots(&names, now, &cfg.slot_spans, cfg.lead_minutes, cfg.off_air_on_empty, &mut probe)
         };
         if let Some(e) = probe_err {
             return Err(e);
@@ -507,13 +525,23 @@ impl InewsState {
 
         let mut events: Vec<String> = Vec::new();
         let mut warnings = Vec::new();
-        let cur_rows = rows_of(&rundowns, &cur.slot.show);
+        // 停播節次（關鍵時刻、收播）不匯入：裡面只有沒樣式的 slug 列。
+        let program = cur.slot.off_air.then(|| program_of(cfg, &rundowns[&cur.slot.show])).flatten();
+        let cur_rows = if cur.slot.off_air { Vec::new() } else { rows_of(&rundowns, &cur.slot.show) };
         let sel = select_now(cfg, &cur_rows, now, &cur, marker, &mut (&mut events, &mut warnings));
+        if cur.slot.off_air {
+            events.push(format!(
+                "{} 停播節次{}，不匯入",
+                cur.slot.show,
+                program.as_deref().map(|p| format!("（{p}）")).unwrap_or_default()
+            ));
+        }
 
         for (show, reason) in &plan.skipped {
             events.push(match reason {
                 inews::SkipReason::Spanned(by) => format!("跳過 {show}（併入 {by}）"),
                 inews::SkipReason::Empty => format!("跳過 {show}（沒有帶樣式的稿）"),
+                inews::SkipReason::OffAir(by) => format!("跳過 {show}（併入停播的 {by}）"),
             });
         }
 
@@ -521,6 +549,7 @@ impl InewsState {
         let mut extra: Vec<Pick> = Vec::new();
         let mut switched_from = None;
         let mut closed_show = None;
+        let mut program_divider = None;
         if let FetchMode::Auto { session_start } = mode {
             if session_start {
                 self.last_show = None;
@@ -534,6 +563,8 @@ impl InewsState {
             if let Some(last) = self.last_show.clone().filter(|l| *l != cur.slot.show) {
                 events.push(format!("換節 {last} → {}", cur.slot.show));
                 match plan.previous.as_ref().filter(|p| p.slot.show == last) {
+                    // 停播節次沒有要同步的稿。
+                    Some(prev) if prev.slot.off_air => {}
                     // 補掃同一節的話，補掃已經涵蓋最後同步，不必做兩次。
                     Some(prev) if sweep.as_ref().map(|w| &w.slot.show) != Some(&last) => {
                         rundown_of(self, &mut rundowns, &last, &mut retrieved)?;
@@ -560,6 +591,14 @@ impl InewsState {
                 ));
                 extra.extend(s.rows.iter().map(|&i| Pick { show: w.slot.show.clone(), index: i, cume: s.cume[i] }));
                 closed_show = Some(w.slot.show.clone());
+                if let Some(name) = &program {
+                    program_divider = Some(
+                        cfg.program_divider_format
+                            .replace("{hh}", &inews::show_hour_label(&cur.slot.show))
+                            .replace("{show}", &cur.slot.show)
+                            .replace("{name}", name),
+                    );
+                }
                 self.swept_for = Some(cur.slot.show.clone());
             }
             self.last_show = Some(cur.slot.show.clone());
@@ -637,6 +676,9 @@ impl InewsState {
                 end_source: cur.next.as_ref().map(|n| n.source.label().to_string()),
                 switched_from,
                 closed_show,
+                off_air: cur.slot.off_air,
+                program,
+                program_divider,
                 cutoff_rule: match sel.rule {
                     inews::CutoffRule::AfterPreview => "after_preview",
                     inews::CutoffRule::LastPrefixed => "last_prefixed",
@@ -913,6 +955,70 @@ mod tests {
         FakeServer::start(queues, stories, drop_after)
     }
 
+    /// `two_shows` 再加一個停播的 1000：只有「關鍵KS」開頭、沒有樣式的列。
+    fn with_program() -> FakeServer {
+        let mut queues = HashMap::new();
+        let mut stories = HashMap::new();
+        queues.insert(
+            "51新聞台.SHOWS".to_string(),
+            "d--------- 1 d    27 Apr 30  2025 .0800\r\nd--------- 1 d    27 Apr 30  2025 .0900\r\nd--------- 1 d    27 Apr 30  2025 .1000\r\n"
+                .to_string(),
+        );
+        let mut add = |queue: &str, rows: &[(&str, String)]| {
+            let mut list = String::new();
+            for (id, nsml) in rows {
+                let slug = format!("稿{}", &id[id.len() - 2..]);
+                list.push_str(&list_line(false, id, &slug));
+                stories.insert(format!("{id} {slug}"), nsml.clone());
+            }
+            queues.insert(queue.to_string(), list);
+        };
+        add("51新聞台.SHOWS.0800.ONAIR", &[
+            ("0000000A:00000001:00000A01", story("", "大片頭", 60, "＠28500", "")),
+            ("0000000A:00000002:00000A02", story("A1", "合成早安稿0800", 120, "", "SOT")),
+        ]);
+        add("51新聞台.SHOWS.0900.ONAIR", &[
+            ("0000000B:00000001:00000B01", story("", "大片頭", 60, "＠32100", "")),
+            ("0000000B:00000002:00000B02", story("A1", "合成九點稿0900", 120, "", "SOT")),
+            ("0000000B:00000003:00000B03", story("B1", "合成九點半稿0900", 120, "＠35400", "SOT")),
+        ]);
+        add("51新聞台.SHOWS.1000.ONAIR", &[
+            ("0000000C:00000001:00000C01", story("", "關鍵KS美中AI技術戰", 600, "", "")),
+            ("0000000C:00000002:00000C02", story("", "關鍵KS台海局勢", 600, "", "")),
+        ]);
+        FakeServer::start(queues, stories, None)
+    }
+
+    #[test]
+    fn an_off_air_program_ends_the_show_on_the_hour_and_adds_its_divider_after_the_sweep() {
+        let server = with_program();
+        let mut state = InewsState::default();
+        let c = cfg(server.port);
+        let auto = |start| FetchMode::Auto { session_start: start };
+        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 30 * 60, auto(true)).unwrap();
+        assert_eq!(r.meta.show, "0900");
+        assert_eq!(r.meta.range_end, "10:00:00");
+        assert!(!r.meta.off_air);
+        // 10:00:30 換到停播的 1000：0900 最後同步，1000 的關鍵KS 列不匯入。
+        let r = state.fetch(&c, &creds("secret"), 10 * 3600 + 30, auto(false)).unwrap();
+        assert_eq!(r.meta.show, "1000");
+        assert!(r.meta.off_air);
+        assert_eq!(r.meta.program.as_deref(), Some("關鍵時刻"));
+        assert!(r.meta.stories.iter().all(|s| s.show == "0900"), "{:?}", r.meta.stories);
+        assert_eq!(r.meta.switched_from.as_deref(), Some("0900"));
+        assert_eq!(r.meta.program_divider, None);
+        // 10:10 補掃 0900，帶出節目分隔線。
+        let r = state.fetch(&c, &creds("secret"), 10 * 3600 + 10 * 60, auto(false)).unwrap();
+        assert_eq!(r.meta.closed_show.as_deref(), Some("0900"));
+        assert_eq!(r.meta.program_divider.as_deref(), Some("==== 10 關鍵時刻 ===="));
+        assert!(r.meta.stories.iter().all(|s| s.show == "0900"));
+        assert!(r.log_line.contains("1000 停播節次（關鍵時刻），不匯入"), "{}", r.log_line);
+        // 只補掃一次。
+        let r = state.fetch(&c, &creds("secret"), 10 * 3600 + 11 * 60, auto(false)).unwrap();
+        assert_eq!(r.meta.closed_show, None);
+        assert!(r.files.is_empty());
+    }
+
     /// 0800 有一則長度 0:00 的直進（07:58:00 開始）；0900 跟 `two_shows` 一樣。
     fn live_show() -> FakeServer {
         let mut queues = HashMap::new();
@@ -1046,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn switching_shows_does_a_final_sync_of_the_old_one_then_sweeps_it_at_ten_past() {
+    fn switching_shows_does_a_final_sync_of_the_old_one_then_sweeps_it_ten_minutes_later() {
         let server = two_shows(None);
         let mut state = InewsState::default();
         let c = cfg(server.port);
@@ -1072,12 +1178,12 @@ mod tests {
             ]
         );
         assert!(r.log_line.contains("換節 0800 → 0900"), "{}", r.log_line);
-        // 09:05 還沒到補掃時間。
-        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 5 * 60, auto(false)).unwrap();
+        // 09:04 還沒到補掃時間（0900 在 08:55 換節，換節後 10 分鐘 = 09:05）。
+        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 4 * 60, auto(false)).unwrap();
         assert_eq!(r.meta.closed_show, None);
         assert!(r.meta.stories.iter().all(|s| s.show == "0900"));
-        // 09:10 補掃 0800：不看現在時間，累積時間 < 08:55:00 的全部納入；分隔線可以寫了。
-        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 10 * 60, auto(false)).unwrap();
+        // 09:05 補掃 0800：不看現在時間，累積時間 < 08:55:00 的全部納入；分隔線可以寫了。
+        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 5 * 60, auto(false)).unwrap();
         assert_eq!(r.meta.closed_show.as_deref(), Some("0800"));
         let swept: Vec<&str> = r.meta.stories.iter().filter(|s| s.show == "0800").map(|s| s.file_name.as_str()).collect();
         assert_eq!(swept.len(), 5);

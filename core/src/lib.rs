@@ -352,7 +352,7 @@ fn classify_body(
             // prefix the title exactly like the Passed path so it doesn't sit
             // unformatted until the body is filled in.
             let (title_norm, warnings_from_title) = {
-                let r = punctuation::normalize(&title, &cfg.punctuation);
+                let r = punctuation::normalize_title(&title, &cfg.punctuation);
                 (r.text, r.warnings)
             };
             let mut warnings = warnings_from_title;
@@ -382,7 +382,7 @@ fn classify_body(
         }
         (Some(title), false) => {
             let (title_norm, mut warnings) = {
-                let r = punctuation::normalize(&title, &cfg.punctuation);
+                let r = punctuation::normalize_title(&title, &cfg.punctuation);
                 (r.text, r.warnings)
             };
             // Marker stripping (above) must precede punctuation normalization: that

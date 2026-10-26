@@ -460,10 +460,19 @@ struct NormalizeResultDto {
 /// the fact, so a manually filled-in body (a needs-manual-content entry, a rescued
 /// filtered entry) would otherwise stay unnormalized forever.
 #[tauri::command]
-fn normalize_text(window: tauri::Window, state: tauri::State<AppState>, text: String) -> Result<NormalizeResultDto, String> {
+fn normalize_text(
+    window: tauri::Window,
+    state: tauri::State<AppState>,
+    text: String,
+    is_title: Option<bool>,
+) -> Result<NormalizeResultDto, String> {
     require_main_window(&window)?;
     let cfg = state.config.lock().unwrap();
-    let result = news_script_core::punctuation::normalize(&text, &cfg.punctuation);
+    let result = if is_title.unwrap_or(false) {
+        news_script_core::punctuation::normalize_title(&text, &cfg.punctuation)
+    } else {
+        news_script_core::punctuation::normalize(&text, &cfg.punctuation)
+    };
     Ok(NormalizeResultDto { text: result.text, warnings: result.warnings })
 }
 

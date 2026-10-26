@@ -42,6 +42,7 @@ const {
   composeInewsWrite,
   parseSlotSpans,
   formatSlotSpans,
+  parsePrograms,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -530,7 +531,7 @@ async function normalizeOne(id) {
   render();
   try {
     const [titleResult, bodyResult] = await Promise.all([
-      invoke("normalize_text", { text: item.title }),
+      invoke("normalize_text", { text: item.title, isTitle: true }),
       invoke("normalize_text", { text: item.body }),
     ]);
     item.title = titleResult.text;
@@ -817,6 +818,8 @@ let inewsShow = "";
 let lastWrittenShow = "";
 /** Shows whose delayed sweep has completed: their divider may now be written. */
 const closedShows = new Set();
+/** Show -> 節目分隔線 written right after that show's divider (關鍵時刻). */
+const programDividers = new Map();
 /** The next auto round is the first since 自動刷新 was switched on. */
 let inewsSessionStart = false;
 /** `${key}|${version}` written this session: one version is never written twice. */
@@ -846,6 +849,15 @@ function inewsStatus(text, kind = "") {
 function describeInewsRound(meta) {
   const aired = (meta.stories ?? []).filter((s) => (s.show ?? meta.show) === meta.show).length;
   const end = meta.end_show ? `${meta.range_end}（${meta.end_show} 開始，${meta.end_source}）` : `${meta.range_end}`;
+  if (meta.off_air) {
+    const lines = [
+      `iNEWS ${meta.show} 停播${meta.program ? `（${meta.program}）` : ""}（現在 ${meta.now}）：` +
+        `${meta.range_start}（${meta.start_source}）～ ${end} 不匯入。`,
+    ];
+    for (const e of meta.events ?? []) lines.push(`・${e}`);
+    for (const w of meta.warnings ?? []) lines.push(`⚠ ${w}`);
+    return lines.join("\n");
+  }
   const lines = [
     `iNEWS ${meta.show} 節（現在 ${meta.now}${meta.switched_early ? "，已提前換到這一節" : ""}）：` +
       `有效範圍 ${meta.range_start}（${meta.start_source}）～ ${end}。` +
@@ -909,6 +921,7 @@ async function inewsRound() {
     }
     const meta = summary.inews;
     if (meta.closed_show) closedShows.add(meta.closed_show);
+    if (meta.closed_show && meta.program_divider) programDividers.set(meta.closed_show, meta.program_divider);
     const { added, changed } = diffInewsVersions(inewsVersions, meta.stories);
     const hadCards = items.some((i) => i.inews);
     items = sortByTime(mergeInewsItems(hadCards ? items : [], inewsItemsFromSummary(summary), writtenKeys));
@@ -984,7 +997,7 @@ function pendingShowsOutside(ready) {
 function inewsWriteText(ready) {
   return composeInewsWrite(
     ready,
-    { lastShow: lastWrittenShow, closed: closedShows, pending: pendingShowsOutside(ready) },
+    { lastShow: lastWrittenShow, closed: closedShows, pending: pendingShowsOutside(ready), programs: programDividers },
     { format: inewsCfg.divider_format, position: inewsCfg.divider_position },
     (group) => buildOutputText(group.map(outputFieldsOf))
   );
@@ -997,7 +1010,7 @@ function dividerOwed() {
 
 function heldText(held) {
   const shows = [...new Set(held.map((i) => i.inews?.show))].join("、");
-  return `${held.length} 則 ${shows} 的稿等 ${lastWrittenShow} 節延遲補掃完成、寫完分隔線後再寫入（整點過 ${inewsCfg.sweep_delay_minutes ?? 10} 分鐘）。`;
+  return `${held.length} 則 ${shows} 的稿等 ${lastWrittenShow} 節延遲補掃完成、寫完分隔線後再寫入（換節次後 ${inewsCfg.sweep_delay_minutes ?? 10} 分鐘）。`;
 }
 
 function showHeldNotice(held) {
@@ -1428,9 +1441,14 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <div class="field"><label>節次開始時間找不到可信的硬時間時，整點前幾分鐘開始</label><input type="number" min="0" data-cfg-num="inews.lead_minutes" value="${inewsSettings.lead_minutes}" /></div>
             <div class="muted">節次開始時間 = 該節 rundown 的第一個硬時間（＠），但只有落在整點前 30 分 ～ 整點後 15 分之間才採用，否則用整點減這個分鐘數。目前節次的有效範圍是從它的開始時間到下一個有效節次的開始時間；下一節一開始就提前換過去。累積時間早於節次開始 10 分鐘以上的是殘留稿，不處理。</div>
             <div class="field"><label>跨節合併（例：1200=1400, 1800=2000）</label><input type="text" data-cfg-spans="inews.slot_spans" value="${escapeHtml(formatSlotSpans(inewsSettings.slot_spans))}" /></div>
-            <div class="muted">1200=1400 表示 1200 的 rundown 一直用到 1400 開始，中間的 1300 跳過。沒有帶樣式稿件的節次也會自動跳過。</div>
-            <div class="field"><label>延遲補掃：整點過幾分鐘補掃上一節</label><input type="number" min="0" data-cfg-num="inews.sweep_delay_minutes" value="${inewsSettings.sweep_delay_minutes ?? 10}" /></div>
-            <div class="muted">例：09:10 對 0800 完整掃一次，補抓換節瞬間漏掉或播出後才改的稿；該節的分隔線在補掃完成後才寫，新一節的稿在那之前先等著。跨節節次要等它真正結束（1200 是 14:10）才補掃。只在自動刷新時進行。</div>
+            <div class="muted">1200=1400 表示 1200 的 rundown 一直用到 1400 開始，中間的 1300 跳過。</div>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.off_air_on_empty" ${inewsSettings.off_air_on_empty !== false ? "checked" : ""} /> 空節次當停播：前一節在空節次開始時結束（平日 2200 關鍵時刻、0100 收播）</label>
+            <div class="muted">沒有帶樣式稿件的節次是空節次。勾選時，緊接在有稿節次後面的空節次是停播節次：前一節播到它的開始時間（有可信硬時間用硬時間，否則用整點）就結束並補掃，停播期間不匯入，連續的空節次併成一個。不勾 = 空節次一律跳過，前一節一直延續到下一個有稿的節次。不定期的特別節目若帶了樣式會被當新聞處理，請手動關閉自動刷新。</div>
+            <div class="field"><label>停播節目（slug 開頭=節目名稱，例：關鍵KS=關鍵時刻）</label><input type="text" data-cfg-programs="inews.programs" value="${escapeHtml(Object.entries(inewsSettings.programs ?? {}).map(([a, b]) => `${a}=${b}`).join(", "))}" /></div>
+            <div class="field"><label>節目分隔線格式（{hh} = 小時，{name} = 節目名稱）</label><input type="text" data-cfg="inews.program_divider_format" value="${escapeHtml(inewsSettings.program_divider_format ?? "==== {hh} {name} ====")}" /></div>
+            <div class="muted">停播節次的 slug 對得到這裡的開頭時，前一節的分隔線之後接著寫節目分隔線（例：<code>==== 22 關鍵時刻 ====</code>）；對不到（例：0100 收播）就不寫。</div>
+            <div class="field"><label>延遲補掃：換節次後幾分鐘補掃上一節</label><input type="number" min="0" data-cfg-num="inews.sweep_delay_minutes" value="${inewsSettings.sweep_delay_minutes ?? 10}" /></div>
+            <div class="muted">換節次 = 新一節的開始時間（硬時間，或整點減上面的分鐘數）。例：1800 在 17:43 換節，設 10 分鐘就在 17:53 對 1700 完整掃一次，補抓換節瞬間漏掉或播出後才改的稿；該節的分隔線在補掃完成後才寫，新一節的稿在那之前先等著。跨節節次要等它真正結束才補掃。只在自動刷新時進行。</div>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.cutoff_by_marker" ${inewsSettings.cutoff_by_marker ? "checked" : ""} /> 另外套用標記式截止（v0.3.0 的規則，預設關閉）</label>
             <div class="field"><label>標記式截止：預告關鍵字</label><input type="text" data-cfg="inews.cutoff_preview_keyword" value="${escapeHtml(inewsSettings.cutoff_preview_keyword)}" /></div>
             <div class="field"><label>標記式截止：廣告列序號開頭</label><input type="text" data-cfg="inews.cutoff_page_prefix" value="${escapeHtml(inewsSettings.cutoff_page_prefix)}" /></div>
@@ -1566,7 +1584,8 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
           <section class="settings-section">
             <h3>標點轉換</h3>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="punctuation.quotes_to_corner" ${config.punctuation.quotes_to_corner ? "checked" : ""} /> 直引號轉「」</label>
-            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="punctuation.dot_to_enumeration" ${config.punctuation.dot_to_enumeration ? "checked" : ""} /> . 轉頓號、（數字間除外）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="punctuation.title_dot_to_enumeration" ${config.punctuation.title_dot_to_enumeration ? "checked" : ""} /> 標題 . 轉頓號、（數字間除外；預設不勾，標題保留 .）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="punctuation.dot_to_enumeration" ${config.punctuation.dot_to_enumeration ? "checked" : ""} /> 內文 . 轉頓號、（數字間除外）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="punctuation.protect_urls" ${config.punctuation.protect_urls ? "checked" : ""} /> 保護網址不轉換</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="punctuation.preserve_halfwidth_space" ${config.punctuation.preserve_halfwidth_space ? "checked" : ""} /> 保留半形空格</label>
             <div class="field">
@@ -1635,6 +1654,11 @@ function readConfigFromForm(base) {
     const spans = parseSlotSpans(elm.value);
     if (spans === null) throw new Error(`跨節合併格式錯誤：「${elm.value}」，請寫成 1200=1400, 1800=2000`);
     setPath(cfg, elm.dataset.cfgSpans, spans);
+  });
+  document.querySelectorAll("[data-cfg-programs]").forEach((elm) => {
+    const programs = parsePrograms(elm.value);
+    if (programs === null) throw new Error(`停播節目格式錯誤：「${elm.value}」，請寫成 關鍵KS=關鍵時刻`);
+    setPath(cfg, elm.dataset.cfgPrograms, programs);
   });
   document.querySelectorAll("[data-cfg-bool]").forEach((elm) => setPath(cfg, elm.dataset.cfgBool, elm.checked));
   document.querySelectorAll("[data-cfg-num]").forEach((elm) => setPath(cfg, elm.dataset.cfgNum, Number(elm.value)));

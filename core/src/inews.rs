@@ -481,6 +481,8 @@ pub enum StartSource {
     HardTime,
     /// 沒有硬時間，或硬時間不在整點 −30 分 ～ +15 分之間：整點 − lead_minutes。
     Fallback,
+    /// 停播節次（空節次）沒有可信的硬時間：就用整點，前一節播到整點才結束。
+    Nominal,
 }
 
 impl StartSource {
@@ -488,6 +490,7 @@ impl StartSource {
         match self {
             StartSource::HardTime => "硬時間",
             StartSource::Fallback => "fallback",
+            StartSource::Nominal => "整點",
         }
     }
 }
@@ -529,6 +532,9 @@ pub struct Slot {
     /// 拉到 `nominal` 附近的實際開始時間。
     pub start: i64,
     pub source: StartSource,
+    /// 停播節次（v0.3.3）：緊接在有稿節次後面的空節次，例如平日 2200 的關鍵時刻、
+    /// 0100 收播。它只用來讓前一節在這裡結束，本身不匯入、不補掃、不寫分隔線。
+    pub off_air: bool,
 }
 
 impl Slot {
@@ -570,6 +576,8 @@ pub enum SkipReason {
     Spanned(String),
     /// 沒有帶樣式的非 float 稿。
     Empty,
+    /// 連續的空節次併入前面第一個停播節次（2300 併入 2200）。
+    OffAir(String),
 }
 
 /// 這一輪選中的節次。
@@ -590,6 +598,8 @@ struct Planner<'a> {
     /// (起點 index, 起點到終點的距離)。
     spans: Vec<(usize, i64)>,
     lead_minutes: u32,
+    /// 空節次是否當停播節次（`InewsConfig::off_air_on_empty`）。
+    off_air: bool,
     probes: HashMap<String, ShowProbe>,
     probe: &'a mut dyn FnMut(&str) -> ShowProbe,
     skipped: Vec<(String, SkipReason)>,
@@ -617,31 +627,65 @@ impl Planner<'_> {
         }
     }
 
-    /// 沒被跨節設定蓋過、而且有帶樣式的非 float 稿。跨節的起點那節本身是空的，就不
-    /// 蓋過後面的節次。
-    fn valid(&mut self, i: usize) -> bool {
+    /// 蓋過這一節的跨節起點。跨節的起點那節本身是空的，就不蓋過後面的節次。
+    fn spanned_by(&mut self, i: usize) -> Option<usize> {
         for k in 0..self.spans.len() {
             let (from, len) = self.spans[k];
             if from == i {
                 continue;
             }
             if forward_gap(self.shows[from].1, self.shows[i].1) < len && self.probe(from).has_stories {
-                let by = self.shows[from].0.clone();
-                self.skip(i, SkipReason::Spanned(by));
-                return false;
+                return Some(from);
             }
         }
-        if !self.probe(i).has_stories {
-            self.skip(i, SkipReason::Empty);
+        None
+    }
+
+    /// 沒被跨節蓋過的空節次。
+    fn is_empty(&mut self, i: usize) -> bool {
+        self.spanned_by(i).is_none() && !self.probe(i).has_stories
+    }
+
+    /// 停播節次：空節次，而且前一節不是空節次（連續的空節次只算第一個）。
+    fn is_off_air(&mut self, i: usize) -> bool {
+        let n = self.len();
+        self.off_air && n > 1 && self.is_empty(i) && !self.is_empty((i + n - 1) % n)
+    }
+
+    /// 有效節次：沒被跨節設定蓋過，而且有帶樣式的非 float 稿，或是停播節次。
+    fn valid(&mut self, i: usize) -> bool {
+        if let Some(from) = self.spanned_by(i) {
+            let by = self.shows[from].0.clone();
+            self.skip(i, SkipReason::Spanned(by));
             return false;
         }
-        true
+        if self.probe(i).has_stories || self.is_off_air(i) {
+            return true;
+        }
+        if self.off_air && self.len() > 1 {
+            // 連續空節次：往前找到停播的那一節。
+            let n = self.len();
+            if let Some(j) = (1..n).map(|k| (i + n - k) % n).find(|&j| !self.is_empty(j)) {
+                let first = (j + 1) % n;
+                if first != i && self.is_off_air(first) {
+                    let by = self.shows[first].0.clone();
+                    self.skip(i, SkipReason::OffAir(by));
+                    return false;
+                }
+            }
+        }
+        self.skip(i, SkipReason::Empty);
+        false
     }
 
     fn slot(&mut self, i: usize) -> Slot {
         let (name, nominal) = self.shows[i].clone();
-        let (start, source) = slot_start(nominal, self.probe(i).first_hard, self.lead_minutes);
-        Slot { show: name, nominal, start, source }
+        let off_air = !self.probe(i).has_stories;
+        let (mut start, mut source) = slot_start(nominal, self.probe(i).first_hard, self.lead_minutes);
+        if off_air && source == StartSource::Fallback {
+            (start, source) = (nominal as i64, StartSource::Nominal);
+        }
+        Slot { show: name, nominal, start, source, off_air }
     }
 
     /// 下一個有效節次：有跨節設定就從終點那節（或終點之後的第一節）開始找。
@@ -679,11 +723,15 @@ impl Planner<'_> {
 /// - 有效節次 = 沒被跨節設定蓋過、而且有帶樣式的非 float 稿。
 /// - 下一個有效節次：有跨節設定（1200 → 1400）就是終點那節，沒有就是下一節（都跳過無效的）。
 /// - 目前節次 = 已過整點的最近一個有效節次；下一個有效節次的開始時間 ≤ 現在就提前換過去。
+///
+/// 停播節次（`off_air` 開著時）：沒被跨節蓋過的空節次，緊接在有稿的節次後面（平日
+/// 2200 關鍵時刻、0100 收播），前一節就在它的開始時間結束。連續的空節次併成一個。
 pub fn plan_slots(
     names: &[String],
     now: u32,
     spans: &std::collections::BTreeMap<String, String>,
     lead_minutes: u32,
+    off_air: bool,
     probe: &mut dyn FnMut(&str) -> ShowProbe,
 ) -> Option<Plan> {
     let shows = sorted_shows(names);
@@ -698,7 +746,7 @@ pub fn plan_slots(
             Some((i, forward_gap(shows[i].1, to)))
         })
         .collect();
-    let mut p = Planner { shows, spans: span_list, lead_minutes, probes: HashMap::new(), probe, skipped: Vec::new() };
+    let mut p = Planner { shows, spans: span_list, lead_minutes, off_air, probes: HashMap::new(), probe, skipped: Vec::new() };
     let n = p.len();
 
     let base = p.shows.iter().rposition(|(_, s)| *s <= now).unwrap_or(n - 1);
@@ -723,20 +771,22 @@ pub fn plan_slots(
     Some(Plan { current, previous, switched_early, skipped: p.skipped })
 }
 
-/// 延遲補掃：目前節次的整點過了 `delay_minutes` 分鐘、而且這一節還沒補掃過，就補掃
-/// 上一個有效節次，回傳它的範圍。
+/// 延遲補掃：換到目前節次（它的實際開始時間：硬時間，或整點 − lead_minutes）後過了
+/// `delay_minutes` 分鐘、而且這一節還沒補掃過，就補掃上一個有效節次，回傳它的範圍。
+/// 例：1740 第一個硬時間 17:43 → 17:53 補掃 1700；1200 硬時間 11:40 → 11:50 補掃 1100。
+/// 上一節是停播節次（關鍵時刻、收播）就不補掃。
 ///
 /// `swept_for` 是上一次補掃時的「目前節次」。延續中的跨節節次（13:10 時的 1200）在
-/// 12:10 就補掃過 1100 了，所以 13:10 不會再觸發；14:10 目前節次變成 1400，才補掃 1200。
+/// 11:50 就補掃過 1100 了，所以不會再觸發；13:55 換到 1400，14:05 才補掃 1200。
 pub fn sweep_target<'a>(plan: &'a Plan, now: u32, delay_minutes: u32, swept_for: Option<&str>) -> Option<&'a Window> {
     let cur = &plan.current.slot;
     if swept_for == Some(cur.show.as_str()) {
         return None;
     }
-    if cur.axis(now as i64) < cur.nominal as i64 + delay_minutes as i64 * 60 {
+    if cur.axis(now as i64) < cur.start + delay_minutes as i64 * 60 {
         return None;
     }
-    plan.previous.as_ref()
+    plan.previous.as_ref().filter(|w| !w.slot.off_air)
 }
 
 // --- Rundown -------------------------------------------------------------------
@@ -1192,7 +1242,7 @@ mod tests {
     fn plan_at(d: &HashMap<String, Vec<RundownRow>>, now: u32, spans: &std::collections::BTreeMap<String, String>) -> Plan {
         let names: Vec<String> = d.keys().cloned().collect();
         let mut probe = |name: &str| ShowProbe::of(d.get(name).map_or(&[][..], |r| r.as_slice()));
-        plan_slots(&names, now, spans, 5, &mut probe).unwrap()
+        plan_slots(&names, now, spans, 5, true, &mut probe).unwrap()
     }
 
     fn titles(rows: &[RundownRow], sel: &Selection) -> Vec<String> {
@@ -1278,10 +1328,23 @@ mod tests {
     #[test]
     fn a_show_with_no_styled_stories_is_skipped_even_without_a_span() {
         let d = day();
-        let p = plan_at(&d, clock(13, 10, 0), &Default::default());
+        let names: Vec<String> = d.keys().cloned().collect();
+        let mut probe = |name: &str| ShowProbe::of(d.get(name).map_or(&[][..], |r| r.as_slice()));
+        let p = plan_slots(&names, clock(13, 10, 0), &Default::default(), 5, false, &mut probe).unwrap();
         assert_eq!(p.current.slot.show, "1200");
         assert!(p.skipped.contains(&("1300".to_string(), SkipReason::Empty)));
         assert_eq!(p.current.next.as_ref().unwrap().show, "1400");
+    }
+
+    #[test]
+    fn without_a_span_an_empty_show_is_off_air_from_its_own_hard_time() {
+        // 沒設 1200=1400 時，空的 1300 是停播節次：1200 在 1300 的硬時間 12:55 結束。
+        let d = day();
+        let p = plan_at(&d, clock(12, 30, 0), &Default::default());
+        assert_eq!(p.current.slot.show, "1200");
+        let next = p.current.next.as_ref().unwrap();
+        assert_eq!((next.show.as_str(), next.off_air, next.source), ("1300", true, StartSource::HardTime));
+        assert_eq!(p.current.end(), clock(12, 55, 0) as i64);
     }
 
     #[test]
@@ -1349,22 +1412,131 @@ mod tests {
     }
 
     #[test]
-    fn the_delayed_sweep_waits_for_ten_past_and_skips_a_continuing_span() {
+    fn the_delayed_sweep_waits_ten_minutes_after_the_switch_and_skips_a_continuing_span() {
         let d = day();
         let at = |h, m, swept: Option<&str>| {
             let p = plan_at(&d, clock(h, m, 0), &spans());
             sweep_target(&p, clock(h, m, 0), 10, swept).map(|w| (w.slot.show.clone(), w.end()))
         };
-        // 09:05 還沒到；09:10 補掃 0800（結束在 0900 開始的 08:55:00）。
-        assert_eq!(at(9, 5, Some("0800")), None);
-        assert_eq!(at(9, 10, Some("0800")), Some(("0800".into(), clock(8, 55, 0) as i64)));
+        // 0900 在 08:55 換節：09:04 還沒到；09:05 補掃 0800（結束在 08:55:00）。
+        assert_eq!(at(9, 4, Some("0800")), None);
+        assert_eq!(at(9, 5, Some("0800")), Some(("0800".into(), clock(8, 55, 0) as i64)));
         // 同一節補掃過就不再補。
         assert_eq!(at(9, 30, Some("0900")), None);
-        // 12:10 補掃 1100；13:10 目前還是 1200（12:10 已補掃過），不補。
-        assert_eq!(at(12, 10, Some("1100")), Some(("1100".into(), clock(11, 40, 0) as i64)));
+        // 1200 在 11:40 換節：11:49 還沒到，11:50 補掃 1100；13:10 目前還是 1200，不補。
+        assert_eq!(at(11, 49, Some("1100")), None);
+        assert_eq!(at(11, 50, Some("1100")), Some(("1100".into(), clock(11, 40, 0) as i64)));
         assert_eq!(at(13, 10, Some("1200")), None);
-        // 14:10 才補掃 1200，範圍到 1400 開始的 13:55。
-        assert_eq!(at(14, 10, Some("1200")), Some(("1200".into(), clock(13, 55, 0) as i64)));
+        // 1400 在 13:55 換節，14:05 補掃 1200，範圍到 13:55。
+        assert_eq!(at(14, 4, Some("1200")), None);
+        assert_eq!(at(14, 5, Some("1200")), Some(("1200".into(), clock(13, 55, 0) as i64)));
+    }
+
+    /// 平日晚上：2000 跨到 2200，2100 被合併；2200、2300 是關鍵時刻（只有 slug、沒有
+    /// 樣式）；2400 第一個硬時間 23:59:30；0100 收播、0200 以後到 0600 都是空的。
+    fn weekday_night() -> HashMap<String, Vec<RundownRow>> {
+        let mut d = HashMap::new();
+        d.insert("0600".to_string(), vec![
+            row("", "片頭", 60, Some(clock(5, 55, 0)), false),
+            styled("A1", "合成晨間稿0600", 120, None),
+        ]);
+        d.insert("1800".to_string(), vec![
+            row("", "片頭", 60, Some(clock(17, 43, 0)), false),
+            styled("A1", "合成晚間稿1800", 600, None),
+            styled("B1", "合成七點稿1800", 600, Some(clock(19, 0, 0))),
+        ]);
+        d.insert("1900".to_string(), vec![row("", "1900空列", 10, None, false)]);
+        d.insert("2000".to_string(), vec![
+            row("", "片頭", 60, Some(clock(19, 55, 0)), false),
+            styled("A1", "合成八點稿2000", 600, None),
+            styled("B1", "合成九點稿2000", 600, Some(clock(21, 0, 0))),
+            styled("C1", "合成九點半稿2000", 120, Some(clock(21, 50, 0))),
+        ]);
+        d.insert("2100".to_string(), vec![row("", "2100空列", 10, None, false)]);
+        d.insert("2200".to_string(), vec![
+            row("", "關鍵KS美中AI技術戰", 600, None, false),
+            row("", "關鍵KS台海局勢", 600, None, false),
+        ]);
+        d.insert("2300".to_string(), vec![row("", "關鍵KS下半場", 600, None, false)]);
+        d.insert("2400".to_string(), vec![
+            row("", "片頭", 60, Some(clock(23, 59, 30)), false),
+            styled("A1", "合成午夜稿2400", 120, None),
+        ]);
+        for show in ["0100", "0200", "0300", "0400", "0500"] {
+            d.insert(show.to_string(), vec![]);
+        }
+        d
+    }
+
+    fn night_spans() -> std::collections::BTreeMap<String, String> {
+        let mut s = spans();
+        s.insert("2000".into(), "2200".into());
+        s
+    }
+
+    #[test]
+    fn an_empty_slot_after_a_news_slot_is_off_air_and_ends_it_on_the_hour() {
+        let d = weekday_night();
+        // 21:30：目前 2000，範圍到 2200 的整點（關鍵時刻沒有硬時間，不提前 5 分）。
+        let p = plan_at(&d, clock(21, 30, 0), &night_spans());
+        assert_eq!(p.current.slot.show, "2000");
+        assert_eq!(p.current.end(), clock(22, 0, 0) as i64);
+        let next = p.current.next.as_ref().unwrap();
+        assert_eq!((next.show.as_str(), next.off_air, next.source), ("2200", true, StartSource::Nominal));
+
+        // 22:05：換到停播的 2200；22:09 還不補掃，22:10 補掃 2000。
+        let p = plan_at(&d, clock(22, 5, 0), &night_spans());
+        assert!(p.current.slot.off_air);
+        assert_eq!(p.current.slot.show, "2200");
+        assert!(sweep_target(&p, clock(22, 9, 0), 10, Some("2000")).is_none());
+        let w = sweep_target(&p, clock(22, 10, 0), 10, Some("2000")).unwrap();
+        assert_eq!((w.slot.show.as_str(), w.end()), ("2000", clock(22, 0, 0) as i64));
+
+        // 23:30：2300 併入 2200（連續空節次），下一節是 2400。
+        let p = plan_at(&d, clock(23, 30, 0), &night_spans());
+        assert_eq!(p.current.slot.show, "2200");
+        assert!(p.skipped.contains(&("2300".to_string(), SkipReason::OffAir("2200".into()))));
+        assert_eq!(p.current.next.as_ref().unwrap().show, "2400");
+
+        // 00:10：目前 2400，上一節是停播的 2200，不補掃。
+        let p = plan_at(&d, clock(0, 10, 0), &night_spans());
+        assert_eq!(p.current.slot.show, "2400");
+        assert_eq!(p.previous.as_ref().unwrap().slot.show, "2200");
+        assert!(sweep_target(&p, clock(0, 10, 0), 10, Some("2200")).is_none());
+        // 2400 播到 0100 整點收播，01:10 補掃 2400。
+        assert_eq!(p.current.end(), clock(1, 0, 0) as i64);
+        let p = plan_at(&d, clock(1, 10, 0), &night_spans());
+        assert_eq!(p.current.slot.show, "0100");
+        let w = sweep_target(&p, clock(1, 10, 0), 10, Some("2400")).unwrap();
+        assert_eq!(w.slot.show, "2400");
+        // 0200～0500 併入 0100，下一節 0600。
+        let p = plan_at(&d, clock(3, 0, 0), &night_spans());
+        assert_eq!(p.current.slot.show, "0100");
+        assert_eq!(p.current.next.as_ref().unwrap().show, "0600");
+    }
+
+    #[test]
+    fn a_typhoon_overrun_into_0100_is_a_normal_slot() {
+        let mut d = weekday_night();
+        d.insert("0100".to_string(), vec![
+            row("", "片頭", 60, Some(clock(0, 58, 0)), false),
+            styled("A1", "合成颱風稿0100", 120, None),
+        ]);
+        let p = plan_at(&d, clock(1, 5, 0), &night_spans());
+        assert_eq!(p.current.slot.show, "0100");
+        assert!(!p.current.slot.off_air);
+        assert_eq!(p.current.next.as_ref().unwrap().show, "0200");
+        assert!(p.current.next.as_ref().unwrap().off_air);
+    }
+
+    #[test]
+    fn with_off_air_turned_off_empty_slots_are_skipped_as_before() {
+        let d = weekday_night();
+        let names: Vec<String> = d.keys().cloned().collect();
+        let mut probe = |name: &str| ShowProbe::of(d.get(name).map_or(&[][..], |r| r.as_slice()));
+        let p = plan_slots(&names, clock(22, 30, 0), &night_spans(), 5, false, &mut probe).unwrap();
+        assert_eq!(p.current.slot.show, "2000");
+        assert_eq!(p.current.next.as_ref().unwrap().show, "2400");
     }
 
     #[test]

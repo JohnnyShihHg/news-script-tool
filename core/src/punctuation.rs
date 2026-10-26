@@ -97,6 +97,12 @@ pub fn normalize(input: &str, cfg: &PunctuationConfig) -> PunctuationResult {
     PunctuationResult { text: out, warnings }
 }
 
+/// 標題用的 `normalize`：`.` 轉頓號看 `title_dot_to_enumeration`，其他規則一樣。
+pub fn normalize_title(input: &str, cfg: &PunctuationConfig) -> PunctuationResult {
+    let cfg = PunctuationConfig { dot_to_enumeration: cfg.title_dot_to_enumeration, ..cfg.clone() };
+    normalize(input, &cfg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +136,14 @@ mod tests {
     fn dot_after_number_before_word_becomes_enumeration_mark() {
         let r = normalize("至少111死.逾千棟房受損", &cfg());
         assert_eq!(r.text, "至少111死、逾千棟房受損");
+    }
+
+    #[test]
+    fn titles_keep_their_dots_by_default_but_other_rules_still_apply() {
+        let r = normalize_title(r#"SUP.海釣."烤肉""#, &cfg());
+        assert_eq!(r.text, "SUP.海釣.「烤肉」");
+        let on = PunctuationConfig { title_dot_to_enumeration: true, ..cfg() };
+        assert_eq!(normalize_title("SUP.海釣", &on).text, "SUP、海釣");
     }
 
     #[test]

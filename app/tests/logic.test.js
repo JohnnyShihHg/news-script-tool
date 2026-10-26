@@ -205,7 +205,7 @@ test("outgoingItems agrees with what buildOutputText actually writes", () => {
     entry({ bucket: "filtered", included: true, slug: "後送2天嬰11", style: "BS", time: "11:00:00", title: "標題", body: "內文" }),
     entry({ bucket: "passed", included: false, slug: "略過", style: "SOT", time: "12:00:00", title: "t", body: "b" }),
   ];
-  const written = L.buildOutputText(items).split("\n\n").filter((s) => s.trim() !== "");
+  const written = L.buildOutputText(items).split(/\n\n(?=\S+ \S+ \d\d:\d\d:\d\d)/).filter((s) => s.trim() !== "");
   assert.equal(written.length, L.outgoingItems(items).length);
 });
 
@@ -216,7 +216,7 @@ test("a ticked 解析失敗 entry is written out; an unticked one is not", () =>
     { bucket: "failed", included: true, slug: "孟潔連宜蘭21SL", style: "", time: "21:31:57", group: "", title: "t", body: "b", keywords: "" },
     { bucket: "failed", included: false, slug: "CM1", title: "", body: "", keywords: "" },
   ];
-  assert.equal(L.buildOutputText(items), "孟潔連宜蘭21SL 21:31:57\nt\nb\n");
+  assert.equal(L.buildOutputText(items), "孟潔連宜蘭21SL 21:31:57\nt\n\nb\n");
 });
 
 test("a 解析失敗 entry from the backend starts unticked but carries its fields", () => {
@@ -299,7 +299,7 @@ test("the funnel counts only output-eligible buckets", () => {
 
 // --- buildOutputText: spec §5 ---
 
-test("each entry renders as four lines with a blank line between entries", () => {
+test("each entry renders header, title, blank line, body, keywords, with a blank line between entries", () => {
   const items = [
     {
       bucket: "passed",
@@ -327,8 +327,8 @@ test("each entry renders as four lines with a blank line between entries", () =>
 
   assert.equal(
     L.buildOutputText(items),
-    "合成焦點報導1800 SOT 07:49:58 政\n合成標題範例\n這是合成的內文範例\n#合成關鍵字一 #合成關鍵字二\n\n" +
-      "合成車輛報導1800 SOT 10:57:44\n合成標題範例二\n這是合成的內文範例二\n#合成關鍵字三 #合成關鍵字四"
+    "合成焦點報導1800 SOT 07:49:58 政\n合成標題範例\n\n這是合成的內文範例\n#合成關鍵字一 #合成關鍵字二\n\n" +
+      "合成車輛報導1800 SOT 10:57:44\n合成標題範例二\n\n這是合成的內文範例二\n#合成關鍵字三 #合成關鍵字四"
   );
 });
 
@@ -834,4 +834,25 @@ test("slot spans round-trip between settings text and config", () => {
   assert.deepEqual(L.parseSlotSpans(""), {});
   assert.equal(L.parseSlotSpans("1200-1400"), null);
   assert.equal(L.formatSlotSpans({ 1200: "1400", 1800: "2000" }), "1200=1400, 1800=2000");
+});
+
+test("a 關鍵時刻 divider follows 2000's divider once 2000 is swept", () => {
+  const closed = new Set(["2000"]);
+  const programs = new Map([["2000", "==== 22 關鍵時刻 ===="]]);
+  // 22:10 補掃 2000：補到的稿、2000 的分隔線，接著節目分隔線。
+  let r = L.composeInewsWrite([mk("九點半", "2000")], { lastShow: "2000", closed, programs }, AFTER, toText);
+  assert.equal(r.text, "九點半\n\n==== 20 ====\n\n==== 22 關鍵時刻 ====");
+  assert.deepEqual(r.dividers, ["==== 20 ====", "==== 22 關鍵時刻 ===="]);
+  // 補掃沒有新稿也一樣。
+  r = L.composeInewsWrite([], { lastShow: "2000", closed, programs }, AFTER, toText);
+  assert.equal(r.text, "==== 20 ====\n\n==== 22 關鍵時刻 ====");
+  // 沒有節目對照（0100 收播）就只寫自己的分隔線。
+  r = L.composeInewsWrite([], { lastShow: "2400", closed: new Set(["2400"]), programs }, AFTER, toText);
+  assert.equal(r.text, "==== 24 ====");
+});
+
+test("program settings parse 開頭=名稱 pairs", () => {
+  assert.deepEqual(L.parsePrograms("關鍵KS=關鍵時刻, XX＝某節目"), { 關鍵KS: "關鍵時刻", XX: "某節目" });
+  assert.deepEqual(L.parsePrograms(""), {});
+  assert.equal(L.parsePrograms("關鍵KS"), null);
 });
