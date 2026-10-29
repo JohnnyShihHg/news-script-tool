@@ -278,14 +278,19 @@ pub fn previous_day_lines(slug: &str, days: &DaySections, strip: &[String]) -> V
 
 /// Whether a line is a date divider (`========1017========`), returning its MMDD.
 ///
-/// Date dividers carry `=` on both sides; time-slot dividers (`======0700`) only on
-/// the left, which is what keeps a slot from being mistaken for a new day. The real
-/// doc mixes spaces, tabs and fullwidth `＝`, so the line is normalized first.
+/// Date dividers carry `=` on both sides, but so do some hand-typed time-slot
+/// dividers (`====0900====`), so the `=` alone cannot tell them apart. What does:
+/// slots only ever mark the hour (`HH00`: 0900, 1800, 2400, 0000), while a date is
+/// a real MMDD (1028, 1030) -- month 01-12, day 01-31, so never `..00` (v0.3.6).
+/// The real doc mixes spaces, tabs and fullwidth `＝`, so the line is normalized first.
 fn date_divider(line: &str) -> Option<String> {
     static RE: once_cell::sync::Lazy<regex::Regex> =
         once_cell::sync::Lazy::new(|| regex::Regex::new(r"^=+[=\s]*(\d{4})\s*=[=\s]*$").unwrap());
     let norm = normalize_for_match(line);
-    RE.captures(&norm).map(|c| c[1].to_string())
+    let mmdd = RE.captures(&norm)?[1].to_string();
+    // 節次分隔線只標整點（0900、1800、2400），日期是 MMDD（1028、1030）。
+    let (mm, dd): (u32, u32) = (mmdd[..2].parse().ok()?, mmdd[2..].parse().ok()?);
+    ((1..=12).contains(&mm) && (1..=31).contains(&dd)).then_some(mmdd)
 }
 
 /// The lines of the doc that sit under the `mmdd` date divider, up to the next date
@@ -417,6 +422,13 @@ YH 合成已上傳新聞1200 SOT 12:20:00
     fn a_time_slot_divider_is_not_a_date_divider() {
         assert_eq!(date_divider("======1200"), None);
         assert_eq!(date_divider("========0811========="), Some("0811".to_string()));
+        // 有人把節次分隔線兩邊都打 =：只標整點的就是節次（v0.3.6）。
+        for slot in ["====0900====", "====1500====", "========0000", "====2400====", "===1300==="] {
+            assert_eq!(date_divider(slot), None, "{slot}");
+        }
+        assert_eq!(date_divider("＝＝＝＝＝＝＝＝＝＝＝＝1028＝＝＝＝＝＝＝＝＝＝＝＝＝"), Some("1028".to_string()));
+        assert_eq!(date_divider("=====1030====="), Some("1030".to_string()));
+        assert_eq!(date_divider("=====1332====="), None);
     }
 
     #[test]
@@ -723,6 +735,40 @@ UP 北投強風垮1800 SOT 18:10:00 社會
         assert_eq!(r.status, MatchStatus::ToCut);
         assert_eq!(r.matched_line, None);
         assert!(!r.cross_day);
+    }
+
+    #[test]
+    fn slot_dividers_typed_with_equals_on_both_sides_do_not_cut_the_day() {
+        // 2026/10/29 實測：1028 段落在 ====0900==== 被切斷，只讀到 132 行，跨天 0 則。
+        let doc = "\
+＝＝＝＝＝＝＝＝＝＝＝＝1028＝＝＝＝＝＝＝＝＝＝＝＝＝
+======0700
+早上稿0700 SOT 07:05:00
+早上標題
+
+====0900====
+九點稿0900 SOT 09:05:00
+九點標題
+
+====1300====
+========22 2300
+00 蘇替英圓夢2100 SOT 21:12:56 政治
+蔡英文喊幫自己圓新北市長夢想 蘇：一定完成
+
+＝＝＝＝＝＝＝＝＝＝＝＝1029＝＝＝＝＝＝＝＝＝＝＝＝＝
+====0900====
+今天稿0900 SOT 09:01:00
+";
+        let d = day_sections(doc, "1029", "1028");
+        let previous = d.previous.as_deref().unwrap();
+        assert!(previous.contains("====0900===="));
+        assert!(previous.contains("00 蘇替英圓夢2100"), "{previous}");
+        assert!(!previous.contains("今天稿0900"));
+        assert!(d.today.as_deref().unwrap().contains("今天稿0900"));
+        assert_eq!(d.today_header.as_deref(), Some("＝＝＝＝＝＝＝＝＝＝＝＝1029＝＝＝＝＝＝＝＝＝＝＝＝＝"));
+        let r = match_in_days(q("蘇替英圓夢2100", "蔡英文喊幫自己圓新北市長夢想 蘇：一定完成"), &d, doc, &refresh(), Some(&strip()));
+        assert_eq!(r.status, MatchStatus::Removed);
+        assert!(r.cross_day);
     }
 
     #[test]
