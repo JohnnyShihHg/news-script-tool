@@ -27,6 +27,8 @@ struct AppState {
     /// iNEWS 的控制連線與稿件快取，跨輪保留。Arc 是因為 FTP 是阻塞的，要帶進
     /// `spawn_blocking`；Mutex 同時保證兩輪不會同時跑。
     inews: std::sync::Arc<Mutex<inews::InewsState>>,
+    /// 比對寫進決策紀錄的上一份內容：一樣就不重複寫（自動刷新每分鐘都會比對）。
+    last_compare_log: Mutex<String>,
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -219,6 +221,12 @@ fn inews_credentials() -> Result<inews::Credentials, String> {
     }
 }
 
+/// 自動刷新的節次狀態存檔（重開 App 後接續換節收尾）：`%APPDATA%\\ebc\\news-script-tool\\state\\inews-session.json`。
+fn inews_state_file() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("tw", "ebc", "news-script-tool")
+        .and_then(|d| d.config_dir().parent().map(|p| p.join("state").join("inews-session.json")))
+}
+
 /// 決策紀錄資料夾：`%APPDATA%\\ebc\\news-script-tool\\logs`（設定檔在同一層的 `config`）。
 fn inews_log_dir() -> Option<std::path::PathBuf> {
     directories::ProjectDirs::from("tw", "ebc", "news-script-tool")
@@ -247,9 +255,27 @@ async fn import_inews(
         inews::FetchMode::Manual
     };
     let log_dir = inews_log_dir();
+    let state_file = inews_state_file();
+    let (day, _) = inews::broadcast_days(inews::taipei_now(), &inews_cfg.broadcast_day_start);
     let fetched = tauri::async_runtime::spawn_blocking(move || {
         let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
+        if let inews::FetchMode::Auto { session_start } = mode {
+            // 只接續同一個播出日的狀態：隔天的同名節次是另一節。
+            let saved = state_file
+                .as_ref()
+                .filter(|_| session_start)
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .and_then(|t| serde_json::from_str::<inews::SavedSession>(&t).ok())
+                .filter(|s| s.day == day);
+            st.set_resume(saved);
+        }
         let r = st.fetch(&inews_cfg, &creds, inews::taipei_seconds_of_day(), mode);
+        if let (Ok(_), inews::FetchMode::Auto { .. }, Some(f)) = (&r, mode, &state_file) {
+            if let Ok(json) = serde_json::to_string(&st.saved(&day)) {
+                let _ = f.parent().map(std::fs::create_dir_all);
+                let _ = std::fs::write(f, json);
+            }
+        }
         if let Some(dir) = &log_dir {
             let tag = if mode == inews::FetchMode::Manual { "[手動]" } else { "[自動]" };
             match &r {
@@ -684,6 +710,9 @@ struct CompareDayDto {
     header_to_add: Option<String>,
     /// 文件裡找不到任何日期分隔線（退回掃整份）等情況的警告。
     warning: Option<String>,
+    /// 有開跨天比對、卻找不到前一天的日期段落：前一天的重播會被當新稿，
+    /// 這一輪不自動寫入，改成等確認（v0.3.5）。
+    hold_auto_write: bool,
 }
 
 #[derive(Serialize)]
@@ -974,13 +1003,22 @@ async fn append_to_collab_doc(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     text: String,
+    log_note: Option<String>,
 ) -> Result<String, String> {
     require_main_window(&window)?;
     if text.trim().is_empty() {
         return Err("沒有可寫入的內容。".to_string());
     }
     let script = build_append_script(&text);
-    eval_in_collab_and_wait(&app, &state, &script).await
+    let r = eval_in_collab_and_wait(&app, &state, &script).await;
+    // 自動流程的寫入結果寫進決策紀錄：「沒寫入」時才查得到原因。
+    if let (Some(note), Some(dir)) = (&log_note, inews_log_dir()) {
+        match &r {
+            Ok(_) => inews::append_log(&dir, &format!("[寫入] 成功：{note}")),
+            Err(e) => inews::append_log(&dir, &format!("[寫入] 失敗：{note}｜{e}")),
+        }
+    }
+    r
 }
 
 #[derive(Deserialize)]
@@ -1000,7 +1038,7 @@ async fn compare_with_collab_doc(
     state: tauri::State<'_, AppState>,
     entries: Vec<CompareEntry>,
 ) -> Result<CompareDto, String> {
-    use news_script_core::doc_match::{day_sections, match_in_days, EntryQuery, MatchStatus};
+    use news_script_core::doc_match::{day_sections, match_in_days, normalize_title, previous_day_lines, EntryQuery, MatchStatus};
     require_main_window(&window)?;
     let doc_text = scrape_collab_text(&app, &state).await?;
 
@@ -1015,12 +1053,14 @@ async fn compare_with_collab_doc(
         .collect();
     let title_strip = cfg.inews.cross_day_title_match.then_some(strip.as_slice());
 
-    let warning = (!days.has_dividers).then(|| {
-        "協作文件裡找不到任何日期分隔線（==========MMDD==========），改成比對整份文件：跨天重複使用的 slug 可能被誤判為已上傳。".to_string()
-    });
-    if let (Some(w), Some(dir)) = (&warning, inews_log_dir()) {
-        inews::append_log(&dir, &format!("[比對] 警告：{w}"));
-    }
+    let hold_auto_write = days.has_dividers && title_strip.is_some() && days.previous.is_none();
+    let warning = if !days.has_dividers {
+        Some("協作文件裡找不到任何日期分隔線（==========MMDD==========），改成比對整份文件：跨天重複使用的 slug 可能被誤判為已上傳。".to_string())
+    } else if hold_auto_write {
+        Some(format!("協作文件裡找不到前一天 {previous} 的日期分隔線：前一天已上傳的重播會被當成新稿，這一輪不自動寫入，請確認後手動寫入。"))
+    } else {
+        None
+    };
     let header_to_add = match (&days.today, cfg.inews.auto_date_header) {
         (None, true) => days.today_header.clone(),
         _ => None,
@@ -1028,11 +1068,34 @@ async fn compare_with_collab_doc(
 
     // Results come back in the order sent: the UI pairs them by position, since two
     // versions of one slug (different 累積時間) can get different answers.
-    let results = entries
+    let mut counts = [0usize; 5]; // 待處理、已在文件、要重貼、已剔除、其中跨天
+    let mut suspects = Vec::new();
+    let results: Vec<MatchResultDto> = entries
         .iter()
         .map(|e| {
             let q = EntryQuery { slug: &e.slug, time: &e.time, title: &e.title };
             let r = match_in_days(q, &days, &doc_text, &cfg.markers.refresh_keywords, title_strip);
+            counts[match r.status {
+                MatchStatus::ToCut => 0,
+                MatchStatus::InDoc => 1,
+                MatchStatus::KeepRefresh => 2,
+                MatchStatus::Removed => 3,
+            }] += 1;
+            counts[4] += r.cross_day as usize;
+            // 前一天有同 slug 卻當新稿：把兩邊的標題寫出來，查跨天比對為什麼沒對上。
+            if r.status == MatchStatus::ToCut {
+                let prev = previous_day_lines(&e.slug, &days, &strip);
+                if !prev.is_empty() {
+                    let theirs: Vec<String> = prev.iter().map(|(line, t)| format!("「{line}」→{t}")).collect();
+                    suspects.push(format!(
+                        "{}｜這則標題「{}」→{}｜前一天 {}",
+                        e.slug,
+                        e.title,
+                        normalize_title(&e.title, &strip),
+                        theirs.join("、")
+                    ));
+                }
+            }
             MatchResultDto {
                 slug: e.slug.clone(),
                 status: match r.status {
@@ -1048,9 +1111,39 @@ async fn compare_with_collab_doc(
         })
         .collect();
 
+    let found = |s: &Option<String>| s.as_ref().map_or("找不到".to_string(), |t| format!("{} 行", t.lines().count()));
+    let mut log = vec![format!(
+        "[比對] 播出日 {today}：{}・前一天 {previous}：{}・跨天標題比對{}・文件 {} 行｜{} 則：待處理 {}、已在文件 {}、要重貼 {}、已剔除 {}（其中跨天 {}）",
+        found(&days.today),
+        found(&days.previous),
+        if title_strip.is_some() { "開" } else { "關" },
+        doc_text.lines().count(),
+        entries.len(),
+        counts[0],
+        counts[1],
+        counts[2],
+        counts[3],
+        counts[4],
+    )];
+    if let Some(w) = &warning {
+        log.push(format!("[比對] 警告：{w}"));
+    }
+    log.extend(suspects.iter().map(|s| format!("[比對] 前一天有同 slug，當新稿寫：{s}")));
+    let log = log.join("\n");
+    let mut last = state.last_compare_log.lock().unwrap();
+    if *last != log {
+        if let Some(dir) = inews_log_dir() {
+            for line in log.lines() {
+                inews::append_log(&dir, line);
+            }
+        }
+        *last = log;
+    }
+    drop(last);
+
     Ok(CompareDto {
         results,
-        day: CompareDayDto { today, today_found: days.today.is_some(), header_to_add, warning },
+        day: CompareDayDto { today, today_found: days.today.is_some(), header_to_add, warning, hold_auto_write },
     })
 }
 
@@ -1135,6 +1228,7 @@ fn main() {
             config: Mutex::new(load_config_from_disk_or_default()),
             scrape_reply: Mutex::new(None),
             inews: Default::default(),
+            last_compare_log: Mutex::new(String::new()),
         })
         .invoke_handler(tauri::generate_handler![
             import_folder,

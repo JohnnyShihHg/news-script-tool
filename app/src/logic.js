@@ -649,8 +649,10 @@
    *   after    -- once `lastShow` is closed and nothing of it is pending, a divider
    *               naming it goes in, even if no new story comes with it
    *   before   -- a divider naming the new show goes in before its first story
-   *   programs -- show -> 節目分隔線 (`==== 22 關鍵時刻 ====`) that follows that
-   *               show's own divider (after-position only, v0.3.3)
+   *   programs -- show -> 節目分隔線 (`==== 22 關鍵時刻 ====`) for the off-air
+   *               program that follows that show. After-position: right after the
+   *               show's own divider (v0.3.3). Before-position: on its own once the
+   *               show is closed, since it names what airs next (v0.3.5)
    *
    * Stories of a show already closed and left behind arrive late (edited after the
    * sweep); they are written where they are, with no divider of their own.
@@ -680,8 +682,15 @@
     let current = lastShow ?? "";
     const done = (show) => closed.has(show) && !pending.has(show);
     const closeIfDone = () => {
-      if (position !== "before" && current && done(current)) {
+      if (!current || !done(current)) return;
+      if (position !== "before") {
         divider(current);
+        current = "";
+      } else if (programs.has(current)) {
+        // An off-air program has no story of its own to put a before-divider over.
+        const program = programs.get(current);
+        parts.push(program);
+        dividers.push(program);
         current = "";
       }
     };

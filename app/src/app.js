@@ -63,6 +63,8 @@ let dateHeaderOwed = "";
  *  wrote: the scraped doc can lag behind a write, and a stale compare must not ask
  *  for the same divider twice. */
 let compareDay = "";
+/** The last compare could not find yesterday's section: auto-write waits for a click. */
+let compareHoldsAutoWrite = false;
 let dateHeaderWrittenFor = "";
 
 function withDateHeader(text) {
@@ -922,6 +924,9 @@ async function inewsRound() {
     }
     const meta = summary.inews;
     noteInewsRound(closedShows, programDividers, meta);
+    // Restarted mid-show: the backend picked up the show it was following, so the
+    // divider for it is not written a second time (v0.3.5).
+    if (meta.resumed_show && !lastWrittenShow) lastWrittenShow = meta.resumed_show;
     const { added, changed } = diffInewsVersions(inewsVersions, meta.stories);
     const hadCards = items.some((i) => i.inews);
     items = sortByTime(mergeInewsItems(hadCards ? items : [], inewsItemsFromSummary(summary), writtenKeys));
@@ -981,7 +986,7 @@ async function runInewsPipeline() {
     if (plan.held.length) showHeldNotice(plan.held);
     return;
   }
-  if (inewsCfg.auto_write) await writeInewsItems(ready);
+  if (inewsCfg.auto_write && !compareHoldsAutoWrite) await writeInewsItems(ready);
   else showInewsConfirm(plan);
 }
 
@@ -1013,6 +1018,17 @@ function heldText(held) {
   return `${held.length} 則 ${shows} 的稿等 ${lastWrittenShow} 節延遲補掃完成、寫完分隔線後再寫入（換節次後 ${inewsCfg.sweep_delay_minutes ?? 10} 分鐘）。`;
 }
 
+/// 寫進決策紀錄的一行：幾則、哪些 slug、分隔線。
+function writeLogNote(written, dividers) {
+  const slugs = written.map(slugOf);
+  return (
+    `${written.length} 則` +
+    (slugs.length ? `（${slugs.join("、")}）` : "") +
+    (dividers.length ? `｜分隔線 ${dividers.join("、")}` : "") +
+    (dateHeaderOwed ? `｜日期分隔線 ${dateHeaderOwed}` : "")
+  );
+}
+
 function showHeldNotice(held) {
   const status = el("compareStatus");
   status.classList.remove("hidden");
@@ -1038,7 +1054,7 @@ function hideInewsConfirm() {
 async function writeInewsItems(ready) {
   // 寫入前再擋一次：同一個版本（或這次 session 寫過的 slug）不重複寫入。
   const fresh = ready.filter((i) => isPendingWrite(i, writtenKeys) && !writtenSlugs.has(`${slugOf(i)}|${i.inews?.version ?? ""}`));
-  const { text, lastShow, written, held } = inewsWriteText(fresh);
+  const { text, lastShow, written, held, dividers } = inewsWriteText(fresh);
   if (!text.trim()) {
     if (held.length) showHeldNotice(held);
     return;
@@ -1048,7 +1064,7 @@ async function writeInewsItems(ready) {
   status.className = "compare-status";
   status.textContent = written.length ? `寫入 ${written.length} 則到協作文件中…` : "寫入節次分隔線中…";
   try {
-    const msg = await invoke("append_to_collab_doc", { text: withDateHeader(text) });
+    const msg = await invoke("append_to_collab_doc", { text: withDateHeader(text), logNote: writeLogNote(written, dividers) });
     dateHeaderWritten();
     for (const i of written) {
       const key = writtenKey(i);
@@ -1198,6 +1214,7 @@ async function compareWithCollabDoc({ silent = false } = {}) {
   try {
     const { results, day } = await invoke("compare_with_collab_doc", { entries });
     compareDay = day.today;
+    compareHoldsAutoWrite = !!day.hold_auto_write;
     dateHeaderOwed = day.header_to_add && dateHeaderWrittenFor !== day.today ? day.header_to_add : "";
     const matched = [];
     // Paired by position, not slug: two versions of one slug can now differ.
@@ -1458,8 +1475,8 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <div class="muted">直進實際播多久要看現場，依 0:00 推算會把後面的稿提前判成已播出；直進拉長被抽掉的稿就會多寫進文件。延遲補掃不受影響。</div>
             <div class="field"><label>播出日分界（HH:MM，這個時間之前播出的稿算前一天）</label><input type="text" data-cfg="inews.broadcast_day_start" value="${escapeHtml(inewsSettings.broadcast_day_start ?? "02:00")}" /></div>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_date_header" ${inewsSettings.auto_date_header !== false ? "checked" : ""} /> 協作文件還沒有今天的日期分隔線時，第一次寫入前自動補上</label>
-            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.cross_day_title_match" ${inewsSettings.cross_day_title_match !== false ? "checked" : ""} /> 前一天段落裡 slug 和標題都相同的才算重播（不勾 = 完全不看前一天）</label>
-            <div class="muted">比對協作文件（包含手動匯入的比對）只看今天的日期段落（<code>==========MMDD==========</code> 到下一條日期分隔線）：同一天內重播照舊算已上傳。slug 會跨天重複使用（例：每天的 <code>季瑩氣象2100</code>），所以前一天的段落要標題也相同才算重複；標題比對會忽略空白、標點、<code>最新》</code>／<code>獨家》</code> 和 <code>(勿上網)</code> 這類標記。文件裡完全沒有日期分隔線時退回比對整份，並提醒你。</div>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.cross_day_title_match" ${inewsSettings.cross_day_title_match !== false ? "checked" : ""} /> 前一天段落裡 slug 和標題都相同、而且 slug 前有處理標記（00、UP、(X/…)）的才算重播；沒標記或 (抓新) 照樣寫（不勾 = 完全不看前一天）</label>
+            <div class="muted">比對協作文件（包含手動匯入的比對）只看今天的日期段落（<code>==========MMDD==========</code> 到下一條日期分隔線）：同一天內重播照舊算已上傳。slug 會跨天重複使用（例：每天的 <code>季瑩氣象2100</code>），所以前一天的段落要標題也相同、而且 slug 前有處理標記才算重複（前一天沒標記＝還沒處理，今天照寫）；標題比對會忽略空白、標點、<code>最新》</code>／<code>獨家》</code> 和 <code>(勿上網)</code> 這類標記。文件裡完全沒有日期分隔線時退回比對整份，並提醒你。</div>
             <div class="field">
               <label>決策紀錄（每次同步選了哪一節、範圍、納入／排除，保留 14 天）</label>
               <div class="keywords-row"><button id="openInewsLogBtn" type="button">開啟紀錄資料夾</button><span id="inewsLogStatus" class="muted"></span></div>

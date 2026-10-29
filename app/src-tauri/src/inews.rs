@@ -267,6 +267,20 @@ pub struct InewsState {
     swept_for: Option<String>,
     /// story key → 上一次看到的版本，決策紀錄算「新增／變動」用。
     versions: HashMap<String, String>,
+    /// 上次存檔的節次狀態：剛打開自動刷新那一輪拿來接續（見 `SavedSession`）。
+    resume: Option<SavedSession>,
+}
+
+/// 存在檔案裡的自動刷新狀態。程式重開或關掉自動刷新時，記憶體裡的 `last_show` /
+/// `swept_for` 會不見；換節瞬間程式沒在跑的話，上一節就沒有最後同步和補掃（v0.3.5）。
+/// 只接續同一個播出日、而且是「上次在跟的那一節」或它的下一節：程式完全沒跟過的
+/// 節次不回頭補。
+#[derive(Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SavedSession {
+    /// 播出日 MMDD（`broadcast_days` 的 today）。
+    pub day: String,
+    pub last_show: Option<String>,
+    pub swept_for: Option<String>,
 }
 
 /// 一則被選中的稿件，給前端做單則變動偵測。
@@ -314,6 +328,8 @@ pub struct InewsMeta {
     /// 換節、補掃、跳過的節次，跟決策紀錄寫的是同一份。
     pub events: Vec<String>,
     pub warnings: Vec<String>,
+    /// 剛打開自動刷新時接續了上次存檔的節次：前端拿來當「上次寫到哪一節」。
+    pub resumed_show: Option<String>,
 }
 
 pub struct FetchResult {
@@ -327,7 +343,8 @@ pub struct FetchResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchMode {
     Manual,
-    /// `session_start` = 剛打開自動刷新：上一輪的狀態作廢，也不回頭補掃開啟前的節次。
+    /// `session_start` = 剛打開自動刷新：記憶體裡的狀態作廢，改從存檔接續（`SavedSession`）；
+    /// 程式沒跟過的節次不回頭補掃。
     Auto { session_start: bool },
 }
 
@@ -550,10 +567,34 @@ impl InewsState {
         let mut switched_from = None;
         let mut closed_show = None;
         let mut program_divider = None;
+        let mut resumed_show = None;
         if let FetchMode::Auto { session_start } = mode {
             if session_start {
                 self.last_show = None;
                 self.swept_for = None;
+                if let Some(saved) = self.resume.clone() {
+                    let prev = plan.previous.as_ref().map(|p| p.slot.show.as_str());
+                    match saved.last_show.as_deref() {
+                        Some(last) if last == cur.slot.show => {
+                            events.push(format!("接續上次的節次 {last}"));
+                            self.last_show = saved.last_show.clone();
+                            self.swept_for = saved.swept_for.clone();
+                            resumed_show = saved.last_show.clone();
+                        }
+                        Some(last) if Some(last) == prev => {
+                            events.push(format!("接續上次：程式停下時在跟 {last}，補做 {last} 的收尾"));
+                            self.last_show = saved.last_show.clone();
+                            // 補掃要看到 swept_for 不是目前節次才會做。
+                            self.swept_for = saved.swept_for.clone().or_else(|| saved.last_show.clone());
+                            resumed_show = saved.last_show.clone();
+                        }
+                        Some(last) => events.push(format!(
+                            "上次停在 {last}，不是 {} 或它的上一個有效節次，中間沒跟到的節次不補（要補請手動匯入）",
+                            cur.slot.show
+                        )),
+                        None => {}
+                    }
+                }
             }
             // 剛開始自動刷新：不回頭補掃開啟前就結束的節次。
             if self.swept_for.is_none() {
@@ -692,8 +733,19 @@ impl InewsState {
                 stories: metas,
                 events,
                 warnings,
+                resumed_show,
             },
         })
+    }
+
+    /// 剛打開自動刷新那一輪要接續的存檔狀態（同一個播出日才給）。
+    pub fn set_resume(&mut self, saved: Option<SavedSession>) {
+        self.resume = saved;
+    }
+
+    /// 要存檔的狀態。
+    pub fn saved(&self, day: &str) -> SavedSession {
+        SavedSession { day: day.to_string(), last_show: self.last_show.clone(), swept_for: self.swept_for.clone() }
     }
 
     /// 一輪匯入。連線斷了（伺服器閒置踢人、網路閃斷）就重連再試一次。
@@ -1192,6 +1244,46 @@ mod tests {
         // 只補掃一次。
         let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 11 * 60, auto(false)).unwrap();
         assert_eq!(r.meta.closed_show, None);
+    }
+
+    #[test]
+    fn a_restart_across_a_show_switch_resumes_the_old_shows_final_sync_and_sweep() {
+        // 08:51 在跟 0800，存檔後程式停了；08:56 重開時已經是 0900（v0.3.5）。
+        let server = two_shows(None);
+        let c = cfg(server.port);
+        let auto = |start| FetchMode::Auto { session_start: start };
+        let mut state = InewsState::default();
+        state.fetch(&c, &creds("secret"), 8 * 3600 + 51 * 60, auto(true)).unwrap();
+        let saved = state.saved("1029");
+        assert_eq!(saved.last_show.as_deref(), Some("0800"));
+
+        // 重開＝session_start：記憶體裡的狀態作廢，只剩存檔。
+        state.set_resume(Some(saved));
+        let r = state.fetch(&c, &creds("secret"), 8 * 3600 + 56 * 60, auto(true)).unwrap();
+        assert_eq!(r.meta.show, "0900");
+        assert_eq!(r.meta.resumed_show.as_deref(), Some("0800"));
+        assert_eq!(r.meta.switched_from.as_deref(), Some("0800"));
+        assert!(r.log_line.contains("補做 0800 的收尾"), "{}", r.log_line);
+        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 5 * 60, auto(false)).unwrap();
+        assert_eq!(r.meta.closed_show.as_deref(), Some("0800"));
+    }
+
+    #[test]
+    fn a_restart_without_a_saved_show_still_never_sweeps_backwards() {
+        let server = two_shows(None);
+        let c = cfg(server.port);
+        let auto = |start| FetchMode::Auto { session_start: start };
+        let mut state = InewsState::default();
+        let r = state.fetch(&c, &creds("secret"), 8 * 3600 + 56 * 60, auto(true)).unwrap();
+        assert_eq!(r.meta.resumed_show, None);
+        assert_eq!(r.meta.switched_from, None);
+        let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 5 * 60, auto(false)).unwrap();
+        assert_eq!(r.meta.closed_show, None);
+        // 存檔的節次離現在太遠（中間有節次沒跟到）：不補，只記下來。
+        state.set_resume(Some(SavedSession { day: "1029".into(), last_show: Some("0700".into()), swept_for: None }));
+        let r = state.fetch(&c, &creds("secret"), 8 * 3600 + 56 * 60, auto(true)).unwrap();
+        assert_eq!(r.meta.switched_from, None);
+        assert!(r.log_line.contains("上次停在 0700"), "{}", r.log_line);
     }
 
     #[test]

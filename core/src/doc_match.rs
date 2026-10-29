@@ -203,7 +203,8 @@ pub struct EntryQuery<'a> {
 /// - 文件沒有任何日期分隔線：退回掃整份（呼叫端要提醒使用者）。
 /// - 今天的段落有這個 slug：照 `match_entry` 的規則（同一天重播 = 已上傳）。
 /// - 今天沒有、前一天有：`title_strip` 是 Some（有開跨天標題比對）而且兩邊都抓得到
-///   標題、正規化後相同，才照前一天那一行判斷（`cross_day`）；否則當成新稿。
+///   標題、正規化後相同，而且前一天那一行 slug 前面有處理標記，才算已上傳的重播
+///   （`Removed` + `cross_day`）；前一天沒標記或是 (抓新) 都還沒上，跟新稿一樣要寫。
 ///   標題取那一行下面第一個非空白行 —— 這個工具寫進文件的第二行就是標題。
 pub fn match_in_days(
     q: EntryQuery,
@@ -234,9 +235,32 @@ pub fn match_in_days(
         .find_map(|i| {
             let r = line_status(lines[i], &needle, entry_time.as_deref(), refresh_keywords)?;
             let doc_title = lines[i + 1..].iter().find(|l| !l.trim().is_empty())?;
-            (normalize_title(doc_title, strip) == wanted).then_some(MatchResult { cross_day: true, ..r })
+            (normalize_title(doc_title, strip) == wanted).then_some(r)
+        })
+        .map(|r| match r.status {
+            // 前一天有處理標記（00、UP、(X/…)）＝已上傳過的重播，不寫。
+            MatchStatus::Removed => MatchResult { cross_day: true, ..r },
+            // 前一天 slug 前面沒標記＝還沒處理；(抓新) 的隔天沒上也要重抓。都當新稿寫（v0.3.5）。
+            _ => today.clone(),
         })
         .unwrap_or(today)
+}
+
+/// 決策紀錄用：前一天段落裡出現這個 slug 的每一行，和它下面那一行標題（正規化後）。
+pub fn previous_day_lines(slug: &str, days: &DaySections, strip: &[String]) -> Vec<(String, String)> {
+    let needle = normalize_for_match(slug);
+    let Some(previous) = days.previous.as_deref() else { return Vec::new() };
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = previous.lines().collect();
+    (0..lines.len())
+        .filter(|&i| normalize_for_match(lines[i]).contains(&needle))
+        .map(|i| {
+            let title = lines[i + 1..].iter().find(|l| !l.trim().is_empty()).map(|t| normalize_title(t, strip));
+            (lines[i].trim().to_string(), title.unwrap_or_default())
+        })
+        .collect()
 }
 
 // --- 晚報 (evening bulletin) ---------------------------------------------------
@@ -684,10 +708,51 @@ UP 北投強風垮1800 SOT 18:10:00 社會
     }
 
     #[test]
-    fn a_rerun_flagged_for_regrab_yesterday_still_asks_for_a_re_paste() {
+    fn a_story_flagged_for_regrab_yesterday_is_written_again_today() {
+        // (抓新) 前一天沒上，隔天自然要重抓：跟新稿一樣（v0.3.5）。
         let r = check("合成重貼新聞1800", "合成重貼標題");
-        assert_eq!(r.status, MatchStatus::KeepRefresh);
-        assert!(r.cross_day);
+        assert_eq!(r.status, MatchStatus::ToCut);
+        assert_eq!(r.matched_line, None);
+        assert!(!r.cross_day);
+    }
+
+    #[test]
+    fn yesterdays_unmarked_line_with_the_same_title_was_never_handled_so_it_is_written() {
+        // 前一天 slug 前面沒標記＝還沒處理（v0.3.5）。
+        let r = check("季瑩氣象2100", "明天北部轉涼，早晚溫差大");
+        assert_eq!(r.status, MatchStatus::ToCut);
+        assert_eq!(r.matched_line, None);
+        assert!(!r.cross_day);
+    }
+
+    #[test]
+    fn the_1028_reruns_reported_on_1029() {
+        // 2026/10/29 實測：1028 晚上的重播在 1029 早上被當新稿寫進去。
+        let doc = "\
+＝＝＝＝＝＝＝＝＝＝＝＝1028＝＝＝＝＝＝＝＝＝＝＝＝＝
+========1800
+球棒砸美容1800 SOT 18:20:00 社會
+球棒砸美容院 店員嚇壞
+
+========22 2300
+00 蘇替英圓夢2100 SOT 21:12:56 政治
+蔡英文喊幫自己圓新北市長夢想 蘇：一定完成
+合成內文。
+
+========0000
+＝＝＝＝＝＝＝＝＝＝＝＝1029＝＝＝＝＝＝＝＝＝＝＝＝＝
+";
+        let d = day_sections(doc, "1029", "1028");
+        assert!(d.previous.is_some());
+        let rerun = match_in_days(q("蘇替英圓夢2100", "蔡英文喊幫自己圓新北市長夢想 蘇：一定完成"), &d, doc, &refresh(), Some(&strip()));
+        assert_eq!(rerun.status, MatchStatus::Removed);
+        assert!(rerun.cross_day);
+        let unhandled = match_in_days(q("球棒砸美容1800", "球棒砸美容院 店員嚇壞"), &d, doc, &refresh(), Some(&strip()));
+        assert_eq!(unhandled.status, MatchStatus::ToCut);
+        assert_eq!(
+            previous_day_lines("蘇替英圓夢2100", &d, &strip()),
+            [("00 蘇替英圓夢2100 SOT 21:12:56 政治".to_string(), normalize_title("蔡英文喊幫自己圓新北市長夢想蘇一定完成", &strip()))]
+        );
     }
 
     #[test]
@@ -724,10 +789,13 @@ UP 北投強風垮1800 SOT 18:10:00 社會
         assert_eq!(d.today, None);
         assert!(d.has_dividers);
         assert_eq!(d.today_header.as_deref(), Some("==========1027=========="));
-        // 淑麗氣象0900 is in 1026 (now the previous day) with this title.
+        // 淑麗氣象0900 is in 1026 (now the previous day) with this title, unmarked:
+        // never handled, so it is written (v0.3.5).
         let r = match_in_days(q("淑麗氣象0900", "今天各地回溫"), &d, DOC, &refresh(), Some(&strip()));
+        assert!(!r.cross_day);
+        assert_eq!(r.status, MatchStatus::ToCut);
+        let r = match_in_days(q("北投強風垮1800", "北投強風路樹倒塌壓車"), &day_sections(DOC, "1026", "1025"), DOC, &refresh(), Some(&strip()));
         assert!(r.cross_day);
-        assert_eq!(r.status, MatchStatus::InDoc);
     }
 
     #[test]

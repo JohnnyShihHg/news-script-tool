@@ -851,6 +851,25 @@ test("a 關鍵時刻 divider follows 2000's divider once 2000 is swept", () => {
   assert.equal(r.text, "==== 24 ====");
 });
 
+test("before-position writes the 關鍵時刻 divider on its own once 2000 is swept", () => {
+  const closed = new Set(["2000"]);
+  const programs = new Map([["2000", "==== 22 關鍵時刻 ===="]]);
+  // 22:10 補掃 2000：補到的稿，接著只有節目分隔線（before 標的是接下來的節目）。
+  let r = L.composeInewsWrite([mk("九點半", "2000")], { lastShow: "2000", closed, programs }, BEFORE, toText);
+  assert.equal(r.text, "九點半\n\n==== 22 關鍵時刻 ====");
+  assert.deepEqual(r.dividers, ["==== 22 關鍵時刻 ===="]);
+  assert.equal(r.lastShow, "");
+  // 補掃沒有新稿也要寫，而且寫過一次就不再欠。
+  r = L.composeInewsWrite([], { lastShow: "2000", closed, programs }, BEFORE, toText);
+  assert.equal(r.text, "==== 22 關鍵時刻 ====");
+  assert.equal(L.composeInewsWrite([], { lastShow: r.lastShow, closed, programs }, BEFORE, toText).text, "");
+  // 收播後的 2400 第一則：照常在前面標 2400。
+  r = L.composeInewsWrite([mk("午夜一", "2400")], { lastShow: "", closed, programs }, BEFORE, toText);
+  assert.equal(r.text, "==== 24 ====\n\n午夜一");
+  // 沒有節目對照的節次補掃完：before 不寫東西。
+  assert.equal(L.composeInewsWrite([], { lastShow: "0800", closed: new Set(["0800"]), programs }, BEFORE, toText).text, "");
+});
+
 test("program settings parse 開頭=名稱 pairs", () => {
   assert.deepEqual(L.parsePrograms("關鍵KS=關鍵時刻, XX＝某節目"), { 關鍵KS: "關鍵時刻", XX: "某節目" });
   assert.deepEqual(L.parsePrograms(""), {});
