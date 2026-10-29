@@ -104,6 +104,20 @@ pub fn match_entry(slug: &str, time: &str, doc_text: &str, refresh_keywords: &[S
         .unwrap_or_else(MatchResult::miss)
 }
 
+/// Whether the text before a slug marks it for a re-grab: one of the refresh
+/// keywords (抓新), or a bracket holding a 1-2 digit number -- `(19)slug1800` reads
+/// 「抓 19」, the version after the 19:00 show, and counts the same as (抓新); so do
+/// `(25)` and `(X/19)` (v0.3.7, user's call). A 4-digit `(2100)` does not, and bare
+/// codes such as `00` / `03` outside brackets still mean "handled".
+fn is_refresh_prefix(prefix: &str, refresh_keywords: &[String]) -> bool {
+    static BRACKET: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\(([^()]*)\)").unwrap());
+    static SHORT_NUMBER: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"(^|\D)\d{1,2}(\D|$)").unwrap());
+    refresh_keywords.iter().any(|k| prefix.contains(normalize_for_match(k).as_str()))
+        || BRACKET.captures_iter(prefix).any(|c| SHORT_NUMBER.is_match(&c[1]))
+}
+
 /// How one doc line reads for the slug `needle` (already normalized), or None when
 /// the slug is not on it.
 fn line_status(line: &str, needle: &str, entry_time: Option<&str>, refresh_keywords: &[String]) -> Option<MatchResult> {
@@ -112,7 +126,7 @@ fn line_status(line: &str, needle: &str, entry_time: Option<&str>, refresh_keywo
     let prefix = hay[..idx].trim();
     let status = if prefix.is_empty() {
         MatchStatus::InDoc
-    } else if refresh_keywords.iter().any(|k| prefix.contains(normalize_for_match(k).as_str())) {
+    } else if is_refresh_prefix(prefix, refresh_keywords) {
         match (entry_time, time_after(&hay[idx + needle.len()..])) {
             (Some(e), Some(l)) if e == l => MatchStatus::InDoc,
             _ => MatchStatus::KeepRefresh,
@@ -554,6 +568,30 @@ YH 合成氣象 06：24：02
     }
 
     #[test]
+    fn an_hour_in_brackets_before_the_slug_counts_as_a_regrab() {
+        // (19)slug1800 = 抓 19 那節播出後的版本，跟 (抓新) 一樣（v0.3.7）。
+        for line in [
+            "(19)合成抓節次1800 SOT 18:20:00",
+            "（19）合成抓節次1800",
+            "00 ( 9 ) 合成抓節次1800",
+            "(0)合成抓節次1800",
+            "(25)合成抓節次1800",
+            "(X/19)合成抓節次1800",
+        ] {
+            let r = match_slug("合成抓節次1800", line, &refresh());
+            assert_eq!(r.status, MatchStatus::KeepRefresh, "{line}");
+        }
+        // 時間跟文件那行相同＝已經是抓回來的版本。
+        let r = match_entry("合成抓節次1800", "18:20:00", "(19)合成抓節次1800 SOT 18:20:00", &refresh());
+        assert_eq!(r.status, MatchStatus::InDoc);
+        // 沒括號的 00、括號裡 3 位數以上、沒有數字的括號標記都不是抓新。
+        for line in ["00 合成抓節次1800", "(2100)合成抓節次1800", "(X/threads)合成抓節次1800", "(YT)合成抓節次1800"] {
+            let r = match_slug("合成抓節次1800", line, &refresh());
+            assert_eq!(r.status, MatchStatus::Removed, "{line}");
+        }
+    }
+
+    #[test]
     fn slug_with_refresh_keyword_buried_earlier_in_prefix_is_kept() {
         // spec: any non-empty prefix containing the refresh keyword counts, not just
         // an exact "(抓新)" tag -- "抓新 20後(合成事務所YT) " should still match.
@@ -734,6 +772,15 @@ UP 北投強風垮1800 SOT 18:10:00 社會
         let r = check("季瑩氣象2100", "明天北部轉涼，早晚溫差大");
         assert_eq!(r.status, MatchStatus::ToCut);
         assert_eq!(r.matched_line, None);
+        assert!(!r.cross_day);
+    }
+
+    #[test]
+    fn yesterdays_hour_regrab_is_written_again_today() {
+        let doc = "=====1028=====\n(19)合成抓節次1800 SOT 18:20:00\n抓節次標題\n=====1029=====\n";
+        let d = day_sections(doc, "1029", "1028");
+        let r = match_in_days(q("合成抓節次1800", "抓節次標題"), &d, doc, &refresh(), Some(&strip()));
+        assert_eq!(r.status, MatchStatus::ToCut);
         assert!(!r.cross_day);
     }
 

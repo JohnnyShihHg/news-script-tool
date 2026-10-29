@@ -1475,7 +1475,7 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <div class="muted">直進實際播多久要看現場，依 0:00 推算會把後面的稿提前判成已播出；直進拉長被抽掉的稿就會多寫進文件。延遲補掃不受影響。</div>
             <div class="field"><label>播出日分界（HH:MM，這個時間之前播出的稿算前一天）</label><input type="text" data-cfg="inews.broadcast_day_start" value="${escapeHtml(inewsSettings.broadcast_day_start ?? "02:00")}" /></div>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_date_header" ${inewsSettings.auto_date_header !== false ? "checked" : ""} /> 協作文件還沒有今天的日期分隔線時，第一次寫入前自動補上</label>
-            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.cross_day_title_match" ${inewsSettings.cross_day_title_match !== false ? "checked" : ""} /> 前一天段落裡 slug 和標題都相同、而且 slug 前有處理標記（00、UP、(X/…)）的才算重播；沒標記或 (抓新) 照樣寫（不勾 = 完全不看前一天）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.cross_day_title_match" ${inewsSettings.cross_day_title_match !== false ? "checked" : ""} /> 前一天段落裡 slug 和標題都相同、而且 slug 前有處理標記（00、UP、(X/…)）的才算重播；沒標記、(抓新) 或括號裡有 1～2 位數字的 (19)、(X/19) 照樣寫（不勾 = 完全不看前一天）</label>
             <div class="muted">比對協作文件（包含手動匯入的比對）只看今天的日期段落（<code>==========MMDD==========</code> 到下一條日期分隔線）：同一天內重播照舊算已上傳。slug 會跨天重複使用（例：每天的 <code>季瑩氣象2100</code>），所以前一天的段落要標題也相同、而且 slug 前有處理標記才算重複（前一天沒標記＝還沒處理，今天照寫）；標題比對會忽略空白、標點、<code>最新》</code>／<code>獨家》</code> 和 <code>(勿上網)</code> 這類標記。文件裡完全沒有日期分隔線時退回比對整份，並提醒你。</div>
             <div class="field">
               <label>決策紀錄（每次同步選了哪一節、範圍、納入／排除，保留 14 天）</label>
