@@ -311,11 +311,17 @@ pub fn slug_timecode(slug: &str) -> Option<String> {
     (hh <= 24 && mm <= 59 && !caps[1].trim().is_empty()).then(|| digits.to_string())
 }
 
+/// 每個詞可以寫成 `詞=樣式`（`推稿標=推播`）：比中「詞」、判成「樣式」。沒有 `=` 就是詞本身。
 fn style_term_in(text: &str, cfg: &FilterConfig) -> Option<String> {
-    cfg.slug_style_terms
-        .iter()
-        .find(|t| !t.trim().is_empty() && fold(text).contains(&fold(t)))
-        .map(|t| t.trim().to_string())
+    cfg.slug_style_terms.iter().find_map(|entry| {
+        let entry = entry.replace('＝', "=");
+        let (term, style) = match entry.split_once('=') {
+            Some((term, style)) if !style.trim().is_empty() => (term.trim(), style.trim()),
+            Some((term, _)) => (term.trim(), term.trim()),
+            None => (entry.trim(), entry.trim()),
+        };
+        (!term.is_empty() && fold(text).contains(&fold(term))).then(|| style.to_string())
+    })
 }
 
 /// 編輯備註 contains one of the terms that filter a story out regardless of style.
@@ -390,6 +396,21 @@ mod slug_style_tests {
         ] {
             assert_eq!(style_from_slug(slug, &f()).as_deref(), Some("推播"), "missed {slug}");
         }
+    }
+
+    #[test]
+    fn a_push_script_slug_yields_the_push_style() {
+        for slug in ["欣怡推稿標", "禕呈14推稿標", "推稿標生活"] {
+            assert_eq!(style_from_slug(slug, &f()).as_deref(), Some("推播"), "missed {slug}");
+        }
+    }
+
+    #[test]
+    fn an_aliased_term_with_a_blank_style_falls_back_to_the_term() {
+        let mut cfg = f();
+        cfg.slug_style_terms = vec!["推播=".into(), "＝SL".into()];
+        assert_eq!(style_from_slug("心喻14推播", &cfg).as_deref(), Some("推播"));
+        assert_eq!(style_from_slug("含冰排吃冰1800", &cfg), None);
     }
 
     #[test]

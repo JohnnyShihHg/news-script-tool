@@ -93,7 +93,7 @@ fn default_blocked_note_terms() -> Vec<String> {
 
 fn default_slug_style_terms() -> Vec<String> {
     // SLIVE before SL: the first match wins, and every SLIVE slug also contains SL.
-    vec!["推播".into(), "SLIVE".into(), "SL".into(), "連線".into()]
+    vec!["推播".into(), "推稿標=推播".into(), "SLIVE".into(), "SL".into(), "連線".into()]
 }
 
 /// The fallback shipped before v0.2.4, which only knew plain `[BAR]`.
@@ -486,7 +486,7 @@ impl Default for InewsConfig {
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 9;
+pub const CURRENT_CONFIG_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -584,6 +584,8 @@ pub fn migrate(cfg: &mut Config) -> bool {
         cfg.inews.slot_spans.entry("2000".into()).or_insert_with(|| "2200".into());
     }
 
+    // v10 (v0.3.8): slug_style_terms 加了 `推稿標=推播`（上面 union 補進去）。
+
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
 }
@@ -670,7 +672,10 @@ theme = "warm"
         // field without its own default would make every existing config.toml fail
         // to parse — the app would come up with factory settings.
         let cfg = load_from_str(legacy_toml()).unwrap();
-        assert_eq!(cfg.filter.slug_style_terms, vec!["推播".to_string(), "SLIVE".to_string(), "SL".to_string(), "連線".to_string()]);
+        assert_eq!(
+            cfg.filter.slug_style_terms,
+            vec!["推播".to_string(), "推稿標=推播".to_string(), "SLIVE".to_string(), "SL".to_string(), "連線".to_string()]
+        );
         assert_eq!(cfg.filter.blocked_note_terms, vec!["預告".to_string()]);
     }
 

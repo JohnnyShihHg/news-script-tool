@@ -1545,7 +1545,7 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             </div>
             <div class="muted">氣象稿（只有 [BAR]）、部分 LIVE 稿（只有 [BAR_最新]）這類沒有 [BAR_..大] 的稿件會用這個標記，取第一張字卡的標題。只在上面的標記整份稿子都找不到時才啟用，不會搶在正常標記前面。</div>
             ${styleField("樣式空白時改看 slug slug_style_terms", "filter.slug_style_terms", config.filter.slug_style_terms)}
-            <div class="muted">有些稿件不填「樣式」，直接把類型寫在新聞名稱裡（例：心喻14推播）。樣式欄真的空白時才會用這裡的詞去比對 slug，比中就當成該樣式處理並在該則標上提醒；樣式欄有填就一律以樣式欄為準。同樣只比對完整詞。</div>
+            <div class="muted">有些稿件不填「樣式」，直接把類型寫在新聞名稱裡（例：心喻14推播）。樣式欄真的空白時才會用這裡的詞去比對 slug，比中就當成該樣式處理並在該則標上提醒；樣式欄有填就一律以樣式欄為準。也可以寫成「詞=樣式」，例如「推稿標=推播」：slug 含推稿標就當推播。同樣只比對完整詞。</div>
             ${styleField("樣式空白時看影像編號尾碼 video_id_styles（尾碼=樣式）", "filter.video_id_styles", config.filter.video_id_styles)}
             <div class="muted">樣式空白、slug 也判斷不出來時，看影像編號最後一段（例：20261023-585-X5 的 X5）。格式「尾碼=樣式」，例：X5=SL。</div>
             ${styleField("slug 以這些字開頭就一律通過 force_pass_slug_prefixes", "filter.force_pass_slug_prefixes", config.filter.force_pass_slug_prefixes ?? ["專"])}
