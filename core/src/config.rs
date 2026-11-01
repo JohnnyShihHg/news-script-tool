@@ -462,6 +462,10 @@ pub struct InewsConfig {
     pub correct_time: bool,
     /// 同一個新時間連續幾輪都一樣才改，避免排播調整到一半來回改。
     pub correct_time_stable_rounds: u32,
+    /// 新舊時間差超過幾分鐘就不改（v0.3.10）。校正通常只差幾分鐘；編輯把播過的稿
+    /// 直接挪到後面重播（17:43 播完拖到 19:05），時間會差幾十分鐘，那行是上一次的播出
+    /// 紀錄，不能改。
+    pub correct_time_max_delta_minutes: u32,
 }
 
 impl Default for InewsConfig {
@@ -496,13 +500,14 @@ impl Default for InewsConfig {
             program_divider_format: "==== {hh} {name} ====".into(),
             correct_time: true,
             correct_time_stable_rounds: 2,
+            correct_time_max_delta_minutes: 10,
         }
     }
 }
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 11;
+pub const CURRENT_CONFIG_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -604,6 +609,7 @@ pub fn migrate(cfg: &mut Config) -> bool {
     // v10 (v0.3.8): slug_style_terms 加了 `推稿標=推播`（上面 union 補進去）。
     // v11 (v0.3.9): [inews] 加 correct_time / correct_time_stable_rounds，serde 預設補上；
     // filter.blank_style_body_pass_terms（氣象）上面 union 補進去。
+    // v12 (v0.3.10): [inews] 加 correct_time_max_delta_minutes，serde 預設補上。
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -945,6 +951,7 @@ theme = "warm"
         assert_eq!(cfg.inews.server, "10.3.125.2");
         assert!(cfg.filter.slug_style_terms.iter().any(|t| t == "自訂詞"));
         assert_eq!(cfg.filter.blank_style_body_pass_terms, vec!["氣象".to_string()]);
+        assert_eq!(cfg.inews.correct_time_max_delta_minutes, 10);
     }
 
 }

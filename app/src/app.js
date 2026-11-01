@@ -1411,6 +1411,17 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
         </div>
         <div class="modal-body">
           <section class="settings-section">
+            <h3>版本與更新</h3>
+            <div class="field">
+              <div class="keywords-row">
+                <button id="checkUpdateBtn" type="button">檢查更新</button>
+                <span id="versionLabel" class="muted"></span>
+              </div>
+              <div id="updateStatus" class="muted"></div>
+            </div>
+          </section>
+
+          <section class="settings-section">
             <h3>Gemini API Key</h3>
             <div class="field">
               <label>
@@ -1505,7 +1516,8 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_write" ${inewsSettings.auto_write ? "checked" : ""} /> 全自動寫入協作文件（不勾 = 產生關鍵字後等你按「確認寫入」）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.correct_time" ${inewsSettings.correct_time !== false ? "checked" : ""} /> 時間校正：協作文件裡已寫入的稿，時間跟著 rundown 改</label>
             <div class="field"><label>時間校正：同一個新時間連續幾輪都一樣才改</label><input type="number" min="1" data-cfg-num="inews.correct_time_stable_rounds" value="${inewsSettings.correct_time_stable_rounds ?? 2}" /></div>
-            <div class="muted">自動刷新每一輪對目前節次（和還沒補掃完的上一節）已播出的稿，在今天的日期段落找同一個 slug、時間落在該節範圍內的行，rundown 時間不同就只改時間那幾個字，前綴、樣式、組別和格式都不動。範圍外的同 slug 行是其他節次的播出紀錄，不改；(抓新)、(19) 這類行不改；同一節有多則同 slug 時依時間先後配對，數量對不上就不改。每次修改和略過都寫進決策紀錄（[校正]、[校正略過]）。</div>
+            <div class="field"><label>時間校正：新舊時間差超過幾分鐘就不改（疑似挪稿重播）</label><input type="number" min="1" data-cfg-num="inews.correct_time_max_delta_minutes" value="${inewsSettings.correct_time_max_delta_minutes ?? 10}" /></div>
+            <div class="muted">自動刷新每一輪對目前節次（和還沒補掃完的上一節）已播出的稿，在今天的日期段落找同一個 slug、時間落在該節範圍內的行，rundown 時間不同就只改時間那幾個字，前綴、樣式、組別和格式都不動。範圍外的同 slug 行是其他節次的播出紀錄，不改；(抓新)、(19) 這類行不改；同一節有多則同 slug 時依時間先後配對，數量對不上就不改。編輯把播過的稿直接挪到後面重播時，rundown 時間會差很多：新舊時間差超過上面的分鐘數就不改，保留原本那次的播出紀錄。每次修改和略過都寫進決策紀錄（[校正]、[校正略過]）。</div>
             <div class="field"><label>節次分隔線格式（{hh} = 小時，{show} = 節次）</label><input type="text" data-cfg="inews.divider_format" value="${escapeHtml(inewsSettings.divider_format)}" /></div>
             <div class="field">
               <label>分隔線位置</label>
@@ -1513,17 +1525,6 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
                 <option value="after" ${inewsSettings.divider_position === "after" ? "selected" : ""}>節次結束後（標剛播完那節）</option>
                 <option value="before" ${inewsSettings.divider_position === "before" ? "selected" : ""}>節次開始前（標新的這一節）</option>
               </select>
-            </div>
-          </section>
-
-          <section class="settings-section">
-            <h3>版本與更新</h3>
-            <div class="field">
-              <div class="keywords-row">
-                <button id="checkUpdateBtn" type="button">檢查更新</button>
-                <span id="versionLabel" class="muted"></span>
-              </div>
-              <div id="updateStatus" class="muted"></div>
             </div>
           </section>
 

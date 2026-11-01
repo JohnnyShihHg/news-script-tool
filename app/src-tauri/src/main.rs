@@ -1122,7 +1122,7 @@ async fn correct_collab_times(
     let plan = if rows.is_empty() {
         Default::default()
     } else {
-        plan_time_corrections(&scrape_collab_text(&app, &state).await?, &today, &rows, &cfg.markers.refresh_keywords)
+        plan_time_corrections(&scrape_collab_text(&app, &state).await?, &today, &rows, &cfg.markers.refresh_keywords, cfg.inews.correct_time_max_delta_minutes)
     };
     let log_dir = inews_log_dir();
     let log = |line: String| {

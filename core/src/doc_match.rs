@@ -1083,7 +1083,15 @@ struct Candidate<'a> {
 /// - 同一節同一個 slug：範圍內的行（不含抓新行）和 rundown 的列各自依時間排序後一對一
 ///   配對，數量不同就不改。時間一樣的不列出來。
 /// - 範圍外的行是別節的播出紀錄，不改也不參與配對。
-pub fn plan_time_corrections(doc_text: &str, today: &str, rows: &[TimeRow], refresh_keywords: &[String]) -> TimePlan {
+/// - 新舊時間差超過 `max_delta_minutes` 不改：編輯把播過的稿直接挪到後面重播，rundown
+///   上那一列的時間會跳很多，文件那行是上一次的播出紀錄（v0.3.10）。
+pub fn plan_time_corrections(
+    doc_text: &str,
+    today: &str,
+    rows: &[TimeRow],
+    refresh_keywords: &[String],
+    max_delta_minutes: u32,
+) -> TimePlan {
     let mut plan = TimePlan::default();
     let mut inside = false;
     let mut found = false;
@@ -1178,7 +1186,17 @@ pub fn plan_time_corrections(doc_text: &str, today: &str, rows: &[TimeRow], refr
         candidates.sort_by_key(|c| axis(c.spot.secs));
 
         for (ordinal, (c, new_secs)) in candidates.iter().zip(times).enumerate() {
-            if axis(c.spot.secs) == new_secs {
+            let delta = (new_secs - axis(c.spot.secs)).abs();
+            if delta == 0 {
+                continue;
+            }
+            if delta > max_delta_minutes as i64 * 60 {
+                plan.skips.push(format!(
+                    "{slug}：{} → {} 差 {} 分鐘，超過上限 {max_delta_minutes} 分鐘，疑似挪稿重播，不改",
+                    crate::inews::format_clock(c.spot.secs),
+                    crate::inews::format_clock(new_secs),
+                    (delta + 59) / 60
+                ));
                 continue;
             }
             let chars: Vec<char> = c.text.chars().collect();
@@ -1253,7 +1271,7 @@ mod time_tests {
     }
 
     fn fix(body: &str, rows: &[TimeRow]) -> TimePlan {
-        plan_time_corrections(&doc(body), "1101", rows, &refresh())
+        plan_time_corrections(&doc(body), "1101", rows, &refresh(), 10)
     }
 
     fn changes(p: &TimePlan) -> Vec<(String, String)> {
@@ -1310,8 +1328,19 @@ mod time_tests {
 
     #[test]
     fn the_range_is_not_limited_to_the_hour() {
-        let p = fix("合成晚段1800 SOT 18:50:00", &[row("合成晚段1800", "19:10:00")]);
-        assert_eq!(changes(&p), vec![("18:50:00".into(), "19:10:00".into())]);
+        let p = fix("合成晚段1800 SOT 18:56:00", &[row("合成晚段1800", "19:03:00")]);
+        assert_eq!(changes(&p), vec![("18:56:00".into(), "19:03:00".into())]);
+    }
+
+    #[test]
+    fn a_story_moved_to_air_again_keeps_its_first_airing() {
+        // 17:45 播完，編輯直接把同一列拖到 19:05 再播：文件那行是 17:45 那次的紀錄。
+        let p = fix("合成挪稿1800 SOT 17:45:00", &[row("合成挪稿1800", "19:05:00")]);
+        assert!(p.corrections.is_empty());
+        assert!(p.skips[0].contains("差 80 分鐘，超過上限 10 分鐘"), "{:?}", p.skips);
+        // 剛好 10 分鐘還算校正。
+        let p = fix("合成挪稿1800 SOT 18:00:00", &[row("合成挪稿1800", "18:10:00")]);
+        assert_eq!(p.corrections.len(), 1);
     }
 
     #[test]
@@ -1333,7 +1362,7 @@ mod time_tests {
 
     #[test]
     fn no_today_divider_means_no_corrections() {
-        let p = plan_time_corrections("========1031========\n合成掃街1800 SOT 18:05:52", "1101", &[row("合成掃街1800", "18:01:51")], &refresh());
+        let p = plan_time_corrections("========1031========\n合成掃街1800 SOT 18:05:52", "1101", &[row("合成掃街1800", "18:01:51")], &refresh(), 10);
         assert!(p.corrections.is_empty());
     }
 
@@ -1393,8 +1422,8 @@ mod time_tests {
         assert_eq!(changes(&p), vec![("9:05:00".into(), "9:01:00".into())]);
         r.time = "10:01:00".into();
         r.end = 11 * 3600;
-        let p = fix("合成早1800 SOT 9:05:00", &[r]);
-        assert_eq!(changes(&p), vec![("9:05:00".into(), "10:01:00".into())]);
+        let p = fix("合成早1800 SOT 9:58:00", &[r]);
+        assert_eq!(changes(&p), vec![("9:58:00".into(), "10:01:00".into())]);
     }
 
     #[test]
