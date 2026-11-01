@@ -213,6 +213,12 @@
           "markdownDescription": "Enables the compare_with_collab_doc command without any pre-configured scope."
         },
         {
+          "description": "Enables the correct_collab_times command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-correct-collab-times",
+          "markdownDescription": "Enables the correct_collab_times command without any pre-configured scope."
+        },
+        {
           "description": "Enables the diagnose_collab_bridge command without any pre-configured scope.",
           "type": "string",
           "const": "allow-diagnose-collab-bridge",
@@ -385,6 +391,12 @@
           "type": "string",
           "const": "deny-compare-with-collab-doc",
           "markdownDescription": "Denies the compare_with_collab_doc command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the correct_collab_times command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-correct-collab-times",
+          "markdownDescription": "Denies the correct_collab_times command without any pre-configured scope."
         },
         {
           "description": "Denies the diagnose_collab_bridge command without any pre-configured scope.",

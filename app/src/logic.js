@@ -551,6 +551,10 @@
    * since its script changed under whatever was generated for it. A story gone from
    * the fresh set is dropped, except one from an earlier show still waiting to be
    * written: switching show must not silently lose it.
+   *
+   * The 累積時間 moves without the version changing when the rundown is retimed. A
+   * kept card not yet written takes the fresh time, so it is written with the latest
+   * one; a written one is left alone -- the doc line is fixed by 時間校正 (v0.3.9).
    */
   function mergeInewsItems(previous, fresh, writtenKeys) {
     const prevById = new Map((previous ?? []).filter((p) => p.inews).map((p) => [p.id, p]));
@@ -558,7 +562,12 @@
     const freshShows = new Set(fresh.filter((f) => f.inews).map((f) => f.inews.show));
     const merged = fresh.map((f) => {
       const p = prevById.get(f.id);
-      return p && f.inews && p.inews.version === f.inews.version ? p : f;
+      if (!(p && f.inews && p.inews.version === f.inews.version)) return f;
+      if (p.time !== f.time && !writtenKeys?.has(writtenKey(p))) {
+        p.time = f.time;
+        p.dto = f.dto;
+      }
+      return p;
     });
     const carried = (previous ?? []).filter(
       (p) => p.inews && !freshIds.has(p.id) && !freshShows.has(p.inews.show) && isPendingWrite(p, writtenKeys)

@@ -448,6 +448,10 @@ pub struct InewsConfig {
     pub programs: BTreeMap<String, String>,
     /// 節目分隔線，`{hh}` = 節次小時，`{name}` = 節目名稱。
     pub program_divider_format: String,
+    /// 時間校正（v0.3.9）：協作文件裡已寫入的稿，時間跟著 rundown 改。
+    pub correct_time: bool,
+    /// 同一個新時間連續幾輪都一樣才改，避免排播調整到一半來回改。
+    pub correct_time_stable_rounds: u32,
 }
 
 impl Default for InewsConfig {
@@ -480,13 +484,15 @@ impl Default for InewsConfig {
             off_air_on_empty: true,
             programs: [("關鍵KS".to_string(), "關鍵時刻".to_string())].into_iter().collect(),
             program_divider_format: "==== {hh} {name} ====".into(),
+            correct_time: true,
+            correct_time_stable_rounds: 2,
         }
     }
 }
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 10;
+pub const CURRENT_CONFIG_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -585,6 +591,7 @@ pub fn migrate(cfg: &mut Config) -> bool {
     }
 
     // v10 (v0.3.8): slug_style_terms 加了 `推稿標=推播`（上面 union 補進去）。
+    // v11 (v0.3.9): [inews] 加 correct_time / correct_time_stable_rounds，serde 預設補上。
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -901,6 +908,30 @@ theme = "warm"
         }
         assert_eq!(cfg.inews.poll_seconds, 20);
         assert_eq!(cfg.filter.blocked_styles.iter().filter(|s| *s == "BS").count(), 1);
+    }
+
+    #[test]
+    fn a_version_10_config_gains_time_correction_and_keeps_its_settings() {
+        let mut old = Config::default();
+        old.config_version = 10;
+        old.inews.poll_seconds = 30;
+        old.inews.server = "10.3.125.2".into();
+        old.filter.slug_style_terms.push("自訂詞".into());
+        let s: String = toml::to_string_pretty(&old)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with("correct_time"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut cfg = load_from_str(&s).unwrap();
+        assert!(cfg.inews.correct_time);
+        assert_eq!(cfg.inews.correct_time_stable_rounds, 2);
+        assert!(migrate(&mut cfg));
+        assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(cfg.inews.poll_seconds, 30);
+        assert_eq!(cfg.inews.server, "10.3.125.2");
+        assert!(cfg.filter.slug_style_terms.iter().any(|t| t == "自訂詞"));
     }
 
 }

@@ -29,6 +29,16 @@ struct AppState {
     inews: std::sync::Arc<Mutex<inews::InewsState>>,
     /// 比對寫進決策紀錄的上一份內容：一樣就不重複寫（自動刷新每分鐘都會比對）。
     last_compare_log: Mutex<String>,
+    /// 時間校正跨輪要記得的東西（連續幾輪同一個新時間、已經記過的略過原因）。
+    time_fix: Mutex<TimeFixState>,
+}
+
+#[derive(Default)]
+struct TimeFixState {
+    seen: news_script_core::doc_match::TimeStreaks,
+    /// 今天已經寫進決策紀錄的 `[校正略過]`，同一個原因只記一次。
+    logged: std::collections::HashSet<String>,
+    day: String,
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -1021,6 +1031,143 @@ async fn append_to_collab_doc(
     r
 }
 
+/// 把協作文件裡幾行的時間換掉（v0.3.9）。每一行先重新定位：第 `line` 行的內容必須
+/// 跟讀文件時完全相同、舊時間還在原位，才只把那幾個字換掉（保留行內格式和該行的
+/// 標題格式），source 用 `"user"` 讓 Yjs 同步給其他人。對不上就放棄那一行。
+fn build_correct_script(fixes: &[news_script_core::doc_match::TimeCorrection]) -> String {
+    let payload = serde_json::to_string(fixes).unwrap_or_else(|_| "[]".into());
+    format!(
+        r#"
+    (function() {{
+      function send(payload) {{
+        if (!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)) return;
+        window.__TAURI__.core.invoke('receive_scraped_text', {{ text: payload }})
+          .catch(function(e) {{ console.error('[news-script-tool] reply failed', e); }});
+      }}
+      try {{
+        if (typeof Quill === 'undefined' || !Quill.find) {{
+          send({{ Err: '協作工具頁面上找不到 Quill，無法校正時間。' }});
+          return;
+        }}
+        var container = document.querySelector('#editor');
+        if (!container) {{ send({{ Err: '找不到編輯器容器 #editor。' }}); return; }}
+        var q = Quill.find(container);
+        if (!q || typeof q.updateContents !== 'function') {{
+          send({{ Err: '取不到 Quill 編輯器實例，無法校正時間。' }});
+          return;
+        }}
+        var Delta = Quill.import('delta');
+        var fixes = {payload};
+        var results = fixes.map(function (f) {{
+          try {{
+            var line = q.getLines()[f.line];
+            if (!line) return {{ ok: false, reason: '文件沒有第 ' + (f.line + 1) + ' 行了' }};
+            var start = q.getIndex(line);
+            var text = q.getText(start, Math.max(0, line.length() - 1));
+            if (text !== f.line_text) return {{ ok: false, reason: '該行內容已變動：' + text }};
+            if (text.substr(f.offset, f.old_time.length) !== f.old_time) return {{ ok: false, reason: '舊時間不在原位' }};
+            var at = start + f.offset;
+            var ops = q.getContents(at, f.old_time.length).ops;
+            var attrs = (ops[0] && ops[0].attributes) || {{}};
+            q.updateContents(new Delta().retain(at).delete(f.old_time.length).insert(f.new_time, attrs), 'user');
+            var expected = text.slice(0, f.offset) + f.new_time + text.slice(f.offset + f.old_time.length);
+            if (q.getText(start, expected.length) !== expected) return {{ ok: false, reason: '改完後內容跟預期不同' }};
+            return {{ ok: true }};
+          }} catch (e) {{
+            return {{ ok: false, reason: String(e) }};
+          }}
+        }});
+        send({{ Ok: JSON.stringify(results) }});
+      }} catch (e) {{
+        send({{ Err: String(e) }});
+      }}
+    }})();
+    "#
+    )
+}
+
+#[derive(Deserialize)]
+struct CorrectReply {
+    ok: bool,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Serialize, Default)]
+struct CorrectDto {
+    /// `slug 舊 → 新`，這一輪改好的。
+    corrected: Vec<String>,
+    /// 要改但改的時候內容不符，下一輪重判。
+    failed: Vec<String>,
+    /// 新時間還沒連續出現夠多輪，先等。
+    waiting: usize,
+}
+
+/// 時間校正（v0.3.9）：rundown 已播出的列（`InewsMeta::time_rows`）對今天段落，時間
+/// 不同、而且同一個新時間連續 `correct_time_stable_rounds` 輪都一樣的行就改掉。
+#[tauri::command]
+async fn correct_collab_times(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    rows: Vec<news_script_core::doc_match::TimeRow>,
+) -> Result<CorrectDto, String> {
+    use news_script_core::doc_match::{plan_time_corrections, stable_corrections, streak_key};
+    require_main_window(&window)?;
+    let cfg = state.config.lock().unwrap().clone();
+    if !cfg.inews.correct_time {
+        return Ok(CorrectDto::default());
+    }
+    let (today, _) = inews::broadcast_days(inews::taipei_now(), &cfg.inews.broadcast_day_start);
+    let plan = if rows.is_empty() {
+        Default::default()
+    } else {
+        plan_time_corrections(&scrape_collab_text(&app, &state).await?, &today, &rows, &cfg.markers.refresh_keywords)
+    };
+    let log_dir = inews_log_dir();
+    let log = |line: String| {
+        if let Some(dir) = &log_dir {
+            inews::append_log(dir, &line);
+        }
+    };
+
+    let (ready, waiting) = {
+        let mut fix = state.time_fix.lock().unwrap();
+        if fix.day != today {
+            fix.day = today.clone();
+            fix.logged.clear();
+        }
+        let r = stable_corrections(&mut fix.seen, &plan.corrections, cfg.inews.correct_time_stable_rounds);
+        for s in &plan.skips {
+            if fix.logged.insert(s.clone()) {
+                log(format!("[校正略過] {s}"));
+            }
+        }
+        r
+    };
+
+    let mut dto = CorrectDto { waiting, ..Default::default() };
+    if ready.is_empty() {
+        return Ok(dto);
+    }
+    let reply = eval_in_collab_and_wait(&app, &state, &build_correct_script(&ready)).await?;
+    let results: Vec<CorrectReply> = serde_json::from_str(&reply).map_err(|e| format!("校正結果無法解讀：{e}"))?;
+    let mut fix = state.time_fix.lock().unwrap();
+    for (c, r) in ready.iter().zip(results) {
+        let what = format!("{} {} → {}", c.slug, c.old_time, c.new_time);
+        if r.ok {
+            log(format!("[校正] {what}"));
+            fix.seen.remove(&streak_key(c));
+            dto.corrected.push(what);
+        } else {
+            let reason = r.reason.unwrap_or_default();
+            log(format!("[校正略過] {}：內容不符，下一輪重新判斷（{what}；{reason}）", c.slug));
+            dto.failed.push(format!("{what}（{reason}）"));
+        }
+    }
+    Ok(dto)
+}
+
 #[derive(Deserialize)]
 struct CompareEntry {
     slug: String,
@@ -1229,6 +1376,7 @@ fn main() {
             scrape_reply: Mutex::new(None),
             inews: Default::default(),
             last_compare_log: Mutex::new(String::new()),
+            time_fix: Default::default(),
         })
         .invoke_handler(tauri::generate_handler![
             import_folder,
@@ -1259,7 +1407,8 @@ fn main() {
             get_inews_credential_status,
             set_inews_credentials,
             clear_inews_credentials,
-            open_inews_log_folder
+            open_inews_log_folder,
+            correct_collab_times
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

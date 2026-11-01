@@ -38,6 +38,7 @@ fn main() {
             "set_inews_credentials",
             "clear_inews_credentials",
             "open_inews_log_folder",
+            "correct_collab_times",
         ])),
     )
     .expect("failed to run tauri-build");

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-correct-collab-times"
+description = "Enables the correct_collab_times command without any pre-configured scope."
+commands.allow = ["correct_collab_times"]
+
+[[permission]]
+identifier = "deny-correct-collab-times"
+description = "Denies the correct_collab_times command without any pre-configured scope."
+commands.deny = ["correct_collab_times"]

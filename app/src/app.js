@@ -809,6 +809,7 @@ async function writeBackToCollab() {
 
 let inewsCfg = {
   poll_seconds: 10,
+  correct_time: true,
   auto_write: false,
   divider_format: "==== {hh} ====",
   divider_position: "after",
@@ -941,12 +942,30 @@ async function inewsRound() {
       meta.warnings?.length ? "warn" : ""
     );
 
+    // 時間校正不等關鍵字、節次暫存或分隔線：已經在文件裡的稿每一輪都對一次。
+    if (inewsCfg.correct_time !== false) await correctCollabTimes(meta.time_rows ?? []);
+
     const pending = items.some((i) => isPendingWrite(i, writtenKeys));
     if (added.length || changed.length || pending || meta.closed_show || dividerOwed()) await runInewsPipeline();
   } finally {
     inewsRoundActive = false;
     inewsBusy = false;
     if (renderDeferred && !isTypingInList()) render();
+  }
+}
+
+/// 時間校正（v0.3.9）。失敗只顯示，不停自動刷新：寫入前的比對會自己擋。
+async function correctCollabTimes(rows) {
+  const node = el("inewsStatus");
+  try {
+    const r = await invoke("correct_collab_times", { rows });
+    const lines = [];
+    if (r.corrected.length) lines.push(`✏ 時間校正 ${r.corrected.length} 則：${r.corrected.join("、")}`);
+    if (r.failed.length) lines.push(`⚠ 時間校正 ${r.failed.length} 則內容不符，下一輪重新判斷：${r.failed.join("、")}`);
+    if (r.waiting) lines.push(`⏳ ${r.waiting} 則時間有變，等下一輪確認後再改`);
+    if (lines.length) node.textContent += `\n${lines.join("\n")}`;
+  } catch (err) {
+    node.textContent += `\n⚠ 時間校正失敗（下一輪會再試）：${err}`;
   }
 }
 
@@ -1484,6 +1503,9 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.include_floated" ${inewsSettings.include_floated ? "checked" : ""} /> 也匯入 float 列（版型、框、SOU 這類 iNEWS 上 float 的稿）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.fill_computed_time" ${inewsSettings.fill_computed_time ? "checked" : ""} /> 累積時間空白時填入自動算出的時間（關掉就跟手動匯出完全相同）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_write" ${inewsSettings.auto_write ? "checked" : ""} /> 全自動寫入協作文件（不勾 = 產生關鍵字後等你按「確認寫入」）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.correct_time" ${inewsSettings.correct_time !== false ? "checked" : ""} /> 時間校正：協作文件裡已寫入的稿，時間跟著 rundown 改</label>
+            <div class="field"><label>時間校正：同一個新時間連續幾輪都一樣才改</label><input type="number" min="1" data-cfg-num="inews.correct_time_stable_rounds" value="${inewsSettings.correct_time_stable_rounds ?? 2}" /></div>
+            <div class="muted">自動刷新每一輪對目前節次（和還沒補掃完的上一節）已播出的稿，在今天的日期段落找同一個 slug、時間落在該節範圍內的行，rundown 時間不同就只改時間那幾個字，前綴、樣式、組別和格式都不動。範圍外的同 slug 行是其他節次的播出紀錄，不改；(抓新)、(19) 這類行不改；同一節有多則同 slug 時依時間先後配對，數量對不上就不改。每次修改和略過都寫進決策紀錄（[校正]、[校正略過]）。</div>
             <div class="field"><label>節次分隔線格式（{hh} = 小時，{show} = 節次）</label><input type="text" data-cfg="inews.divider_format" value="${escapeHtml(inewsSettings.divider_format)}" /></div>
             <div class="field">
               <label>分隔線位置</label>
