@@ -14,6 +14,7 @@ use news_script_core::config::InewsConfig;
 use news_script_core::doc_match::TimeRow;
 use news_script_core::inews::{self, ListEntry, ListKind, NsmlStory, RundownRow};
 use news_script_core::parse;
+use news_script_core::rundown::{self, RundownDay, RundownStory};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -335,9 +336,18 @@ pub struct InewsMeta {
     pub time_rows: Vec<TimeRow>,
 }
 
+/// 這一輪讀到的一整節 rundown（剪輯工具的 `rundown\YYYYMMDD.json` 用）：不管有沒有
+/// 播出、有沒有被樣式濾掉，只排除廣告列和分隔列。
+pub struct ShowSnapshot {
+    pub show: String,
+    pub nominal: u32,
+    pub stories: Vec<RundownStory>,
+}
+
 pub struct FetchResult {
     pub files: Vec<(String, String)>,
     pub meta: InewsMeta,
+    pub rundown: Vec<ShowSnapshot>,
     /// 決策紀錄的這一行（不含時間戳）。
     pub log_line: String,
 }
@@ -673,6 +683,20 @@ impl InewsState {
             time_rows.extend(sel.rows.iter().filter_map(|&i| time_row(&rundowns, &cur, i, sel.cume[i])));
         }
 
+        // 目前節次與上一個有效節次整份存下來，停播節次不算。`plan_slots` 為了判斷有效節次
+        // 每一輪都會讀這兩節（包括剛打開自動刷新那一輪），所以不用另外讀、也不看補掃狀態。
+        let snapshot_of = |w: &inews::Window| -> Option<ShowSnapshot> {
+            let r = rundowns.get(&w.slot.show).filter(|_| !w.slot.off_air)?;
+            let stories = r.iter().filter_map(|(e, s)| rundown::story_record(e, s)).collect();
+            Some(ShowSnapshot { show: w.slot.show.clone(), nominal: w.slot.nominal, stories })
+        };
+        // 上一個有效節次會繞回前一天（一天的第一節的上一節是昨晚的最後一節，裡面是昨天的
+        // 殘留稿），所以只收同一個播出日、排在目前節次前面的。
+        let day_start = cfg.broadcast_day_start.as_str();
+        let same_day = |w: &&inews::Window| day_order(day_start, w.slot.nominal) < day_order(day_start, cur.slot.nominal);
+        let snapshots: Vec<ShowSnapshot> =
+            plan.previous.iter().filter(same_day).chain(std::iter::once(&cur)).filter_map(snapshot_of).collect();
+
         // 快取只留這一輪還看得到的稿件，換節後舊的就放掉。
         let kept: std::collections::HashSet<&String> = rundowns.values().flatten().map(|(e, _)| &e.name).collect();
         self.cache.retain(|name, _| kept.contains(name));
@@ -732,6 +756,7 @@ impl InewsState {
         Ok(FetchResult {
             files,
             log_line,
+            rundown: snapshots,
             meta: InewsMeta {
                 show_label: inews::show_hour_label(&cur.slot.show),
                 show: cur.slot.show.clone(),
@@ -849,6 +874,84 @@ fn prune_logs(dir: &std::path::Path, today: &str) {
         let Some(date) = name.strip_prefix("inews-").and_then(|n| n.strip_suffix(".log")) else { continue };
         if let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y%m%d") {
             if (today - d).num_days() >= LOG_KEEP_DAYS {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+// --- 剪輯工具用的 rundown 資料 -----------------------------------------------------------
+
+/// `rundown\YYYYMMDD.json` 保留天數。
+pub const RUNDOWN_KEEP_DAYS: i64 = 30;
+
+/// 播出日分界（`02:00`）；格式錯就當 00:00，跟 `broadcast_days` 一樣。
+fn day_offset(day_start: &str) -> chrono::Duration {
+    chrono::NaiveTime::parse_from_str(day_start.trim(), "%H:%M")
+        .map(|t| t.signed_duration_since(chrono::NaiveTime::MIN))
+        .unwrap_or_default()
+}
+
+/// 節次在播出日裡的先後（秒）：02:00 分界下 0100 排在 2300 後面。
+fn day_order(day_start: &str, nominal: u32) -> i64 {
+    (i64::from(nominal) - day_offset(day_start).num_seconds()).rem_euclid(86_400)
+}
+
+/// 一節屬於哪個播出日。節次的開始時間取離 `now` 最近的那一次（08:55 看 2400 是明天
+/// 00:00，02:05 看 0100 是今天 01:00），再扣掉播出日分界：0100 的稿算前一天。
+pub fn show_broadcast_date(now: chrono::NaiveDateTime, day_start: &str, nominal: u32) -> chrono::NaiveDate {
+    let offset = day_offset(day_start);
+    let start = chrono::Duration::seconds(i64::from(nominal));
+    let air = (-1..=1)
+        .map(|d| now.date().and_time(chrono::NaiveTime::MIN) + chrono::Duration::days(d) + start)
+        .min_by_key(|t| (*t - now).num_seconds().abs())
+        .unwrap_or(now);
+    (air - offset).date()
+}
+
+/// 把這一輪的每一節併進各自播出日的 `dir/YYYYMMDD.json`（暫存檔寫完再改名），順便刪掉
+/// 超過 30 天的。呼叫端只把錯誤寫成警告，不影響匯入。
+pub fn write_rundown(
+    dir: &std::path::Path,
+    now: chrono::NaiveDateTime,
+    day_start: &str,
+    snapshots: Vec<ShowSnapshot>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("建立資料夾失敗：{e}"))?;
+    let mut by_day: std::collections::BTreeMap<chrono::NaiveDate, Vec<ShowSnapshot>> = Default::default();
+    for s in snapshots {
+        by_day.entry(show_broadcast_date(now, day_start, s.nominal)).or_default().push(s);
+    }
+    for (date, shows) in by_day {
+        let path = dir.join(format!("{}.json", date.format("%Y%m%d")));
+        let mut day = match std::fs::read_to_string(&path) {
+            Ok(text) => RundownDay::from_json(&text).unwrap_or_else(|_| {
+                // 壞掉的檔案留成 .bad 再重寫，不要連同新資料一起蓋掉。
+                let _ = std::fs::rename(&path, path.with_extension("json.bad"));
+                RundownDay::default()
+            }),
+            Err(_) => RundownDay::default(),
+        };
+        day.date = date.format("%Y-%m-%d").to_string();
+        for s in shows {
+            day.merge(&s.show, s.stories);
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, day.to_json()).map_err(|e| format!("寫入 {} 失敗：{e}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("改名 {} 失敗：{e}", path.display()))?;
+    }
+    prune_rundown(dir, now.date());
+    Ok(())
+}
+
+/// 刪掉檔名日期比今天早 30 天以上的 `YYYYMMDD.json`。
+fn prune_rundown(dir: &std::path::Path, today: chrono::NaiveDate) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(date) = name.strip_suffix(".json") else { continue };
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y%m%d") {
+            if (today - d).num_days() >= RUNDOWN_KEEP_DAYS {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -1322,6 +1425,103 @@ mod tests {
         let r = state.fetch(&c, &creds("secret"), 8 * 3600 + 56 * 60, auto(true)).unwrap();
         assert_eq!(r.meta.switched_from, None);
         assert!(r.log_line.contains("上次停在 0700"), "{}", r.log_line);
+    }
+
+    fn slugs(s: &ShowSnapshot) -> Vec<&str> {
+        s.stories.iter().map(|r| r.slug.as_str()).collect()
+    }
+
+    #[test]
+    fn the_rundown_snapshot_keeps_every_story_of_the_show_except_commercials() {
+        let server = two_shows(None);
+        let mut state = InewsState::default();
+        // 08:20：預備稿（累積時間 ≥ 下一節開始）和 float 的框沒被匯入，但 JSON 要有；=CM 3== 不要。
+        let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 20 * 60, FetchMode::Manual).unwrap();
+        assert_eq!(r.rundown.len(), 1, "0800's wrap-around previous show (0900, yesterday's) is not today's data");
+        let s = &r.rundown[0];
+        assert_eq!((s.show.as_str(), s.nominal), ("0800", 28800));
+        assert_eq!(slugs(s), ["大片頭", "合成早安稿0800", "合成框", "合成第二則0800", "下節預告三", "合成預備稿0800"]);
+        let early = &s.stories[1];
+        assert_eq!((early.style.as_str(), early.id.as_str()), ("SOT", "0000000A:00000002"));
+        assert_eq!(early.bars, ["合成早安稿0800標題"]);
+        assert_eq!(r.files.len(), 4, "the collab doc input is unchanged");
+    }
+
+    #[test]
+    fn the_rundown_snapshot_has_the_old_show_at_a_switch_and_after_a_restart() {
+        let server = two_shows(None);
+        let c = cfg(server.port);
+        let auto = |start| FetchMode::Auto { session_start: start };
+        let mut state = InewsState::default();
+        state.fetch(&c, &creds("secret"), 8 * 3600 + 51 * 60, auto(true)).unwrap();
+        // 換節那一輪：新舊兩節都在。
+        let r = state.fetch(&c, &creds("secret"), 8 * 3600 + 55 * 60 + 30, auto(false)).unwrap();
+        let shows: Vec<&str> = r.rundown.iter().map(|s| s.show.as_str()).collect();
+        assert_eq!(shows, ["0800", "0900"]);
+        assert!(slugs(&r.rundown[0]).contains(&"合成預備稿0800"));
+
+        // 重開時沒有存檔：不會對 0800 做最後同步或補掃，但 JSON 還是帶著它。假伺服器一次只
+        // 服務一條連線，舊的狀態要先放掉。
+        state.drop_session();
+        let mut fresh = InewsState::default();
+        let r = fresh.fetch(&c, &creds("secret"), 8 * 3600 + 56 * 60, auto(true)).unwrap();
+        assert_eq!(r.meta.switched_from, None);
+        assert_eq!(r.meta.closed_show, None);
+        assert!(r.files.iter().all(|(_, t)| !t.contains("合成預備稿0800")));
+        let shows: Vec<&str> = r.rundown.iter().map(|s| s.show.as_str()).collect();
+        assert_eq!(shows, ["0800", "0900"]);
+        assert!(slugs(&r.rundown[0]).contains(&"合成預備稿0800"));
+    }
+
+    #[test]
+    fn a_show_belongs_to_the_broadcast_day_it_airs_in() {
+        let d = |m, day| chrono::NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        // 08:55 看 2400（00:00）：明天凌晨，但還在今天的播出日裡。
+        assert_eq!(show_broadcast_date(at(27, 23, 55), "02:00", 0), d(10, 27));
+        // 00:30 的 2400 屬於前一天；02:05 看 0100 也是前一天，看 0200 以後的節次才是當天。
+        assert_eq!(show_broadcast_date(at(27, 0, 30), "02:00", 0), d(10, 26));
+        assert_eq!(show_broadcast_date(at(27, 2, 5), "02:00", 3600), d(10, 26));
+        assert_eq!(show_broadcast_date(at(27, 2, 5), "02:00", 6 * 3600), d(10, 27));
+        // 00:05 還在補掃 2300：23:00 是前一個日曆日。
+        assert_eq!(show_broadcast_date(at(27, 0, 5), "02:00", 23 * 3600), d(10, 26));
+        assert_eq!(show_broadcast_date(at(27, 10, 0), "02:00", 9 * 3600), d(10, 27));
+        // 設定壞掉就當 00:00。
+        assert_eq!(show_broadcast_date(at(27, 1, 30), "兩點", 3600), d(10, 27));
+    }
+
+    fn snapshot(show: &str, nominal: u32, rows: &[(&str, &str)]) -> ShowSnapshot {
+        let stories = rows.iter().map(|(slug, updated)| RundownStory { slug: slug.to_string(), updated: updated.to_string(), ..Default::default() });
+        ShowSnapshot { show: show.into(), nominal, stories: stories.collect() }
+    }
+
+    #[test]
+    fn rundown_files_merge_each_round_and_old_ones_are_pruned_after_thirty_days() {
+        let dir = std::env::temp_dir().join(format!("nst-rundown-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for d in ["20260926", "20260927", "20261001"] {
+            std::fs::write(dir.join(format!("{d}.json")), "{}").unwrap();
+        }
+        std::fs::write(dir.join("notes.json"), "x").unwrap();
+
+        let now = at(27, 10, 5);
+        write_rundown(&dir, now, "02:00", vec![snapshot("1000", 36000, &[("甲", "a"), ("乙", "a")])]).unwrap();
+        write_rundown(&dir, now, "02:00", vec![snapshot("0900", 32400, &[("丙", "a")]), snapshot("1000", 36000, &[("乙", "b")])]).unwrap();
+
+        let day = RundownDay::from_json(&std::fs::read_to_string(dir.join("20261027.json")).unwrap()).unwrap();
+        assert_eq!(day.date, "2026-10-27");
+        let one = |show: &str| day.shows[show].iter().map(|s| (s.slug.as_str(), s.version)).collect::<Vec<_>>();
+        assert_eq!(one("1000"), [("甲", 1), ("乙", 2)], "unseen stories stay, a changed one counts a version");
+        assert_eq!(one("0900"), [("丙", 1)]);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        left.sort();
+        assert_eq!(left, ["20261001.json", "20261027.json", "notes.json"], "no temp file left, 30+ day old files pruned");
+
+        // 壞掉的檔案不會連同新資料一起被蓋掉。
+        std::fs::write(dir.join("20261027.json"), "{ broken").unwrap();
+        write_rundown(&dir, now, "02:00", vec![snapshot("1000", 36000, &[("丁", "a")])]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("20261027.json.bad")).unwrap(), "{ broken");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

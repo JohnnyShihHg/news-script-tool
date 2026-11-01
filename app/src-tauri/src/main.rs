@@ -243,6 +243,12 @@ fn inews_log_dir() -> Option<std::path::PathBuf> {
         .and_then(|d| d.config_dir().parent().map(|p| p.join("logs")))
 }
 
+/// 剪輯工具用的每節資料夾：`%APPDATA%\ebc\news-script-tool\rundown`，跟 `logs` 同一層。
+fn inews_rundown_dir() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("tw", "ebc", "news-script-tool")
+        .and_then(|d| d.config_dir().parent().map(|p| p.join("rundown")))
+}
+
 /// 從 iNEWS FTP 讀當節次的 rundown，把已播出、有效範圍內的稿件轉成跟手動「匯出
 /// 延伸文稿」相同的 txt，再走跟 `import_folder` 完全相同的流程。`auto` = 自動刷新
 /// 的一輪（會做換節最後同步與延遲補掃）；`session_start` = 剛打開自動刷新。
@@ -266,6 +272,7 @@ async fn import_inews(
     };
     let log_dir = inews_log_dir();
     let state_file = inews_state_file();
+    let rundown_dir = inews_rundown_dir();
     let (day, _) = inews::broadcast_days(inews::taipei_now(), &inews_cfg.broadcast_day_start);
     let fetched = tauri::async_runtime::spawn_blocking(move || {
         let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -279,7 +286,7 @@ async fn import_inews(
                 .filter(|s| s.day == day);
             st.set_resume(saved);
         }
-        let r = st.fetch(&inews_cfg, &creds, inews::taipei_seconds_of_day(), mode);
+        let mut r = st.fetch(&inews_cfg, &creds, inews::taipei_seconds_of_day(), mode);
         if let (Ok(_), inews::FetchMode::Auto { .. }, Some(f)) = (&r, mode, &state_file) {
             if let Ok(json) = serde_json::to_string(&st.saved(&day)) {
                 let _ = f.parent().map(std::fs::create_dir_all);
@@ -291,6 +298,19 @@ async fn import_inews(
             match &r {
                 Ok(f) => inews::append_log(dir, &format!("{tag} {}", f.log_line)),
                 Err(e) => inews::append_log(dir, &format!("{tag} 錯誤：{e}")),
+            }
+        }
+        // 剪輯工具用的 rundown JSON：寫不進去只留警告，不影響匯入。
+        if let Ok(f) = &mut r {
+            let snapshots = std::mem::take(&mut f.rundown);
+            let written = rundown_dir.as_ref().map(|dir| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    inews::write_rundown(dir, inews::taipei_now(), &inews_cfg.broadcast_day_start, snapshots)
+                }))
+                .unwrap_or_else(|_| Err("寫入時發生未預期錯誤".to_string()))
+            });
+            if let (Some(Err(e)), Some(dir)) = (written, &log_dir) {
+                inews::append_log(dir, &format!("[rundown] 警告：寫入 rundown JSON 失敗：{e}"));
             }
         }
         r

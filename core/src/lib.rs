@@ -7,6 +7,7 @@ pub mod inews;
 pub mod model;
 pub mod parse;
 pub mod punctuation;
+pub mod rundown;
 
 use config::Config;
 use model::{Header, NewsEntry, Outcome, StyleClass};
