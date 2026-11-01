@@ -11,6 +11,7 @@
 //! - 資料連線用 PASV。回應可能是多行（`123-` 開頭）。空 queue 可能回 550。
 
 use news_script_core::config::InewsConfig;
+use news_script_core::doc_match::TimeRow;
 use news_script_core::inews::{self, ListEntry, ListKind, NsmlStory, RundownRow};
 use news_script_core::parse;
 use serde::Serialize;
@@ -330,6 +331,8 @@ pub struct InewsMeta {
     pub warnings: Vec<String>,
     /// 剛打開自動刷新時接續了上次存檔的節次：前端拿來當「上次寫到哪一節」。
     pub resumed_show: Option<String>,
+    /// 時間校正用（v0.3.9）：目前節次和還沒補掃完的上一節裡，每一則已播出的列。
+    pub time_rows: Vec<TimeRow>,
 }
 
 pub struct FetchResult {
@@ -645,6 +648,31 @@ impl InewsState {
             self.last_show = Some(cur.slot.show.clone());
         }
 
+        // 時間校正的對象：目前節次已播出的列，加上還沒補掃完（或這一輪才補掃）的上一節。
+        let time_row = |rundowns: &HashMap<String, Rundown>, w: &inews::Window, i: usize, cume: Option<i64>| {
+            cume.map(|c| TimeRow {
+                show: w.slot.show.clone(),
+                slug: rundowns[&w.slot.show][i].1.title().trim().to_string(),
+                time: clock(c),
+                nominal: w.slot.nominal,
+                start: w.start(),
+                end: w.end(),
+            })
+        };
+        let mut time_rows: Vec<TimeRow> = Vec::new();
+        if let (FetchMode::Auto { .. }, Some(prev)) = (mode, plan.previous.as_ref()) {
+            let open = self.swept_for.as_deref() != Some(cur.slot.show.as_str()) || closed_show.as_deref() == Some(prev.slot.show.as_str());
+            if open && !prev.slot.off_air {
+                rundown_of(self, &mut rundowns, &prev.slot.show, &mut retrieved)?;
+                let rows = rows_of(&rundowns, &prev.slot.show);
+                let s = inews::select_rows(&rows, None, prev, cfg.include_floated, marker);
+                time_rows.extend(s.rows.iter().filter_map(|&i| time_row(&rundowns, prev, i, s.cume[i])));
+            }
+        }
+        if !cur.slot.off_air {
+            time_rows.extend(sel.rows.iter().filter_map(|&i| time_row(&rundowns, &cur, i, sel.cume[i])));
+        }
+
         // 快取只留這一輪還看得到的稿件，換節後舊的就放掉。
         let kept: std::collections::HashSet<&String> = rundowns.values().flatten().map(|(e, _)| &e.name).collect();
         self.cache.retain(|name, _| kept.contains(name));
@@ -734,6 +762,7 @@ impl InewsState {
                 events,
                 warnings,
                 resumed_show,
+                time_rows,
             },
         })
     }
@@ -1177,6 +1206,10 @@ mod tests {
         assert!(r.log_line.contains("範圍 07:55:00（硬時間）～ 08:55:00（0900 硬時間）"), "{}", r.log_line);
         assert!(r.log_line.contains("最後納入 07:59:30 下節預告三"), "{}", r.log_line);
         assert!(r.log_line.contains("第一則排除 08:50:00 =CM 3=="), "{}", r.log_line);
+        // 時間校正只拿已播出的列：還沒播到的 =CM 3== 不在裡面（v0.3.9）。
+        let rows: Vec<(&str, &str)> = r.meta.time_rows.iter().map(|t| (t.slug.as_str(), t.time.as_str())).collect();
+        assert_eq!(rows, [("大片頭", "07:55:00"), ("合成早安稿0800", "07:56:00"), ("合成第二則0800", "07:58:00"), ("下節預告三", "07:59:30")]);
+        assert_eq!((r.meta.time_rows[0].start, r.meta.time_rows[0].end), (28500, 32100), "07:55:00 ～ 08:55:00");
         // 0800 全部 7 則 + 為了算 0800 的結束時間讀的 0900 的 2 則。
         assert_eq!(*server.retrs.lock().unwrap(), 9);
 
@@ -1234,6 +1267,9 @@ mod tests {
         let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 4 * 60, auto(false)).unwrap();
         assert_eq!(r.meta.closed_show, None);
         assert!(r.meta.stories.iter().all(|s| s.show == "0900"));
+        // 0800 還沒補掃完：它已播出的列照樣校正時間。
+        assert!(r.meta.time_rows.iter().any(|t| t.show == "0800" && t.slug == "合成早安稿0800"));
+        assert!(r.meta.time_rows.iter().any(|t| t.show == "0900"));
         // 09:05 補掃 0800：不看現在時間，累積時間 < 08:55:00 的全部納入；分隔線可以寫了。
         let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 5 * 60, auto(false)).unwrap();
         assert_eq!(r.meta.closed_show.as_deref(), Some("0800"));
@@ -1241,9 +1277,11 @@ mod tests {
         assert_eq!(swept.len(), 5);
         assert!(!r.files.iter().any(|(_, t)| t.contains("合成預備稿0800")));
         assert!(r.log_line.contains("補掃 0800"), "{}", r.log_line);
-        // 只補掃一次。
+        assert!(r.meta.time_rows.iter().any(|t| t.show == "0800"), "the sweep round still corrects 0800");
+        // 只補掃一次。補掃完之後 0800 就不再校正。
         let r = state.fetch(&c, &creds("secret"), 9 * 3600 + 11 * 60, auto(false)).unwrap();
         assert_eq!(r.meta.closed_show, None);
+        assert!(r.meta.time_rows.iter().all(|t| t.show == "0900"));
     }
 
     #[test]

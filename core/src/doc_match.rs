@@ -918,3 +918,513 @@ UP 北投強風垮1800 SOT 18:10:00 社會
         assert_eq!(normalize_title("ＡＢＣ．測試，", &strip()), "abc測試");
     }
 }
+
+// --- 時間校正（v0.3.9） -------------------------------------------------------------
+//
+// 文稿編輯會校正 rundown 的時間，大家又以文稿時間為準，所以協作文件裡已經寫進去的
+// 稿要跟著 rundown 改時間。只改今天段落裡、時間落在那一節範圍內的行：範圍外的同
+// slug 行是別節的播出紀錄（17:04 的 1700 重播），不是這一節的。
+
+/// rundown 裡一列已播出的稿，和它所屬節次的範圍（`inews::Window`，秒，節次時間軸）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TimeRow {
+    pub show: String,
+    pub slug: String,
+    /// rundown 的時間 `HH:MM:SS`（工具寫進文件的那個累積時間）。
+    pub time: String,
+    /// 節次整點（當天第幾秒），把時間拉到同一條時間軸用。
+    pub nominal: u32,
+    pub start: i64,
+    pub end: i64,
+}
+
+/// 要改的一行。`line` 是整份文件的第幾行（0 起算），`offset` 是時間在那一行裡的
+/// UTF-16 位置（Quill 用的單位）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TimeCorrection {
+    pub show: String,
+    pub slug: String,
+    pub line: usize,
+    pub line_text: String,
+    pub offset: usize,
+    pub old_time: String,
+    pub new_time: String,
+    /// 這一行是同一節同一個 slug 的第幾個（依時間先後），連續幾輪是否一樣用。
+    pub ordinal: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimePlan {
+    pub corrections: Vec<TimeCorrection>,
+    /// `[校正略過]` 的內容（`slug：原因`）。
+    pub skips: Vec<String>,
+}
+
+/// 一行裡時間字串的位置（字元 index）和秒數。
+struct TimeSpot {
+    start: usize,
+    len: usize,
+    secs: i64,
+}
+
+/// 全形英數符號轉半形（一個字元對一個字元，位置不變）。
+fn fold_char(c: char) -> char {
+    let code = c as u32;
+    if (0xFF01..=0xFF5E).contains(&code) {
+        char::from_u32(code - 0xFEE0).unwrap_or(c)
+    } else if code == 0x3000 {
+        ' '
+    } else {
+        c
+    }
+}
+
+/// `from` 之後第一個時間：`18:05:52`、`18：05：52`（折成半形後一樣）、`180552`。
+/// 前後不能緊接數字（`1800` 的 slug 尾巴、`2026110` 這種不算）。
+fn find_time(chars: &[char], from: usize) -> Option<TimeSpot> {
+    let digit = |i: usize| chars.get(i).is_some_and(|c| c.is_ascii_digit());
+    let num = |a: usize, b: usize| -> i64 {
+        chars[a..b].iter().fold(0, |n, c| n * 10 + c.to_digit(10).unwrap_or(0) as i64)
+    };
+    let valid = |h: i64, m: i64, s: i64| h < 30 && m < 60 && s < 60;
+    let mut i = from;
+    while i < chars.len() {
+        if !digit(i) || (i > 0 && digit(i - 1)) {
+            i += 1;
+            continue;
+        }
+        let mut run = i;
+        while digit(run) {
+            run += 1;
+        }
+        let n = run - i;
+        // HH:MM:SS（時可以是 1 位數）
+        if (n == 1 || n == 2)
+            && chars.get(run) == Some(&':')
+            && digit(run + 1) && digit(run + 2) && !digit(run + 3)
+            && chars.get(run + 3) == Some(&':')
+            && digit(run + 4) && digit(run + 5) && !digit(run + 6)
+        {
+            let (h, m, s) = (num(i, run), num(run + 1, run + 3), num(run + 4, run + 6));
+            if valid(h, m, s) {
+                return Some(TimeSpot { start: i, len: run + 6 - i, secs: h * 3600 + m * 60 + s });
+            }
+        }
+        if n == 6 {
+            let (h, m, s) = (num(i, i + 2), num(i + 2, i + 4), num(i + 4, i + 6));
+            if valid(h, m, s) {
+                return Some(TimeSpot { start: i, len: 6, secs: h * 3600 + m * 60 + s });
+            }
+        }
+        i = run;
+    }
+    None
+}
+
+/// slug 在這一行（已折半形）的結束位置。slug 後面緊接英數字或 `-` 就是另一個 slug
+/// （`甲1800-1`），不算。
+fn slug_end(folded: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || folded.len() < needle.len() {
+        return None;
+    }
+    (0..=folded.len() - needle.len()).find_map(|i| {
+        let end = i + needle.len();
+        let boundary = folded.get(end).map_or(true, |c| !(c.is_alphanumeric() || *c == '-'));
+        (folded[i..end] == *needle && boundary).then_some(end)
+    })
+}
+
+/// `HH:MM:SS` → 秒。
+fn clock_secs(s: &str) -> Option<i64> {
+    let p: Vec<i64> = s.trim().split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    match p[..] {
+        [h, m, s] if m < 60 && s < 60 => Some(h * 3600 + m * 60 + s),
+        _ => None,
+    }
+}
+
+/// 照舊時間的寫法寫新時間：分隔符號、全形半形、時是不是 1 位數都照舊。
+fn restyle_time(old: &[char], new_secs: i64) -> String {
+    let s = new_secs.rem_euclid(86_400);
+    let digits = format!("{:02}{:02}{:02}", s / 3600, (s / 60) % 60, s % 60);
+    let old_digits = old.iter().filter(|c| fold_char(**c).is_ascii_digit()).count();
+    let mut new: Vec<char> = digits.chars().collect();
+    if old_digits == 5 && new[0] == '0' {
+        new.remove(0);
+    }
+    let wide = old.iter().any(|c| ('０'..='９').contains(c));
+    let put = |c: char| if wide { char::from_u32(c as u32 + 0xFEE0).unwrap_or(c) } else { c };
+    let mut out = String::new();
+    let mut it = new.into_iter();
+    if old_digits == 5 && digits.len() - old_digits == 1 && !digits.starts_with('0') {
+        // 9:05:00 → 10:01:00：多出來的那位數放最前面。
+        out.push(put(it.next().unwrap_or('0')));
+    }
+    for c in old {
+        if fold_char(*c).is_ascii_digit() {
+            out.push(put(it.next().unwrap_or('0')));
+        } else {
+            out.push(*c);
+        }
+    }
+    out
+}
+
+/// 一行在今天段落裡、含某個 slug 的候選。
+struct Candidate<'a> {
+    line: usize,
+    text: &'a str,
+    spot: TimeSpot,
+}
+
+/// 依今天段落和 rundown 已播出的列，算出要改時間的行。
+///
+/// - 只看 `today` 日期分隔線底下的行；文件沒有今天的分隔線就什麼都不改。
+/// - 同一節同一個 slug：範圍內的行（不含抓新行）和 rundown 的列各自依時間排序後一對一
+///   配對，數量不同就不改。時間一樣的不列出來。
+/// - 範圍外的行是別節的播出紀錄，不改也不參與配對。
+pub fn plan_time_corrections(doc_text: &str, today: &str, rows: &[TimeRow], refresh_keywords: &[String]) -> TimePlan {
+    let mut plan = TimePlan::default();
+    let mut inside = false;
+    let mut found = false;
+    let mut lines: Vec<(usize, &str)> = Vec::new();
+    for (n, line) in doc_text.lines().enumerate() {
+        if let Some(d) = date_divider(line) {
+            inside = d == today;
+            found |= inside;
+            continue;
+        }
+        if inside {
+            lines.push((n, line));
+        }
+    }
+    if !found {
+        return plan;
+    }
+
+    // (節次, slug) 依 rundown 順序分組。
+    let mut groups: Vec<(&str, &str, Vec<&TimeRow>)> = Vec::new();
+    for r in rows {
+        match groups.iter_mut().find(|(show, slug, _)| *show == r.show && *slug == r.slug) {
+            Some(g) => g.2.push(r),
+            None => groups.push((&r.show, &r.slug, vec![r])),
+        }
+    }
+
+    for (show, slug, group) in groups {
+        let needle: Vec<char> = normalize_for_match(slug).chars().collect();
+        if needle.is_empty() {
+            continue;
+        }
+        let first = group[0];
+        let axis = |t: i64| crate::inews::unwrap_near(t, first.nominal as i64);
+        let in_range = |t: i64| (first.start..first.end).contains(&axis(t));
+
+        let mut candidates = Vec::new();
+        let mut refresh_lines = 0;
+        let mut out_of_range = Vec::new();
+        let mut untimed = false;
+        for &(n, text) in &lines {
+            let folded: Vec<char> = text.chars().map(fold_char).collect();
+            let Some(end) = slug_end(&folded, &needle) else { continue };
+            let start = end - needle.len();
+            let prefix: String = folded[..start].iter().collect();
+            if is_refresh_prefix(&normalize_for_match(&prefix), refresh_keywords) {
+                refresh_lines += 1;
+                continue;
+            }
+            match find_time(&folded, end) {
+                Some(spot) if in_range(spot.secs) => candidates.push(Candidate { line: n, text, spot }),
+                Some(spot) => out_of_range.push(crate::inews::format_clock(spot.secs)),
+                None => untimed = true,
+            }
+        }
+        if refresh_lines > 0 && candidates.is_empty() {
+            plan.skips.push(format!("{slug}：{show} 只有抓新行，不改（抓新要用它的時間判斷）"));
+        }
+        if !out_of_range.is_empty() && candidates.is_empty() {
+            plan.skips.push(format!("{slug}：文件的 {} 在 {show} 節次範圍外，視為其他節次的播出紀錄", out_of_range.join("、")));
+        }
+        if untimed {
+            plan.skips.push(format!("{slug}：今天段落有一行找不到時間，這一輪不改"));
+            continue;
+        }
+        if candidates.is_empty() {
+            continue;
+        }
+        if candidates.len() != group.len() {
+            plan.skips.push(format!(
+                "{slug}：{show} rundown 有 {} 列、文件範圍內有 {} 行，無法配對",
+                group.len(),
+                candidates.len()
+            ));
+            continue;
+        }
+        let mut times = Vec::with_capacity(group.len());
+        for r in &group {
+            match clock_secs(&r.time) {
+                Some(t) => times.push(axis(t)),
+                None => {
+                    plan.skips.push(format!("{slug}：rundown 時間「{}」無法解析", r.time));
+                    times.clear();
+                    break;
+                }
+            }
+        }
+        if times.len() != group.len() {
+            continue;
+        }
+        times.sort();
+        candidates.sort_by_key(|c| axis(c.spot.secs));
+
+        for (ordinal, (c, new_secs)) in candidates.iter().zip(times).enumerate() {
+            if axis(c.spot.secs) == new_secs {
+                continue;
+            }
+            let chars: Vec<char> = c.text.chars().collect();
+            let old: &[char] = &chars[c.spot.start..c.spot.start + c.spot.len];
+            plan.corrections.push(TimeCorrection {
+                show: show.to_string(),
+                slug: slug.to_string(),
+                line: c.line,
+                line_text: c.text.to_string(),
+                offset: chars[..c.spot.start].iter().map(|ch| ch.len_utf16()).sum(),
+                old_time: old.iter().collect(),
+                new_time: restyle_time(old, new_secs),
+                ordinal,
+            });
+        }
+    }
+    plan
+}
+
+/// 連續幾輪的紀錄：`節次|slug|第幾個|舊時間` → (上一輪提出的新時間, 連續幾輪)。
+pub type TimeStreaks = std::collections::HashMap<String, (String, u32)>;
+
+pub fn streak_key(c: &TimeCorrection) -> String {
+    format!("{}|{}|{}|{}", c.show, c.slug, c.ordinal, c.old_time)
+}
+
+/// 同一行、同一個新時間連續 `need` 輪都提出才改（排播調整到一半不要來回改）。回傳
+/// (這一輪可以改的, 還在等的數量)。這一輪沒提出的行從紀錄裡拿掉，下次重新算。
+pub fn stable_corrections(streaks: &mut TimeStreaks, corrections: &[TimeCorrection], need: u32) -> (Vec<TimeCorrection>, usize) {
+    let mut next = TimeStreaks::new();
+    let mut ready = Vec::new();
+    let mut waiting = 0;
+    for c in corrections {
+        let key = streak_key(c);
+        let rounds = match streaks.get(&key) {
+            Some((t, n)) if *t == c.new_time => n + 1,
+            _ => 1,
+        };
+        if rounds >= need.max(1) {
+            ready.push(c.clone());
+        } else {
+            waiting += 1;
+        }
+        next.insert(key, (c.new_time.clone(), rounds));
+    }
+    *streaks = next;
+    (ready, waiting)
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+
+    fn refresh() -> Vec<String> {
+        crate::config::MarkersConfig::default().refresh_keywords
+    }
+
+    /// 1800 節次：範圍 17:43:30 ～ 19:55:00。
+    fn row(slug: &str, time: &str) -> TimeRow {
+        TimeRow {
+            show: "1800".into(),
+            slug: slug.into(),
+            time: time.into(),
+            nominal: 18 * 3600,
+            start: 17 * 3600 + 43 * 60 + 30,
+            end: 19 * 3600 + 55 * 60,
+        }
+    }
+
+    fn doc(body: &str) -> String {
+        format!("========1031========\n合成昨天1800 SOT 18:05:52\n========1101========\n{body}")
+    }
+
+    fn fix(body: &str, rows: &[TimeRow]) -> TimePlan {
+        plan_time_corrections(&doc(body), "1101", rows, &refresh())
+    }
+
+    fn changes(p: &TimePlan) -> Vec<(String, String)> {
+        p.corrections.iter().map(|c| (c.old_time.clone(), c.new_time.clone())).collect()
+    }
+
+    #[test]
+    fn a_line_in_the_same_show_takes_the_rundown_time() {
+        let p = fix("合成掃街1800 SOT 18:05:52 社會\n標題", &[row("合成掃街1800", "18:01:51")]);
+        assert_eq!(changes(&p), vec![("18:05:52".into(), "18:01:51".into())]);
+        let c = &p.corrections[0];
+        assert_eq!(c.line, 3);
+        assert_eq!(c.line_text, "合成掃街1800 SOT 18:05:52 社會");
+        assert_eq!(c.offset, "合成掃街1800 SOT ".encode_utf16().count());
+    }
+
+    #[test]
+    fn the_same_time_needs_no_correction() {
+        let p = fix("合成掃街1800 SOT 18:01:51", &[row("合成掃街1800", "18:01:51")]);
+        assert!(p.corrections.is_empty());
+        assert!(p.skips.is_empty());
+    }
+
+    #[test]
+    fn a_prefixed_line_is_corrected_and_keeps_its_prefix() {
+        let p = fix("UP 合成撞立院1800 SOT 18:07:58", &[row("合成撞立院1800", "18:03:57")]);
+        assert_eq!(changes(&p), vec![("18:07:58".into(), "18:03:57".into())]);
+        assert_eq!(p.corrections[0].offset, "UP 合成撞立院1800 SOT ".encode_utf16().count());
+        let p = fix("(X)合成撞立院1800 SOT 18:07:58", &[row("合成撞立院1800", "18:03:57")]);
+        assert_eq!(p.corrections.len(), 1);
+    }
+
+    #[test]
+    fn tab_separated_fullwidth_colons_keep_their_style() {
+        let p = fix("合成占床1800\tSOT\t18：11：58", &[row("合成占床1800", "18:17:06")]);
+        assert_eq!(changes(&p), vec![("18：11：58".into(), "18：17：06".into())]);
+        assert_eq!(p.corrections[0].offset, "合成占床1800\tSOT\t".encode_utf16().count());
+    }
+
+    #[test]
+    fn a_compact_time_stays_compact() {
+        let p = fix("合成占床1800 SOT 181158", &[row("合成占床1800", "18:17:06")]);
+        assert_eq!(changes(&p), vec![("181158".into(), "181706".into())]);
+    }
+
+    #[test]
+    fn a_line_outside_the_show_range_is_another_airing() {
+        // 1800 範圍從 17:43:30 開始：17:04:21 是 1700 那節的播出紀錄。
+        let p = fix("合成砍倒地1800 SOT 17:04:21", &[row("合成砍倒地1800", "18:05:27")]);
+        assert!(p.corrections.is_empty());
+        assert_eq!(p.skips.len(), 1);
+        assert!(p.skips[0].contains("範圍外"), "{:?}", p.skips);
+    }
+
+    #[test]
+    fn the_range_is_not_limited_to_the_hour() {
+        let p = fix("合成晚段1800 SOT 18:50:00", &[row("合成晚段1800", "19:10:00")]);
+        assert_eq!(changes(&p), vec![("18:50:00".into(), "19:10:00".into())]);
+    }
+
+    #[test]
+    fn a_refresh_line_is_never_corrected() {
+        for prefix in ["(抓新)", "(19)", "(X/19)"] {
+            let p = fix(&format!("{prefix}合成重貼1800 SOT 18:05:52"), &[row("合成重貼1800", "18:01:51")]);
+            assert!(p.corrections.is_empty(), "{prefix}");
+            assert!(p.skips[0].contains("抓新"), "{:?}", p.skips);
+        }
+    }
+
+    #[test]
+    fn the_previous_day_is_never_corrected() {
+        // doc() 前一天段落裡有 合成昨天1800 18:05:52，今天沒有。
+        let p = fix("合成別則1800 SOT 18:00:00", &[row("合成昨天1800", "18:01:51")]);
+        assert!(p.corrections.is_empty());
+        assert!(p.skips.is_empty());
+    }
+
+    #[test]
+    fn no_today_divider_means_no_corrections() {
+        let p = plan_time_corrections("========1031========\n合成掃街1800 SOT 18:05:52", "1101", &[row("合成掃街1800", "18:01:51")], &refresh());
+        assert!(p.corrections.is_empty());
+    }
+
+    #[test]
+    fn two_rows_and_two_lines_pair_in_time_order() {
+        let body = "合成雙1800 SOT 18:30:00\n標題\n合成雙1800 SOT 18:10:00\n標題";
+        let p = fix(body, &[row("合成雙1800", "18:32:00"), row("合成雙1800", "18:12:00")]);
+        let mut got = changes(&p);
+        got.sort();
+        assert_eq!(got, vec![("18:10:00".into(), "18:12:00".into()), ("18:30:00".into(), "18:32:00".into())]);
+        let early = p.corrections.iter().find(|c| c.old_time == "18:10:00").unwrap();
+        assert_eq!((early.line, early.ordinal), (5, 0));
+    }
+
+    #[test]
+    fn two_rows_and_one_line_are_left_alone() {
+        let p = fix("合成雙1800 SOT 18:10:00", &[row("合成雙1800", "18:12:00"), row("合成雙1800", "18:32:00")]);
+        assert!(p.corrections.is_empty());
+        assert!(p.skips[0].contains("無法配對"), "{:?}", p.skips);
+    }
+
+    #[test]
+    fn a_longer_slug_sharing_the_prefix_is_a_different_story() {
+        let p = fix("合成甲1800-1 SOT 18:05:52", &[row("合成甲1800", "18:01:51")]);
+        assert!(p.corrections.is_empty());
+    }
+
+    #[test]
+    fn a_line_without_a_time_stops_that_slug_for_this_round() {
+        let p = fix("合成甲1800 SOT\n合成甲1800 SOT 18:05:52", &[row("合成甲1800", "18:01:51")]);
+        assert!(p.corrections.is_empty());
+        assert!(p.skips[0].contains("找不到時間"), "{:?}", p.skips);
+    }
+
+    #[test]
+    fn the_midnight_show_compares_across_zero() {
+        // 2400：範圍 23:55:00 ～ 隔天 01:00:00，時間軸以 24:00 為準。
+        let r = TimeRow {
+            show: "2400".into(),
+            slug: "合成午夜2400".into(),
+            time: "00:03:00".into(),
+            nominal: 24 * 3600,
+            start: 23 * 3600 + 55 * 60,
+            end: 25 * 3600,
+        };
+        let p = fix("合成午夜2400 SOT 23:58:00", &[r.clone()]);
+        assert_eq!(changes(&p), vec![("23:58:00".into(), "00:03:00".into())]);
+        let p = fix("合成午夜2400 SOT 22:58:00", &[r]);
+        assert!(p.corrections.is_empty(), "22:58 是 2200 的播出紀錄");
+    }
+
+    #[test]
+    fn a_single_digit_hour_is_kept_as_typed() {
+        let mut r = row("合成早1800", "09:01:00");
+        (r.nominal, r.start, r.end) = (9 * 3600, 8 * 3600 + 55 * 60, 10 * 3600);
+        let p = fix("合成早1800 SOT 9:05:00", &[r.clone()]);
+        assert_eq!(changes(&p), vec![("9:05:00".into(), "9:01:00".into())]);
+        r.time = "10:01:00".into();
+        r.end = 11 * 3600;
+        let p = fix("合成早1800 SOT 9:05:00", &[r]);
+        assert_eq!(changes(&p), vec![("9:05:00".into(), "10:01:00".into())]);
+    }
+
+    #[test]
+    fn a_new_time_must_hold_for_two_rounds() {
+        let mut streaks = TimeStreaks::new();
+        let body = "合成掃街1800 SOT 18:05:52";
+        let round = |streaks: &mut TimeStreaks, time: &str| {
+            let p = fix(body, &[row("合成掃街1800", time)]);
+            stable_corrections(streaks, &p.corrections, 2)
+        };
+        assert_eq!(round(&mut streaks, "18:01:51").0.len(), 0, "first sighting waits");
+        // 下一輪又變回文件的時間：沒有要改的，紀錄清掉。
+        assert_eq!(round(&mut streaks, "18:05:52"), (vec![], 0));
+        assert_eq!(round(&mut streaks, "18:01:51").1, 1, "starts counting again");
+        let (ready, waiting) = round(&mut streaks, "18:01:51");
+        assert_eq!((ready.len(), waiting), (1, 0));
+        assert_eq!(ready[0].new_time, "18:01:51");
+        // 換成另一個新時間就重來。
+        assert_eq!(round(&mut streaks, "18:02:00").1, 1);
+    }
+
+    #[test]
+    fn a_vanished_row_changes_nothing() {
+        let p = fix("合成掃街1800 SOT 18:05:52", &[]);
+        assert_eq!(p, TimePlan::default());
+    }
+
+    #[test]
+    fn fullwidth_digits_stay_fullwidth() {
+        let p = fix("合成全形1800 SOT １８：０５：５２", &[row("合成全形1800", "18:01:51")]);
+        assert_eq!(changes(&p), vec![("１８：０５：５２".into(), "１８：０１：５１".into())]);
+    }
+}

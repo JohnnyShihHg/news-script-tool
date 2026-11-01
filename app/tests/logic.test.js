@@ -710,6 +710,27 @@ test("an unchanged story keeps its keywords and edits across polls; an edited on
   assert.equal(merged[1].inews.version, "v2");
 });
 
+test("a retimed card takes the fresh time until it is written", () => {
+  const withTime = (summary, time) => {
+    for (const e of summary.entries) e.Passed.time = time;
+    return summary;
+  };
+  const first = L.inewsItemsFromSummary(withTime(inewsSummary("1800", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v1" },
+  ]), "18:05:52"));
+  first[0].keywords = "#a";
+  const fresh = L.inewsItemsFromSummary(withTime(inewsSummary("1800", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v1" },
+  ]), "18:01:51"));
+  const merged = L.mergeInewsItems(first, fresh, new Set(["A:2|v1"]));
+  assert.equal(merged[0].time, "18:01:51");
+  assert.equal(merged[0].dto.Passed.time, "18:01:51", "written text uses the dto time");
+  assert.equal(merged[0].keywords, "#a", "the card itself is kept");
+  assert.equal(merged[1].time, "18:05:52", "already written: the doc is corrected instead");
+});
+
 test("switching show keeps last show's unwritten cards but drops written ones", () => {
   const old = L.inewsItemsFromSummary(inewsSummary("0800", [
     { slug: "甲", key: "A:1", version: "v1" },

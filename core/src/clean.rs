@@ -295,6 +295,16 @@ pub fn force_pass_prefix(slug: &str, cfg: &FilterConfig) -> Option<String> {
         .map(|p| p.trim().to_string())
 }
 
+/// slug 含 `blank_style_body_pass_terms` 其中一個（`氣象`）：樣式空白時，有內文就通過。
+pub fn body_pass_term(slug: &str, cfg: &FilterConfig) -> Option<String> {
+    let s = fold(slug);
+    cfg.blank_style_body_pass_terms
+        .iter()
+        .map(|t| t.trim())
+        .find(|t| !t.is_empty() && s.contains(&fold(t)))
+        .map(str::to_string)
+}
+
 /// slug 以 4 位數時間標結尾（`0000`～`2459`，後面可以接 `(ok)`、`-1` 這類尾巴），
 /// 回傳那個時間標。`=` 開頭或含 `==` 的是節目結構（`==2200`、`=算好2255進23`）。
 pub fn slug_timecode(slug: &str) -> Option<String> {

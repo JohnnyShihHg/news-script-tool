@@ -809,6 +809,7 @@ async function writeBackToCollab() {
 
 let inewsCfg = {
   poll_seconds: 10,
+  correct_time: true,
   auto_write: false,
   divider_format: "==== {hh} ====",
   divider_position: "after",
@@ -941,12 +942,30 @@ async function inewsRound() {
       meta.warnings?.length ? "warn" : ""
     );
 
+    // 時間校正不等關鍵字、節次暫存或分隔線：已經在文件裡的稿每一輪都對一次。
+    if (inewsCfg.correct_time !== false) await correctCollabTimes(meta.time_rows ?? []);
+
     const pending = items.some((i) => isPendingWrite(i, writtenKeys));
     if (added.length || changed.length || pending || meta.closed_show || dividerOwed()) await runInewsPipeline();
   } finally {
     inewsRoundActive = false;
     inewsBusy = false;
     if (renderDeferred && !isTypingInList()) render();
+  }
+}
+
+/// 時間校正（v0.3.9）。失敗只顯示，不停自動刷新：寫入前的比對會自己擋。
+async function correctCollabTimes(rows) {
+  const node = el("inewsStatus");
+  try {
+    const r = await invoke("correct_collab_times", { rows });
+    const lines = [];
+    if (r.corrected.length) lines.push(`✏ 時間校正 ${r.corrected.length} 則：${r.corrected.join("、")}`);
+    if (r.failed.length) lines.push(`⚠ 時間校正 ${r.failed.length} 則內容不符，下一輪重新判斷：${r.failed.join("、")}`);
+    if (r.waiting) lines.push(`⏳ ${r.waiting} 則時間有變，等下一輪確認後再改`);
+    if (lines.length) node.textContent += `\n${lines.join("\n")}`;
+  } catch (err) {
+    node.textContent += `\n⚠ 時間校正失敗（下一輪會再試）：${err}`;
   }
 }
 
@@ -1484,6 +1503,9 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.include_floated" ${inewsSettings.include_floated ? "checked" : ""} /> 也匯入 float 列（版型、框、SOU 這類 iNEWS 上 float 的稿）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.fill_computed_time" ${inewsSettings.fill_computed_time ? "checked" : ""} /> 累積時間空白時填入自動算出的時間（關掉就跟手動匯出完全相同）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_write" ${inewsSettings.auto_write ? "checked" : ""} /> 全自動寫入協作文件（不勾 = 產生關鍵字後等你按「確認寫入」）</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.correct_time" ${inewsSettings.correct_time !== false ? "checked" : ""} /> 時間校正：協作文件裡已寫入的稿，時間跟著 rundown 改</label>
+            <div class="field"><label>時間校正：同一個新時間連續幾輪都一樣才改</label><input type="number" min="1" data-cfg-num="inews.correct_time_stable_rounds" value="${inewsSettings.correct_time_stable_rounds ?? 2}" /></div>
+            <div class="muted">自動刷新每一輪對目前節次（和還沒補掃完的上一節）已播出的稿，在今天的日期段落找同一個 slug、時間落在該節範圍內的行，rundown 時間不同就只改時間那幾個字，前綴、樣式、組別和格式都不動。範圍外的同 slug 行是其他節次的播出紀錄，不改；(抓新)、(19) 這類行不改；同一節有多則同 slug 時依時間先後配對，數量對不上就不改。每次修改和略過都寫進決策紀錄（[校正]、[校正略過]）。</div>
             <div class="field"><label>節次分隔線格式（{hh} = 小時，{show} = 節次）</label><input type="text" data-cfg="inews.divider_format" value="${escapeHtml(inewsSettings.divider_format)}" /></div>
             <div class="field">
               <label>分隔線位置</label>
@@ -1552,6 +1574,8 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <div class="muted">slug 開頭是這裡的字（例：專）就當成專題，不管樣式是什麼（空白、未知、BS、乾稿）都放進「通過」。開頭的 <code>(寰)</code>、<code>【xx】</code> 這類括號標記會先去掉再判斷；只看開頭，<code>記者專訪</code> 這種中間有「專」的不算。slug 結尾 SOU、編輯備註含「預告」仍然優先。</div>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="filter.blank_style_timecode_pass" ${config.filter.blank_style_timecode_pass !== false ? "checked" : ""} /> 樣式空白、slug 以時間標結尾（例：<code>北投強風垮1800</code>、<code>季瑩氣象2100(ok)</code>）的視為新聞稿並通過</label>
             <div class="muted">樣式欄留空，卡片會註明「依 slug 時間標判定為新聞」。<code>==2200</code> 這類 <code>=</code> 開頭或含 <code>==</code> 的是節目結構，不適用。樣式 <code>D</code> 會看 slug／編輯備註：有 DL、DLIVE、SL、連線、延遲 的當 DLIVE（通過），沒有的當 DRY（擋掉）。比對樣式時連字號和空白不算，<code>D-LIVE</code>、<code>D LIVE</code>、<code>DLIVE</code> 是同一種。</div>
+            ${styleField("樣式空白、slug 含這些詞而且有內文就通過 blank_style_body_pass_terms", "filter.blank_style_body_pass_terms", config.filter.blank_style_body_pass_terms ?? ["氣象"])}
+            <div class="muted">樣式和編輯備註都判斷不出樣式、slug 也沒有時間標的稿，原本會當成節目結構放進「解析失敗」。slug 含這裡的詞（例：<code>氣象主播-樺仙-二分</code> 的氣象）而且有稿頭內文，就視為新聞稿並通過，樣式留空；沒有內文的照舊放進解析失敗。</div>
             ${styleField("編輯備註含這些詞就濾除 blocked_note_terms", "filter.blocked_note_terms", config.filter.blocked_note_terms)}
             <div class="muted">編輯備註裡出現這裡的詞（例：預告），不管樣式是什麼都直接放進「已濾除」，需要時仍可在已濾除勾回來。</div>
           </section>
@@ -1636,6 +1660,7 @@ const LIST_FIELDS = new Set([
   "filter.slug_style_terms",
   "filter.force_pass_slug_prefixes",
   "filter.video_id_styles",
+  "filter.blank_style_body_pass_terms",
   "filter.blocked_note_terms",
   "markers.refresh_keywords",
   "annotations.no_upload_terms",
