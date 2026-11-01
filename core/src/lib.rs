@@ -166,8 +166,11 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     let mut note_style_hint = None;
     if style.is_empty() && pass_reason.is_none() {
         let timecode = cfg.filter.blank_style_timecode_pass.then(|| clean::slug_timecode(&slug)).flatten();
+        let body_term = clean::body_pass_term(&slug, &cfg.filter).filter(|_| has_script_body(&text, header_lines, cfg));
         if timecode.is_some() {
             pass_reason = Some("樣式空白，依 slug 時間標判定為新聞".to_string());
+        } else if let Some(t) = body_term {
+            pass_reason = Some(format!("樣式空白，slug 含「{t}」且有內文，判定為新聞"));
         } else {
             match clean::note_style_term(&editor_note, &cfg.filter) {
                 Some(t) => note_style_hint = Some(format!("樣式空白，編輯備註含「{t}」，未自動判定樣式，請人工確認")),
@@ -193,6 +196,15 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     match skip_reason {
         Some(reason) => demote(outcome, reason),
         None => outcome,
+    }
+}
+
+/// 製作區之後有真正的稿頭內文（去掉製作標記後不是空的）。
+fn has_script_body(text: &str, header_lines: usize, cfg: &Config) -> bool {
+    let rest: String = text.lines().skip(header_lines).collect::<Vec<_>>().join("\n");
+    match parse::parse_body(&rest, &cfg.filter.title_tag_pattern, &cfg.filter.title_tag_fallback_pattern) {
+        parse::BodyParse::Extracted { body, .. } => !clean::strip_body_markers(&body, &cfg.clean).trim().is_empty(),
+        _ => false,
     }
 }
 

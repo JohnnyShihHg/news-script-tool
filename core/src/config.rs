@@ -52,11 +52,20 @@ pub struct FilterConfig {
     /// 和內文 → 視為正式新聞稿並通過，樣式留空。`=` 開頭或含 `==` 的是節目結構，不適用。
     #[serde(default = "default_true")]
     pub blank_style_timecode_pass: bool,
+    /// 樣式空白、slug 含這些詞、而且有稿頭內文 → 視為新聞稿並通過，樣式留空（v0.3.9）。
+    /// 氣象主播稿（`氣象主播-樺仙-二分`）沒有樣式、slug 沒有時間標、編輯備註也不是
+    /// 樣式詞，原本會被當成節目結構放進解析失敗。沒有內文的不算，免得把空的佔位列收進來。
+    #[serde(default = "default_blank_style_body_pass_terms")]
+    pub blank_style_body_pass_terms: Vec<String>,
     /// `尾碼=樣式` pairs read off the last `-` segment of 影像編號, used only when 樣式
     /// is blank and the slug names no style. `X5` is the camera code for an SL fake
     /// live hit (`20261023-585-X5`), which producers often leave 樣式 blank on.
     #[serde(default = "default_video_id_styles")]
     pub video_id_styles: Vec<String>,
+}
+
+fn default_blank_style_body_pass_terms() -> Vec<String> {
+    vec!["氣象".into()]
 }
 
 fn default_video_id_styles() -> Vec<String> {
@@ -127,6 +136,7 @@ impl Default for FilterConfig {
             force_pass_slug_prefixes: default_force_pass_slug_prefixes(),
             ambiguous_styles: default_ambiguous_styles(),
             blank_style_timecode_pass: true,
+            blank_style_body_pass_terms: default_blank_style_body_pass_terms(),
             video_id_styles: default_video_id_styles(),
         }
     }
@@ -555,6 +565,7 @@ pub fn migrate(cfg: &mut Config) -> bool {
     union(&mut cfg.annotations.latest_styles, &defaults.annotations.latest_styles);
     union(&mut cfg.filter.force_pass_slug_prefixes, &defaults.filter.force_pass_slug_prefixes);
     union(&mut cfg.filter.video_id_styles, &defaults.filter.video_id_styles);
+    union(&mut cfg.filter.blank_style_body_pass_terms, &defaults.filter.blank_style_body_pass_terms);
     union(&mut cfg.evening.no_online_markers, &defaults.evening.no_online_markers);
 
     // v0.1.9 switched the slug-line markers from 【】 to half-width (). These are
@@ -591,7 +602,8 @@ pub fn migrate(cfg: &mut Config) -> bool {
     }
 
     // v10 (v0.3.8): slug_style_terms 加了 `推稿標=推播`（上面 union 補進去）。
-    // v11 (v0.3.9): [inews] 加 correct_time / correct_time_stable_rounds，serde 預設補上。
+    // v11 (v0.3.9): [inews] 加 correct_time / correct_time_stable_rounds，serde 預設補上；
+    // filter.blank_style_body_pass_terms（氣象）上面 union 補進去。
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -932,6 +944,7 @@ theme = "warm"
         assert_eq!(cfg.inews.poll_seconds, 30);
         assert_eq!(cfg.inews.server, "10.3.125.2");
         assert!(cfg.filter.slug_style_terms.iter().any(|t| t == "自訂詞"));
+        assert_eq!(cfg.filter.blank_style_body_pass_terms, vec!["氣象".to_string()]);
     }
 
 }

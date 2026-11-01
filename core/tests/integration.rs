@@ -712,6 +712,26 @@ fn blank_style_structure_rows_stay_parse_failures() {
 }
 
 #[test]
+fn a_blank_style_weather_slug_with_a_body_passes() {
+    // 合成的氣象主播稿：樣式空白、slug 沒有時間標、編輯備註不是樣式詞（v0.3.9）。
+    let text = "編輯備註: 內有參數\n新聞名稱(標題): 氣象主播-合成-二分\n樣式: \n累積時間: 18:43:22\n\
+                _______________________________________________________________\n\
+                [<\n[雙框_主播]\nT1合成主播\n\n[BAR_最新大]\nT2合成天氣標題\n>]\n\n今天合成的天氣內文。\n";
+    let e = passed(process_text("weather.txt", text, &Config::default()));
+    assert_eq!(e.style, "");
+    assert_eq!(e.title, "合成天氣標題");
+    assert!(e.warnings.iter().any(|w| w.contains("slug 含「氣象」且有內文")), "{:?}", e.warnings);
+}
+
+#[test]
+fn a_blank_style_weather_slug_without_a_body_stays_a_parse_failure() {
+    let text = "新聞名稱(標題): 氣象主播-合成-二分\n樣式: \n累積時間: 18:43:22\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成天氣標題\n>]\n";
+    assert_demoted(process_text("weather.txt", text, &Config::default()), "節目結構");
+}
+
+#[test]
 fn a_timecode_slug_without_a_body_goes_to_needs_manual() {
     let text = "新聞名稱(標題): 北投強風垮1800\n樣式:\n累積時間: 18:10:00\n\
                 _______________________________________________________________\n\

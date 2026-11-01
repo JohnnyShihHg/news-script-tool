@@ -1574,6 +1574,8 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <div class="muted">slug 開頭是這裡的字（例：專）就當成專題，不管樣式是什麼（空白、未知、BS、乾稿）都放進「通過」。開頭的 <code>(寰)</code>、<code>【xx】</code> 這類括號標記會先去掉再判斷；只看開頭，<code>記者專訪</code> 這種中間有「專」的不算。slug 結尾 SOU、編輯備註含「預告」仍然優先。</div>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="filter.blank_style_timecode_pass" ${config.filter.blank_style_timecode_pass !== false ? "checked" : ""} /> 樣式空白、slug 以時間標結尾（例：<code>北投強風垮1800</code>、<code>季瑩氣象2100(ok)</code>）的視為新聞稿並通過</label>
             <div class="muted">樣式欄留空，卡片會註明「依 slug 時間標判定為新聞」。<code>==2200</code> 這類 <code>=</code> 開頭或含 <code>==</code> 的是節目結構，不適用。樣式 <code>D</code> 會看 slug／編輯備註：有 DL、DLIVE、SL、連線、延遲 的當 DLIVE（通過），沒有的當 DRY（擋掉）。比對樣式時連字號和空白不算，<code>D-LIVE</code>、<code>D LIVE</code>、<code>DLIVE</code> 是同一種。</div>
+            ${styleField("樣式空白、slug 含這些詞而且有內文就通過 blank_style_body_pass_terms", "filter.blank_style_body_pass_terms", config.filter.blank_style_body_pass_terms ?? ["氣象"])}
+            <div class="muted">樣式和編輯備註都判斷不出樣式、slug 也沒有時間標的稿，原本會當成節目結構放進「解析失敗」。slug 含這裡的詞（例：<code>氣象主播-樺仙-二分</code> 的氣象）而且有稿頭內文，就視為新聞稿並通過，樣式留空；沒有內文的照舊放進解析失敗。</div>
             ${styleField("編輯備註含這些詞就濾除 blocked_note_terms", "filter.blocked_note_terms", config.filter.blocked_note_terms)}
             <div class="muted">編輯備註裡出現這裡的詞（例：預告），不管樣式是什麼都直接放進「已濾除」，需要時仍可在已濾除勾回來。</div>
           </section>
@@ -1658,6 +1660,7 @@ const LIST_FIELDS = new Set([
   "filter.slug_style_terms",
   "filter.force_pass_slug_prefixes",
   "filter.video_id_styles",
+  "filter.blank_style_body_pass_terms",
   "filter.blocked_note_terms",
   "markers.refresh_keywords",
   "annotations.no_upload_terms",
