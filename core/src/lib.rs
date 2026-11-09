@@ -23,17 +23,14 @@ fn needs_manual(mut entry: NewsEntry, force: bool, cfg: &Config) -> Outcome {
     let class = clean::classify_style(&entry.style, &cfg.filter);
     // 氣象稿沒有稿頭內文也寫入（v0.3.11）。這裡先留在待補稿、只做記號：0822 氣象稿要
     // 先給 App 補氣象署的天氣概況（補進去的要人工核對），之後才由
-    // `pass_weather_without_body` 把還是空的移到通過。樣式被擋（BS）的照樣濾除，
-    // 專題前綴也救不了；樣式不認得的仍留給人判斷；樣式空白而通過的（slug 時間標、
-    // 含氣象）算 force。
+    // `pass_weather_without_body` 把還是空的移到通過。樣式被擋（BS）的照樣濾除；
+    // 樣式不認得的仍留給人判斷。`force`（「專」開頭不論樣式一律通過、樣式空白依
+    // slug 時間標／含氣象判定為新聞）優先：「專」開頭的 BS 氣象稿也照樣寫。
     if let Some(term) = clean::no_body_pass_term(&entry.slug, &cfg.filter) {
         match class {
-            StyleClass::Blocked => return Outcome::FilteredByStyle(entry),
-            StyleClass::Allowed => entry.warnings.push(format!("slug 含「{term}」{NO_BODY_PASS_NOTE}")),
-            StyleClass::Unknown if force && entry.style.trim().is_empty() => {
-                entry.warnings.push(format!("slug 含「{term}」{NO_BODY_PASS_NOTE}"))
-            }
-            StyleClass::Unknown => {}
+            StyleClass::Blocked if !force => return Outcome::FilteredByStyle(entry),
+            StyleClass::Unknown if !force => {}
+            _ => entry.warnings.push(format!("slug 含「{term}」{NO_BODY_PASS_NOTE}")),
         }
         return Outcome::NeedsManualContent(entry);
     }

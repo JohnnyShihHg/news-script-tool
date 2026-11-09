@@ -58,8 +58,9 @@ pub struct FilterConfig {
     #[serde(default = "default_blank_style_body_pass_terms")]
     pub blank_style_body_pass_terms: Vec<String>,
     /// slug 含這些詞的稿沒有稿頭內文也通過、照樣寫入（v0.3.11）。氣象稿常常只有字卡、
-    /// 沒有稿頭（11/9 `叡叡氣象0900` 因此停在待補稿）。樣式被擋（BS 等）的照樣濾除；
-    /// 樣式不認得的仍留給人判斷；製作區完全是空的佔位列仍是解析失敗。
+    /// 沒有稿頭（11/9 `叡叡氣象0900` 因此停在待補稿）。樣式被擋（BS 等）的照樣濾除、
+    /// 樣式不認得的仍留給人判斷，但「專」開頭（`force_pass_slug_prefixes`）優先；製作區
+    /// 完全是空的佔位列仍是解析失敗。
     #[serde(default = "default_no_body_pass_terms")]
     pub no_body_pass_terms: Vec<String>,
     /// `尾碼=樣式` pairs read off the last `-` segment of 影像編號, used only when 樣式

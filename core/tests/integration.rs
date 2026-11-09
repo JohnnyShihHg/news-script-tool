@@ -781,7 +781,7 @@ fn a_weather_entry_whose_body_was_filled_in_stays_for_a_human_to_check() {
 fn imported_pass(name: &str, text: &str, cfg: &Config) -> news_script_core::model::NewsEntry {
     let mut summary = import_files(&[(name.to_string(), text.to_string())], cfg);
     pass_weather_without_body(&mut summary);
-    assert_eq!(summary.passed.len(), 1, "needs_manual: {:?}", summary.needs_manual);
+    assert_eq!(summary.passed.len(), 1, "needs_manual: {:?} filtered: {:?} failed: {:?}", summary.needs_manual, summary.filtered, summary.failed);
     summary.passed.remove(0)
 }
 
@@ -793,9 +793,21 @@ fn a_weather_slug_with_a_blocked_style_is_still_filtered() {
     assert!(matches!(process_text("w.txt", empty, &Config::default()), Outcome::FilteredByStyle(_)));
     let with_body = format!("{empty}\n今天合成的天氣內文。\n");
     assert!(matches!(process_text("w.txt", &with_body, &Config::default()), Outcome::FilteredByStyle(_)));
-    // 不在 slug 開頭也算（叡叡氣象0900）；專題前綴也救不了 BS 的氣象稿。
-    let special = empty.replace("合成氣象0900", "專合成氣象0900");
-    assert!(matches!(process_text("w.txt", &special, &Config::default()), Outcome::FilteredByStyle(_)));
+}
+
+#[test]
+fn a_zhuan_prefixed_weather_slug_passes_even_with_a_blocked_style() {
+    // 「專」開頭不論樣式一律通過（force_pass_slug_prefixes）優先於 BS。
+    let empty = "新聞名稱(標題): 專合成氣象0900\n樣式: BS\n累積時間: 09:12:58\n\
+                 _______________________________________________________________\n\
+                 [<\n[BAR_最新大]\nT2合成天氣標題\n>]\n";
+    let e = imported_pass("w.txt", empty, &Config::default());
+    assert_eq!((e.style.as_str(), e.body.as_str()), ("BS", ""));
+    let with_body = format!("{empty}\n今天合成的天氣內文。\n");
+    passed(process_text("w.txt", &with_body, &Config::default()));
+    // 不認得的樣式也一樣。
+    let odd = empty.replace("樣式: BS", "樣式: 怪樣式");
+    imported_pass("w.txt", &odd, &Config::default());
 }
 
 #[test]
