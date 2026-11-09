@@ -1097,6 +1097,16 @@ fn build_append_script(text: &str) -> String {
           console.error('[news-script-tool] heading formatting failed', fmtErr);
         }}
 
+        // 協作工具的同步有一道閘門：它只在 `bootstrapFinalized` 亮起時才排程上傳，
+        // 沒亮就把改動堆在記憶體裡、而且不會再重試 —— 那一頁變成只收不發，外觀完全
+        // 正常。它另外有一條不看那道閘門的「離開前補送」，掛在 window 的 pagehide 上。
+        //
+        // 所以每次寫完就補送一個 pagehide 事件，把剛寫的內容立刻推上伺服器，不要等
+        // 使用者哪天想到去按 F5。那個監聽器不檢查事件是不是真的來自瀏覽器。
+        //
+        // 它的補送有 48,000 字元上限、超過就靜默放棄，所以這不是根治 —— 但每寫完就推
+        // 一次，就不容易累積到那個上限。根治要請工具作者把上傳解開那道閘門。
+        try {{ window.dispatchEvent(new Event('pagehide')); }} catch (nudgeErr) {{}}
         var lineCount = importedText.split('\n').length;
         send({{ Ok: '已寫入 ' + lineCount + ' 行到文件最下方（其中 ' + headingCount + ' 行設為標題）。' }});
       }} catch (e) {{
@@ -1243,6 +1253,9 @@ fn build_correct_script(fixes: &[news_script_core::doc_match::TimeCorrection]) -
             return {{ ok: false, reason: String(e) }};
           }}
         }});
+        // 跟寫入同一個理由：補送一個 pagehide，讓校正好的時間立刻推上伺服器。
+        // （為什麼需要這招，見 build_append_script 裡的說明。）
+        try {{ window.dispatchEvent(new Event('pagehide')); }} catch (nudgeErr) {{}}
         send({{ Ok: JSON.stringify(results) }});
       }} catch (e) {{
         send({{ Err: String(e) }});
