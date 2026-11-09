@@ -129,7 +129,7 @@ impl Default for FilterConfig {
                 "SOT".into(), "短sot".into(), "LIVE".into(), "海神".into(),
                 "閃電".into(), "旋風".into(), "4G".into(), "TEL".into(), "電連".into(),
                 "SLIVE".into(), "SL".into(), "SNG".into(), "推播".into(), "連線".into(),
-                "電聯".into(), "DL".into(), "DLIVE".into(), "直進".into(),
+                "電聯".into(), "DL".into(), "DLIVE".into(), "直進".into(), "真連".into(),
             ],
             blocked_styles: [
                 "BS", "SO", "乾稿", "乾", "DRY", "改BS", "SOBS", "PRO", "PROMO", "片頭",
@@ -536,7 +536,7 @@ impl Default for InewsConfig {
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 14;
+pub const CURRENT_CONFIG_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -643,6 +643,8 @@ pub fn migrate(cfg: &mut Config) -> bool {
     // v13 (v0.3.11): [inews] 加 write_stable_rounds、anomaly_*、recheck_interval_minutes，
     // serde 預設補上。
     // v14 (v0.3.11): filter.no_body_pass_terms（氣象沒內文也寫入）上面 union 補進去。
+    // v15 (v0.3.12): allowed_styles 加「真連」（上面 union 補進去）。沒有這一版，
+    // 已經開過設定頁的人存下來的清單會蓋掉新預設，真連永遠不會被放行。
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -914,6 +916,23 @@ theme = "warm"
     }
 
     #[test]
+    fn an_older_config_gains_the_real_live_style() {
+        // 只有「開過設定頁、把清單存下來」的人會卡住：存下來的 allowed_styles 會整個
+        // 蓋掉新預設，所以新樣式一定要靠 migrate 的 union 才進得去。
+        let mut old = Config::default();
+        old.config_version = CURRENT_CONFIG_VERSION - 1;
+        old.filter.allowed_styles.retain(|s| s != "真連");
+        old.filter.allowed_styles.push("自訂樣式".into());
+
+        assert!(migrate(&mut old));
+        assert!(old.filter.allowed_styles.iter().any(|s| s == "真連"), "真連 沒有被補進去");
+        assert!(old.filter.allowed_styles.iter().any(|s| s == "自訂樣式"), "使用者自己加的要留著");
+        assert_eq!(crate::clean::classify_style("真連", &old.filter), crate::model::StyleClass::Allowed);
+        // 全形寫法、前後空白都要認得，跟其他樣式同一套折疊規則。
+        assert_eq!(crate::clean::classify_style(" 真連 ", &old.filter), crate::model::StyleClass::Allowed);
+    }
+
+    #[test]
     fn a_version_7_config_gains_the_v032_styles_and_keeps_the_users_own() {
         // v0.3.1 as saved on disk: the old narrower lists, slug_keep_terms (removed in
         // v0.3.2), a style the user added themselves, and none of the new settings.
@@ -990,7 +1009,7 @@ theme = "warm"
     #[test]
     fn a_version_12_config_gains_the_rundown_guard_and_keeps_its_settings() {
         let mut old = Config::default();
-        old.config_version = 12;
+        old.config_version = CURRENT_CONFIG_VERSION - 1;
         old.inews.poll_seconds = 30;
         old.inews.correct_time_max_delta_minutes = 7;
         let guard_keys = ["write_stable_rounds", "anomaly_", "recheck_interval_minutes"];

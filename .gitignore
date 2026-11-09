@@ -33,3 +33,4 @@ desktop.ini
 
 # Generated when the app crate is checked on a Mac; the app ships for Windows only.
 app/src-tauri/gen/schemas/macOS-schema.json
+.DS_Store
