@@ -985,7 +985,21 @@ async fn eval_in_collab_and_wait(
         .ok_or_else(|| "還沒開啟協作工具視窗，請先點「開啟協作工具」。".to_string())?;
 
     // 一次只跑一個協作操作。讀文件／寫入／校正共用同一條回覆通道，不排隊就會互搶。
-    let _turn = state.collab_turn.lock().await;
+    //
+    // 等不到就回報錯誤，不要無限等：tokio 的 Mutex 不可重入，萬一哪天有人把兩個
+    // 協作操作寫成巢狀（在一個操作裡面再叫一個），就會自己鎖死自己。那會是沒有任何
+    // 訊息的永久卡住 —— 這個 App 最難查的就是這種無聲故障。30 秒換一句看得懂的話。
+    let _turn = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        state.collab_turn.lock(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err("另一個協作操作還在進行中（等了 30 秒）。請等它跑完再試；一直出現請回報。".to_string())
+        }
+    };
 
     let id = NEXT_COLLAB_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (tx, rx) = tokio::sync::oneshot::channel();
