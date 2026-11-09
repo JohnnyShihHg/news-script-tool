@@ -17,13 +17,37 @@ const KEYRING_USER: &str = "gemini_api_key";
 const KEYRING_INEWS_USER: &str = "inews_username";
 const KEYRING_INEWS_PASS: &str = "inews_password";
 const COLLAB_WINDOW_LABEL: &str = "collab";
+
+/// 每個協作操作的流水號，用來確認回覆屬於哪一次請求。
+static NEXT_COLLAB_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 const COLLAB_URL: &str = "https://small-helper-4-20260724.ebclan1.chatgpt.site/helper4";
+
+/// 拿鎖，而且不怕「毒化」。
+///
+/// Rust 的 Mutex 會在「有人持鎖時 panic」之後把鎖標記成毒化，之後每次 `lock()` 都回
+/// 傳 Err。原本每一處都寫 `.unwrap()`，等於毒化後每一個功能都會再 panic 一次 ——
+/// 一次意外變成整個 App 永久故障，而且 `windows_subsystem = "windows"` 下沒有任何
+/// 訊息，就是無聲當掉（v0.1.9 那次閃退的同一種死法）。
+///
+/// 這裡存的是設定、回覆通道、iNEWS 連線狀態這類「整個換掉」的值，不是改到一半就會
+/// 壞掉的結構，所以毒化之後把裡面的值直接拿出來用是安全的。
+pub fn lock_or_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 struct AppState {
     config: Mutex<Config>,
     /// Holds the reply channel for an in-flight scrape while we wait for the
-    /// injected script running in the collab webview to call `receive_scraped_text`.
-    scrape_reply: Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>,
+    /// injected script running in the collab webview to call `receive_scraped_text`,
+    /// together with the id of the request that is waiting for it.
+    ///
+    /// 編號是為了擋「回覆送錯對象」：兩個協作操作重疊時，第二個等待者會收到第一個
+    /// 腳本的回覆（例如比對收到「已寫入 12 行」當成文件內容，於是整份文件在比對眼中
+    /// 只有一行，每一則都被判成不在文件裡 —— 然後整批重複寫進協作文件）。
+    scrape_reply: Mutex<Option<(u64, tokio::sync::oneshot::Sender<Result<String, String>>)>>,
+    /// 協作操作一次只跑一個。讀文件、寫入、校正時間都走同一條 eval→回覆的通道，
+    /// 沒有這把鎖就會互搶。
+    collab_turn: tokio::sync::Mutex<()>,
     /// iNEWS 的控制連線與稿件快取，跨輪保留。Arc 是因為 FTP 是阻塞的，要帶進
     /// `spawn_blocking`；Mutex 同時保證兩輪不會同時跑。
     inews: std::sync::Arc<Mutex<inews::InewsState>>,
@@ -214,7 +238,7 @@ async fn import_texts(files: &[(String, String)], cfg: &Config) -> ImportSummary
 async fn import_folder(window: tauri::Window, state: tauri::State<'_, AppState>, folder: String) -> Result<ImportSummaryDto, String> {
     require_main_window(&window)?;
     let files = read_txt_files(&folder).map_err(|e| e.to_string())?;
-    let cfg = state.config.lock().unwrap().clone();
+    let cfg = lock_or_recover(&state.config).clone();
     Ok(import_texts(&files, &cfg).await)
 }
 
@@ -263,7 +287,7 @@ async fn import_inews(
     session_start: Option<bool>,
 ) -> Result<ImportSummaryDto, String> {
     require_main_window(&window)?;
-    let cfg = state.config.lock().unwrap().clone();
+    let cfg = lock_or_recover(&state.config).clone();
     let creds = inews_credentials()?;
     let shared = state.inews.clone();
     let inews_cfg = cfg.inews.clone();
@@ -354,7 +378,7 @@ fn open_inews_log_folder(window: tauri::Window) -> Result<String, String> {
 #[tauri::command]
 async fn test_inews_connection(window: tauri::Window, state: tauri::State<'_, AppState>) -> Result<String, String> {
     require_main_window(&window)?;
-    let cfg = state.config.lock().unwrap().inews.clone();
+    let cfg = lock_or_recover(&state.config).inews.clone();
     let creds = inews_credentials()?;
     tauri::async_runtime::spawn_blocking(move || inews::test_connection(&cfg, &creds))
         .await
@@ -473,7 +497,7 @@ async fn save_text_file(
 #[tauri::command]
 fn get_config(window: tauri::Window, state: tauri::State<AppState>) -> Result<Config, String> {
     require_main_window(&window)?;
-    Ok(state.config.lock().unwrap().clone())
+    Ok(lock_or_recover(&state.config).clone())
 }
 
 fn save_config_inner(state: &tauri::State<AppState>, config: Config) -> Result<(), String> {
@@ -499,7 +523,7 @@ fn save_config_inner(state: &tauri::State<AppState>, config: Config) -> Result<(
 
     let path = config_path().ok_or_else(|| "找不到設定檔存放路徑".to_string())?;
     news_script_core::config::save_to_path(&config, &path).map_err(|e| e.to_string())?;
-    *state.config.lock().unwrap() = config;
+    *lock_or_recover(&state.config) = config;
     Ok(())
 }
 
@@ -535,7 +559,7 @@ fn normalize_text(
     is_title: Option<bool>,
 ) -> Result<NormalizeResultDto, String> {
     require_main_window(&window)?;
-    let cfg = state.config.lock().unwrap();
+    let cfg = lock_or_recover(&state.config);
     let result = if is_title.unwrap_or(false) {
         news_script_core::punctuation::normalize_title(&text, &cfg.punctuation)
     } else {
@@ -629,7 +653,7 @@ fn build_gemini_client() -> reqwest::Client {
 fn resolve_gemini_config(state: &tauri::State<AppState>) -> Result<GeminiConfig, String> {
     let api_key = resolve_api_key()
         .ok_or_else(|| "尚未設定 Gemini API key，請到設定頁輸入。".to_string())?;
-    let model = state.config.lock().unwrap().gemini.model.clone();
+    let model = lock_or_recover(&state.config).gemini.model.clone();
     Ok(GeminiConfig { api_key, model })
 }
 
@@ -784,7 +808,12 @@ async fn open_collab_window(window: tauri::Window, app: tauri::AppHandle) -> Res
 /// the outline text; delivers it to whichever `compare_with_collab_doc` call is
 /// currently waiting.
 #[tauri::command]
-fn receive_scraped_text(window: tauri::Window, state: tauri::State<AppState>, text: Result<String, String>) {
+fn receive_scraped_text(
+    window: tauri::Window,
+    state: tauri::State<AppState>,
+    text: Result<String, String>,
+    id: Option<u64>,
+) {
     if window.label() != COLLAB_WINDOW_LABEL {
         return;
     }
@@ -793,7 +822,14 @@ fn receive_scraped_text(window: tauri::Window, state: tauri::State<AppState>, te
     if matches!(&text, Ok(t) if t == "__PROBE_PING__") {
         return;
     }
-    if let Some(tx) = state.scrape_reply.lock().unwrap().take() {
+    let mut slot = lock_or_recover(&state.scrape_reply);
+    // 編號對不上就丟掉：遲到的回覆（上一個操作逾時後才送達）絕不能交給正在等的那個
+    // 操作，不然比對會拿到寫入的結果、寫入會拿到比對的結果。
+    match slot.as_ref() {
+        Some((waiting, _)) if Some(*waiting) == id => {}
+        _ => return,
+    }
+    if let Some((_, tx)) = slot.take() {
         let _ = tx.send(text);
     }
 }
@@ -812,7 +848,7 @@ const SCRAPE_SCRIPT: &str = r#"
       console.error('[news-script-tool] window.__TAURI__.core.invoke unavailable in collab webview.', payload);
       return;
     }
-    window.__TAURI__.core.invoke('receive_scraped_text', { text: payload })
+    window.__TAURI__.core.invoke('receive_scraped_text', { text: payload, id: window.__nstReqId })
       .catch((e) => console.error('[news-script-tool] receive_scraped_text invoke rejected', e));
   }
   try {
@@ -948,17 +984,24 @@ async fn eval_in_collab_and_wait(
         .get_webview_window(COLLAB_WINDOW_LABEL)
         .ok_or_else(|| "還沒開啟協作工具視窗，請先點「開啟協作工具」。".to_string())?;
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    *state.scrape_reply.lock().unwrap() = Some(tx);
+    // 一次只跑一個協作操作。讀文件／寫入／校正共用同一條回覆通道，不排隊就會互搶。
+    let _turn = state.collab_turn.lock().await;
 
-    collab.eval(script).map_err(|e| e.to_string())?;
+    let id = NEXT_COLLAB_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    *lock_or_recover(&state.scrape_reply) = Some((id, tx));
+
+    // 注入的腳本用 `window.__nstReqId` 把編號原封帶回來。
+    collab
+        .eval(&format!("window.__nstReqId = {id};\n{script}"))
+        .map_err(|e| e.to_string())?;
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
         Ok(Ok(Ok(text))) => Ok(text),
         Ok(Ok(Err(e))) => Err(e),
         Ok(Err(_)) => Err("與協作工具溝通時發生內部錯誤（channel closed）。".to_string()),
         Err(_) => {
-            *state.scrape_reply.lock().unwrap() = None;
+            *lock_or_recover(&state.scrape_reply) = None;
             Err("逾時（10 秒）。請按「診斷協作連線」查看實際原因。".to_string())
         }
     }
@@ -986,7 +1029,7 @@ fn build_append_script(text: &str) -> String {
     (function() {{
       function send(payload) {{
         if (!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)) return;
-        window.__TAURI__.core.invoke('receive_scraped_text', {{ text: payload }})
+        window.__TAURI__.core.invoke('receive_scraped_text', {{ text: payload, id: window.__nstReqId }})
           .catch(function(e) {{ console.error('[news-script-tool] reply failed', e); }});
       }}
       try {{
@@ -1073,7 +1116,7 @@ fn build_correct_script(fixes: &[news_script_core::doc_match::TimeCorrection]) -
     (function() {{
       function send(payload) {{
         if (!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)) return;
-        window.__TAURI__.core.invoke('receive_scraped_text', {{ text: payload }})
+        window.__TAURI__.core.invoke('receive_scraped_text', {{ text: payload, id: window.__nstReqId }})
           .catch(function(e) {{ console.error('[news-script-tool] reply failed', e); }});
       }}
       try {{
@@ -1146,7 +1189,7 @@ async fn correct_collab_times(
 ) -> Result<CorrectDto, String> {
     use news_script_core::doc_match::{plan_time_corrections, stable_corrections, streak_key};
     require_main_window(&window)?;
-    let cfg = state.config.lock().unwrap().clone();
+    let cfg = lock_or_recover(&state.config).clone();
     if !cfg.inews.correct_time {
         return Ok(CorrectDto::default());
     }
@@ -1164,7 +1207,7 @@ async fn correct_collab_times(
     };
 
     let (ready, waiting) = {
-        let mut fix = state.time_fix.lock().unwrap();
+        let mut fix = lock_or_recover(&state.time_fix);
         if fix.day != today {
             fix.day = today.clone();
             fix.logged.clear();
@@ -1184,7 +1227,7 @@ async fn correct_collab_times(
     }
     let reply = eval_in_collab_and_wait(&app, &state, &build_correct_script(&ready)).await?;
     let results: Vec<CorrectReply> = serde_json::from_str(&reply).map_err(|e| format!("校正結果無法解讀：{e}"))?;
-    let mut fix = state.time_fix.lock().unwrap();
+    let mut fix = lock_or_recover(&state.time_fix);
     for (c, r) in ready.iter().zip(results) {
         let what = format!("{} {} → {}", c.slug, c.old_time, c.new_time);
         if r.ok {
@@ -1221,7 +1264,7 @@ async fn compare_with_collab_doc(
     require_main_window(&window)?;
     let doc_text = scrape_collab_text(&app, &state).await?;
 
-    let cfg = state.config.lock().unwrap().clone();
+    let cfg = lock_or_recover(&state.config).clone();
     let (today, previous) = inews::broadcast_days(inews::taipei_now(), &cfg.inews.broadcast_day_start);
     let days = day_sections(&doc_text, &today, &previous);
     // 工具自己加在標題前面的前綴和 slug 標記，跨天比對標題時不算。
@@ -1309,7 +1352,7 @@ async fn compare_with_collab_doc(
     }
     log.extend(suspects.iter().map(|s| format!("[比對] 前一天有同 slug，當新稿寫：{s}")));
     let log = log.join("\n");
-    let mut last = state.last_compare_log.lock().unwrap();
+    let mut last = lock_or_recover(&state.last_compare_log);
     if *last != log {
         if let Some(dir) = inews_log_dir() {
             for line in log.lines() {
@@ -1350,7 +1393,7 @@ async fn compare_evening(
     let doc_text = scrape_collab_text(&app, &state).await?;
     let section = date_section(&doc_text, &mmdd)
         .ok_or_else(|| format!("協作文件裡找不到 {mmdd} 的日期分隔線（========{mmdd}========），請確認日期。"))?;
-    let markers = state.config.lock().unwrap().evening.no_online_markers.clone();
+    let markers = lock_or_recover(&state.config).evening.no_online_markers.clone();
     Ok(slugs
         .into_iter()
         .map(|slug| {
@@ -1406,6 +1449,7 @@ fn main() {
         .manage(AppState {
             config: Mutex::new(load_config_from_disk_or_default()),
             scrape_reply: Mutex::new(None),
+            collab_turn: tokio::sync::Mutex::new(()),
             inews: Default::default(),
             last_compare_log: Mutex::new(String::new()),
             time_fix: Default::default(),
@@ -1444,4 +1488,35 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::lock_or_recover;
+    use std::sync::{Arc, Mutex};
+
+    /// 回歸：毒化之後還是要能拿到鎖。
+    ///
+    /// 舊寫法 `lock().unwrap()` 在這裡會 panic，而且是每一次都 panic —— 設定、匯入、
+    /// 產生關鍵字全部跟著死，App 等於變磚只能重開。
+    #[test]
+    fn a_poisoned_lock_still_hands_back_its_value() {
+        let m = Arc::new(Mutex::new(String::from("設定還在")));
+
+        // 製造毒化：另一條執行緒持鎖時 panic。
+        let m2 = Arc::clone(&m);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _guard = m2.lock().unwrap();
+            panic!("模擬持鎖時出事");
+        })
+        .join();
+        std::panic::set_hook(previous);
+
+        assert!(m.lock().is_err(), "這把鎖現在應該是毒化狀態");
+        assert_eq!(*lock_or_recover(&m), "設定還在");
+        // 毒化不會自己消失，所以第二次也要能拿到。
+        assert_eq!(*lock_or_recover(&m), "設定還在");
+    }
 }

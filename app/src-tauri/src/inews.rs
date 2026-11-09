@@ -1363,7 +1363,7 @@ mod tests {
                         if reader.read_until(b'\n', &mut raw).unwrap_or(0) == 0 {
                             break;
                         }
-                        log2.lock().unwrap().push(raw.clone());
+                        crate::lock_or_recover(&log2).push(raw.clone());
                         count += 1;
                         if !dropped && drop_after == Some(count) {
                             dropped = true;
@@ -1399,8 +1399,8 @@ mod tests {
                                 let body = if cmd == "LIST" {
                                     queues.lock().unwrap().get(&cwd).cloned().filter(|b| !b.is_empty())
                                 } else {
-                                    *retrs2.lock().unwrap() += 1;
-                                    stories.lock().unwrap().get(arg).cloned()
+                                    *crate::lock_or_recover(&retrs2) += 1;
+                                    crate::lock_or_recover(&stories).get(arg).cloned()
                                 };
                                 let l = data_listener.take().unwrap();
                                 match body {
@@ -1438,7 +1438,7 @@ mod tests {
         }
 
         fn commands(&self) -> Vec<String> {
-            self.log.lock().unwrap().iter().map(|l| String::from_utf8_lossy(l).trim_end().to_string()).collect()
+            crate::lock_or_recover(&self.log).iter().map(|l| String::from_utf8_lossy(l).trim_end().to_string()).collect()
         }
     }
 
@@ -1633,7 +1633,7 @@ mod tests {
         let cmds = server.commands();
         assert_eq!(&cmds[..4], ["USER tester", "PASS secret", "TYPE A", "SITE FORMAT=3NSML"]);
         assert!(!cmds.iter().any(|c| c.contains("LONGNAMES")));
-        assert!(server.log.lock().unwrap().iter().all(|l| !l.starts_with(&[0xEF, 0xBB, 0xBF]) && l.ends_with(b"\r\n")));
+        assert!(crate::lock_or_recover(&server.log).iter().all(|l| !l.starts_with(&[0xEF, 0xBB, 0xBF]) && l.ends_with(b"\r\n")));
         assert!(cmds.contains(&"CWD 51新聞台.SHOWS".to_string()));
     }
 
@@ -1678,12 +1678,12 @@ mod tests {
         assert_eq!(rows, [("大片頭", "07:55:00"), ("合成早安稿0800", "07:56:00"), ("合成第二則0800", "07:58:00"), ("下節預告三", "07:59:30")]);
         assert_eq!((r.meta.time_rows[0].start, r.meta.time_rows[0].end), (28500, 32100), "07:55:00 ～ 08:55:00");
         // 0800 全部 7 則 + 為了算 0800 的結束時間讀的 0900 的 2 則。
-        assert_eq!(*server.retrs.lock().unwrap(), 9);
+        assert_eq!(*crate::lock_or_recover(&server.retrs), 9);
 
         // 第二輪：每個 queue LIST 一次，沒有任何變動就不 RETR。
         let r = state.fetch(&cfg(server.port), &creds("secret"), 8 * 3600 + 21 * 60, FetchMode::Manual).unwrap();
         assert_eq!(r.meta.retrieved, 0);
-        assert_eq!(*server.retrs.lock().unwrap(), 9);
+        assert_eq!(*crate::lock_or_recover(&server.retrs), 9);
         let lists = server.commands().iter().filter(|c| *c == "LIST").count();
         assert_eq!(lists, 5, "root once (cached), both queues once per round");
     }

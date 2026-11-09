@@ -219,6 +219,15 @@ pub async fn generate_group_keywords(
     Ok(parse_keywords_json(&text)?.into_iter().take(count).collect())
 }
 
+/// 保險起見再擋一層：任何要給人看的錯誤字串，先把 `key=…` 的值遮掉。
+///
+/// 金鑰已經改走標頭，正常情況下不會出現在訊息裡。但錯誤字串來自外部函式庫，它哪天
+/// 多印什麼不是我們能控制的，而這些字串會直接顯示在畫面上。遮蔽的成本是零。
+pub fn redact_key(msg: &str) -> String {
+    let re = regex::Regex::new(r"(?i)(key=)[A-Za-z0-9_\-]{4,}").unwrap();
+    re.replace_all(msg, "${1}***").into_owned()
+}
+
 /// POST one prompt expecting a JSON response and return the model's text. Retries
 /// 429/5xx up to 3 times with exponential backoff; other errors return immediately.
 async fn request_json_text(
@@ -227,9 +236,15 @@ async fn request_json_text(
     prompt: &str,
     schema: serde_json::Value,
 ) -> Result<String, GeminiError> {
+    // 金鑰走標頭，不放在網址裡。
+    //
+    // reqwest 的錯誤訊息會把整條網址印出來（實測：`error sending request for url
+    // (https://…?key=AIza…)`），而這個字串會原封不動顯示在卡片的「產生失敗」訊息上。
+    // 斷線或公司網路擋掉就會跳一次，金鑰也就跟著出現在螢幕上——把它存進 Windows
+    // 認證管理員的意義就沒了。放標頭的話錯誤訊息只會帶網址，不帶金鑰。
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        cfg.model, cfg.api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        cfg.model
     );
     let payload = serde_json::json!({
         "contents": [{ "parts": [{ "text": prompt }] }],
@@ -247,10 +262,16 @@ async fn request_json_text(
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         }
 
-        let resp = match client.post(&url).json(&payload).send().await {
+        let resp = match client
+            .post(&url)
+            .header("x-goog-api-key", &cfg.api_key)
+            .json(&payload)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
-                last_err = Some(GeminiError::Transport(e.to_string()));
+                last_err = Some(GeminiError::Transport(redact_key(&e.to_string())));
                 continue;
             }
         };
@@ -259,7 +280,7 @@ async fn request_json_text(
         if status.is_success() {
             let parsed: GeminiResponse = match resp.json().await {
                 Ok(p) => p,
-                Err(e) => return Err(GeminiError::Parse(e.to_string())),
+                Err(e) => return Err(GeminiError::Parse(redact_key(&e.to_string()))),
             };
             return parsed
                 .first_text()
@@ -268,7 +289,7 @@ async fn request_json_text(
 
         let retryable = status.as_u16() == 429 || status.is_server_error();
         let body_text = resp.text().await.unwrap_or_default();
-        last_err = Some(GeminiError::Api { status: status.as_u16(), body: body_text });
+        last_err = Some(GeminiError::Api { status: status.as_u16(), body: redact_key(&body_text) });
         if !retryable {
             break;
         }
@@ -383,5 +404,34 @@ mod tests {
     #[test]
     fn malformed_json_is_a_parse_error() {
         assert!(parse_keywords_json("not json").is_err());
+    }
+}
+
+#[cfg(test)]
+mod key_safety_tests {
+    use super::*;
+
+    #[test]
+    fn a_url_in_an_error_message_never_carries_the_key() {
+        // reqwest 的錯誤訊息長這樣（實測過）。金鑰已經改走標頭，但萬一哪天又回到
+        // 網址上，這層遮蔽要接得住。
+        let msg = "error sending request for url (https://generativelanguage.googleapis.com/v1beta/models/x:generateContent?key=AIzaSyABCDEF1234567890)";
+        let out = redact_key(msg);
+        assert!(!out.contains("AIzaSyABCDEF1234567890"), "金鑰漏出來了：{out}");
+        assert!(out.contains("key=***"));
+        // 其餘內容要留著，不然錯誤訊息就沒用了
+        assert!(out.contains("generativelanguage.googleapis.com"));
+    }
+
+    #[test]
+    fn redaction_is_case_insensitive_and_handles_several_occurrences() {
+        let out = redact_key("a KEY=AIzaAAAA1111 b key=BBBB2222 c");
+        assert_eq!(out, "a KEY=*** b key=*** c");
+    }
+
+    #[test]
+    fn a_message_without_a_key_is_untouched() {
+        let msg = "連線逾時：dns error";
+        assert_eq!(redact_key(msg), msg);
     }
 }
