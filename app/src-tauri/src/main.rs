@@ -169,6 +169,8 @@ async fn import_texts(files: &[(String, String)], cfg: &Config) -> ImportSummary
     let total_files = files.len();
     let mut summary = import_files(files, cfg);
     weather::fill_manual_weather(&mut summary.needs_manual).await;
+    // 氣象稿沒內文也寫入（v0.3.11）：補完 0822 的內文之後，還是空的才移到通過。
+    news_script_core::pass_weather_without_body(&mut summary);
 
     let mut entries = Vec::new();
     for e in &summary.passed {

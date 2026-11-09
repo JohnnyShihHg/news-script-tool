@@ -305,6 +305,16 @@ pub fn body_pass_term(slug: &str, cfg: &FilterConfig) -> Option<String> {
         .map(str::to_string)
 }
 
+/// slug 含 `no_body_pass_terms` 其中一個（`氣象`）：沒有稿頭內文也通過（v0.3.11）。
+pub fn no_body_pass_term(slug: &str, cfg: &FilterConfig) -> Option<String> {
+    let s = fold(slug);
+    cfg.no_body_pass_terms
+        .iter()
+        .map(|t| t.trim())
+        .find(|t| !t.is_empty() && s.contains(&fold(t)))
+        .map(str::to_string)
+}
+
 /// slug 以 4 位數時間標結尾（`0000`～`2459`，後面可以接 `(ok)`、`-1` 這類尾巴），
 /// 回傳那個時間標。`=` 開頭或含 `==` 的是節目結構（`==2200`、`=算好2255進23`）。
 pub fn slug_timecode(slug: &str) -> Option<String> {

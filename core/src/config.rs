@@ -57,6 +57,11 @@ pub struct FilterConfig {
     /// 樣式詞，原本會被當成節目結構放進解析失敗。沒有內文的不算，免得把空的佔位列收進來。
     #[serde(default = "default_blank_style_body_pass_terms")]
     pub blank_style_body_pass_terms: Vec<String>,
+    /// slug 含這些詞的稿沒有稿頭內文也通過、照樣寫入（v0.3.11）。氣象稿常常只有字卡、
+    /// 沒有稿頭（11/9 `叡叡氣象0900` 因此停在待補稿）。樣式被擋（BS 等）的照樣濾除；
+    /// 樣式不認得的仍留給人判斷；製作區完全是空的佔位列仍是解析失敗。
+    #[serde(default = "default_no_body_pass_terms")]
+    pub no_body_pass_terms: Vec<String>,
     /// `尾碼=樣式` pairs read off the last `-` segment of 影像編號, used only when 樣式
     /// is blank and the slug names no style. `X5` is the camera code for an SL fake
     /// live hit (`20261023-585-X5`), which producers often leave 樣式 blank on.
@@ -65,6 +70,10 @@ pub struct FilterConfig {
 }
 
 fn default_blank_style_body_pass_terms() -> Vec<String> {
+    vec!["氣象".into()]
+}
+
+fn default_no_body_pass_terms() -> Vec<String> {
     vec!["氣象".into()]
 }
 
@@ -137,6 +146,7 @@ impl Default for FilterConfig {
             ambiguous_styles: default_ambiguous_styles(),
             blank_style_timecode_pass: true,
             blank_style_body_pass_terms: default_blank_style_body_pass_terms(),
+            no_body_pass_terms: default_no_body_pass_terms(),
             video_id_styles: default_video_id_styles(),
         }
     }
@@ -525,7 +535,7 @@ impl Default for InewsConfig {
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 13;
+pub const CURRENT_CONFIG_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -589,6 +599,7 @@ pub fn migrate(cfg: &mut Config) -> bool {
     union(&mut cfg.filter.force_pass_slug_prefixes, &defaults.filter.force_pass_slug_prefixes);
     union(&mut cfg.filter.video_id_styles, &defaults.filter.video_id_styles);
     union(&mut cfg.filter.blank_style_body_pass_terms, &defaults.filter.blank_style_body_pass_terms);
+    union(&mut cfg.filter.no_body_pass_terms, &defaults.filter.no_body_pass_terms);
     union(&mut cfg.evening.no_online_markers, &defaults.evening.no_online_markers);
 
     // v0.1.9 switched the slug-line markers from 【】 to half-width (). These are
@@ -630,6 +641,7 @@ pub fn migrate(cfg: &mut Config) -> bool {
     // v12 (v0.3.10): [inews] 加 correct_time_max_delta_minutes，serde 預設補上。
     // v13 (v0.3.11): [inews] 加 write_stable_rounds、anomaly_*、recheck_interval_minutes，
     // serde 預設補上。
+    // v14 (v0.3.11): filter.no_body_pass_terms（氣象沒內文也寫入）上面 union 補進去。
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true

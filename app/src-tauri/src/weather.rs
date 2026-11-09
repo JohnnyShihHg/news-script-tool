@@ -160,9 +160,10 @@ fn apply_outlook(entry: &mut NewsEntry, response: &Result<Outlook, String>, toda
         Ok(outlook) => match modified_date(entry) {
             Some(date) if date == outlook.date => {
                 entry.body = outlook.body.clone();
-                entry
-                    .warnings
-                    .retain(|w| w != "找到標題但無稿頭內文，需人工補稿");
+                // 補進內文就留在待補稿給人核對，不再當「沒內文也寫入」（v0.3.11）。
+                entry.warnings.retain(|w| {
+                    w != "找到標題但無稿頭內文，需人工補稿" && !w.ends_with(news_script_core::NO_BODY_PASS_NOTE)
+                });
                 entry.warnings.push(format!(
                     "已用中央氣象署 {date} 的「今、明」天氣概況補入內文，請人工核對"
                 ));

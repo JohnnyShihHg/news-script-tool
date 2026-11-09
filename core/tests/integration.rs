@@ -8,7 +8,7 @@
 
 use news_script_core::config::Config;
 use news_script_core::model::Outcome;
-use news_script_core::{format, import_files, process_text};
+use news_script_core::{format, import_files, pass_weather_without_body, process_text};
 
 fn load_fixtures() -> Vec<(String, String)> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -234,13 +234,27 @@ fn weather_style_scripts_with_only_plain_bar_cards_still_get_a_title() {
 }
 
 #[test]
-fn weather_script_with_no_content_after_the_block_needs_manual_content_not_skipped() {
+fn weather_script_with_no_content_after_the_block_is_written_anyway() {
+    // Only [BAR] cards, no 稿頭內文 at all after >]. Since v0.3.11 a 氣象 slug is
+    // written without a body (`no_body_pass_terms`).
+    let files = load_fixtures();
+    let (name, text) = fixture(&files, "合成氣象無稿頭1050.txt");
+    let e = imported_pass(name, text, &Config::default());
+    assert!(e.title.contains("本週天氣不穩"), "title was {:?}", e.title);
+    assert_eq!(e.body, "");
+    assert!(e.warnings.iter().any(|w| w.contains("slug 含「氣象」，沒有稿頭內文也寫入")), "{:?}", e.warnings);
+    assert!(!e.warnings.iter().any(|w| w.contains("需人工補")), "{:?}", e.warnings);
+}
+
+#[test]
+fn weather_script_with_no_content_needs_manual_content_when_the_rule_is_off() {
     // Mirrors the real shape reported by the user: only [BAR] cards, no 稿頭內文 at
     // all after >]. Must not be silently dropped -- the title was found fine, only
     // the body is missing.
     let files = load_fixtures();
     let (name, text) = fixture(&files, "合成氣象無稿頭1050.txt");
-    let cfg = Config::default();
+    let mut cfg = Config::default();
+    cfg.filter.no_body_pass_terms.clear();
     match process_text(name, text, &cfg) {
         Outcome::NeedsManualContent(e) => {
             assert!(e.title.contains("本週天氣不穩"), "title was {:?}", e.title);
@@ -724,11 +738,75 @@ fn a_blank_style_weather_slug_with_a_body_passes() {
 }
 
 #[test]
-fn a_blank_style_weather_slug_without_a_body_stays_a_parse_failure() {
+fn a_blank_style_weather_slug_without_a_body_is_written_since_v0_3_11() {
     let text = "新聞名稱(標題): 氣象主播-合成-二分\n樣式: \n累積時間: 18:43:22\n\
                 _______________________________________________________________\n\
                 [<\n[BAR_最新大]\nT2合成天氣標題\n>]\n";
-    assert_demoted(process_text("weather.txt", text, &Config::default()), "節目結構");
+    let e = imported_pass("weather.txt", text, &Config::default());
+    assert_eq!((e.style.as_str(), e.title.as_str(), e.body.as_str()), ("", "合成天氣標題", ""));
+
+    // 規則關掉就是 v0.3.9 的行為：沒內文的不算，當節目結構。
+    let mut cfg = Config::default();
+    cfg.filter.no_body_pass_terms.clear();
+    assert_demoted(process_text("weather.txt", text, &cfg), "節目結構");
+}
+
+#[test]
+fn a_weather_slug_like_the_1109_0900_one_is_written_without_a_body() {
+    // 叡叡氣象0900 的樣子：樣式空白、slug 帶時間標、只有字卡。
+    let text = "新聞名稱(標題): 合成氣象0900\n樣式: \n累積時間: 09:12:58\n\
+                _______________________________________________________________\n\
+                [<\n[BAR]\nT2合成天氣字卡\n>]\n";
+    // 分類時先留在待補稿（App 要先補 0822 的氣象署內文），匯入流程最後才移到通過。
+    assert!(matches!(process_text("w.txt", text, &Config::default()), Outcome::NeedsManualContent(_)));
+    let e = imported_pass("w.txt", text, &Config::default());
+    assert_eq!(e.body, "");
+}
+
+#[test]
+fn a_weather_entry_whose_body_was_filled_in_stays_for_a_human_to_check() {
+    // 0822 氣象稿被 App 補上氣象署內文之後就不是「沒內文」了：留在待補稿給人核對。
+    let text = "新聞名稱(標題): 淑麗報氣象0822\n樣式: LIVE\n累積時間: 08:22:00\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成天氣標題\n>]\n";
+    let mut summary = import_files(&[("w.txt".to_string(), text.to_string())], &Config::default());
+    if let Outcome::NeedsManualContent(e) = &mut summary.needs_manual[0] {
+        e.body = "今、明合成天氣概況。".into();
+    }
+    pass_weather_without_body(&mut summary);
+    assert_eq!((summary.passed.len(), summary.needs_manual.len()), (0, 1));
+}
+
+/// 匯入一個檔案、跑完「氣象稿沒內文也寫入」，它應該在通過。
+fn imported_pass(name: &str, text: &str, cfg: &Config) -> news_script_core::model::NewsEntry {
+    let mut summary = import_files(&[(name.to_string(), text.to_string())], cfg);
+    pass_weather_without_body(&mut summary);
+    assert_eq!(summary.passed.len(), 1, "needs_manual: {:?}", summary.needs_manual);
+    summary.passed.remove(0)
+}
+
+#[test]
+fn a_weather_slug_with_a_blocked_style_is_still_filtered() {
+    let empty = "新聞名稱(標題): 合成氣象0900\n樣式: BS\n累積時間: 09:12:58\n\
+                 _______________________________________________________________\n\
+                 [<\n[BAR_最新大]\nT2合成天氣標題\n>]\n";
+    assert!(matches!(process_text("w.txt", empty, &Config::default()), Outcome::FilteredByStyle(_)));
+    let with_body = format!("{empty}\n今天合成的天氣內文。\n");
+    assert!(matches!(process_text("w.txt", &with_body, &Config::default()), Outcome::FilteredByStyle(_)));
+    // 不在 slug 開頭也算（叡叡氣象0900）；專題前綴也救不了 BS 的氣象稿。
+    let special = empty.replace("合成氣象0900", "專合成氣象0900");
+    assert!(matches!(process_text("w.txt", &special, &Config::default()), Outcome::FilteredByStyle(_)));
+}
+
+#[test]
+fn a_weather_slug_with_an_unknown_style_and_no_body_still_needs_a_human() {
+    let text = "新聞名稱(標題): 合成氣象0900\n樣式: 怪樣式\n累積時間: 09:12:58\n\
+                _______________________________________________________________\n\
+                [<\n[BAR_最新大]\nT2合成天氣標題\n>]\n";
+    assert!(matches!(process_text("w.txt", text, &Config::default()), Outcome::NeedsManualContent(_)));
+    let mut summary = import_files(&[("w.txt".to_string(), text.to_string())], &Config::default());
+    pass_weather_without_body(&mut summary);
+    assert_eq!((summary.passed.len(), summary.needs_manual.len()), (0, 1));
 }
 
 #[test]

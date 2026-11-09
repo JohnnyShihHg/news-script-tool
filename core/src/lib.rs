@@ -16,10 +16,47 @@ use model::{Header, NewsEntry, Outcome, StyleClass};
 /// An entry that still needs its script filled in by hand -- unless its style is on
 /// the blocklist. Without this check only fully parsed entries were ever filtered, so
 /// a blocked style with no 稿頭內文 slipped past the blocklist into 待補稿.
-fn needs_manual(entry: NewsEntry, force: bool, cfg: &Config) -> Outcome {
-    match clean::classify_style(&entry.style, &cfg.filter) {
+/// 待補稿上的這句話 = 沒有稿頭內文也要寫入的氣象稿（v0.3.11，見 `pass_weather_without_body`）。
+pub const NO_BODY_PASS_NOTE: &str = "，沒有稿頭內文也寫入";
+
+fn needs_manual(mut entry: NewsEntry, force: bool, cfg: &Config) -> Outcome {
+    let class = clean::classify_style(&entry.style, &cfg.filter);
+    // 氣象稿沒有稿頭內文也寫入（v0.3.11）。這裡先留在待補稿、只做記號：0822 氣象稿要
+    // 先給 App 補氣象署的天氣概況（補進去的要人工核對），之後才由
+    // `pass_weather_without_body` 把還是空的移到通過。樣式被擋（BS）的照樣濾除，
+    // 專題前綴也救不了；樣式不認得的仍留給人判斷；樣式空白而通過的（slug 時間標、
+    // 含氣象）算 force。
+    if let Some(term) = clean::no_body_pass_term(&entry.slug, &cfg.filter) {
+        match class {
+            StyleClass::Blocked => return Outcome::FilteredByStyle(entry),
+            StyleClass::Allowed => entry.warnings.push(format!("slug 含「{term}」{NO_BODY_PASS_NOTE}")),
+            StyleClass::Unknown if force && entry.style.trim().is_empty() => {
+                entry.warnings.push(format!("slug 含「{term}」{NO_BODY_PASS_NOTE}"))
+            }
+            StyleClass::Unknown => {}
+        }
+        return Outcome::NeedsManualContent(entry);
+    }
+    match class {
         StyleClass::Blocked if !force => Outcome::FilteredByStyle(entry),
         _ => Outcome::NeedsManualContent(entry),
+    }
+}
+
+/// 待補稿裡做了 `NO_BODY_PASS_NOTE` 記號、內文仍然是空的氣象稿移到通過（v0.3.11）。
+/// App 要在補完 0822 的氣象署內文之後才呼叫：補進內文的留在待補稿給人核對。
+pub fn pass_weather_without_body(summary: &mut ImportSummary) {
+    let manual = std::mem::take(&mut summary.needs_manual);
+    for o in manual {
+        match o {
+            Outcome::NeedsManualContent(mut e)
+                if e.body.trim().is_empty() && e.warnings.iter().any(|w| w.ends_with(NO_BODY_PASS_NOTE)) =>
+            {
+                e.warnings.retain(|w| !w.contains("需人工補"));
+                summary.passed.push(e);
+            }
+            other => summary.needs_manual.push(other),
+        }
     }
 }
 
@@ -168,7 +205,11 @@ fn classify_text(file_name: &str, text: &str, cfg: &Config) -> Outcome {
     let mut note_style_hint = None;
     if style.is_empty() && pass_reason.is_none() {
         let timecode = cfg.filter.blank_style_timecode_pass.then(|| clean::slug_timecode(&slug)).flatten();
-        let body_term = clean::body_pass_term(&slug, &cfg.filter).filter(|_| has_script_body(&text, header_lines, cfg));
+        // 含 `no_body_pass_terms`（氣象）的 slug 不要求內文（v0.3.11）；製作區完全空的佔位列
+        // 在 classify_body 仍判成解析失敗。
+        let body_term = clean::body_pass_term(&slug, &cfg.filter).filter(|_| {
+            has_script_body(&text, header_lines, cfg) || clean::no_body_pass_term(&slug, &cfg.filter).is_some()
+        });
         if timecode.is_some() {
             pass_reason = Some("樣式空白，依 slug 時間標判定為新聞".to_string());
         } else if let Some(t) = body_term {
