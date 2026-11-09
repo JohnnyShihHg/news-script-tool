@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.0.4
+// @version      1.0.5
 // @description  擋住協作工具的三個毛病：改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
@@ -75,6 +75,7 @@
     stuckSince: 0,
     lastHighlightAt: 0,
     blockedScrolls: 0,
+    allowScrollUntil: 0,
   };
 
   // ---- 1. 推送看門狗 ----------------------------------------------------
@@ -240,14 +241,62 @@
     return document.scrollingElement || document.documentElement;
   }
 
-  ["wheel", "touchmove", "mousedown", "keydown"].forEach((type) =>
-    window.addEventListener(type, () => { state.lastUserScrollAt = Date.now(); }, { passive: true, capture: true }),
+  // 哪些動作算「使用者自己在捲」：滾輪、觸控、拖捲軸、方向鍵。
+  //
+  // 這裡要很小心地跟「使用者按了一個會捲動的按鈕」分開。第一版把所有 mousedown 和
+  // 所有 keydown 都當成使用者在捲，結果點「找下一個重複」那種按鈕時，mousedown 先
+  // 讓防跳進入警戒，接著程式要捲到目標行就被擋掉 —— 按鈕看起來整個壞掉。左邊分頁
+  // 點標題跳行、Home/End 也一起遭殃。
+  //
+  // 所以分成兩種：點在控制項上（按鈕、連結、輸入框、分頁清單）是「我要它捲」，
+  // 反而要替接下來的程式捲動開綠燈；點在別處才是「我自己在捲」。
+  const CONTROL_SELECTOR =
+    'button, a, [role="button"], input, select, label, .outline-list, .line-action-bar, .quick-panel';
+  const SCROLL_INTENT_KEYS = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", " ", "Spacebar"];
+
+  function markUserScroll() {
+    state.lastUserScrollAt = Date.now();
+    // 使用者一旦自己捲動，先前因為點按鈕／敲鍵開的綠燈立刻取消。
+    // 沒有這一行，點完按鈕或打完字的 1.5 秒內，遠端更新造成的跳動會整個放行 ——
+    // 而「打完字往下捲就被拉回去」正好發生在那個空窗期。
+    state.allowScrollUntil = 0;
+  }
+  function allowProgrammaticScrollBriefly() {
+    state.allowScrollUntil = Date.now() + 1200;
+  }
+
+  ["wheel", "touchmove"].forEach((type) =>
+    window.addEventListener(type, markUserScroll, { passive: true, capture: true }),
   );
-  window.addEventListener("keydown", () => { state.lastUserInputAt = Date.now(); }, { capture: true });
+  window.addEventListener(
+    "mousedown",
+    (e) => {
+      const onControl = e.target instanceof Element && e.target.closest(CONTROL_SELECTOR);
+      if (onControl) allowProgrammaticScrollBriefly();
+      else markUserScroll(); // 拖捲軸、點編輯區都算自己捲
+    },
+    { passive: true, capture: true },
+  );
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (SCROLL_INTENT_KEYS.includes(e.key)) {
+        // 方向鍵、PageUp/Down、空白鍵是「我自己在捲」。這裡不能同時記成「正在打字」，
+        // 否則打字豁免（400ms 內放行程式捲動）會把方向鍵捲動之後的跳動一起放過去。
+        markUserScroll();
+        return;
+      }
+      state.lastUserInputAt = Date.now();
+      allowProgrammaticScrollBriefly(); // Home/End、快捷鍵、搜尋 Enter 都要讓它捲
+    },
+    { capture: true },
+  );
   window.addEventListener("input", () => { state.lastUserInputAt = Date.now(); }, { capture: true });
 
   // 現在該不該擋：使用者剛剛自己捲過、而且不是正在打字（打字時跳到游標是正常行為）。
   function shouldBlockProgrammaticScroll(from, to) {
+    // 使用者剛按了按鈕或敲了導覽鍵：那是「請你捲過去」，不是要擋的跳動。
+    if (Date.now() < state.allowScrollUntil) return false;
     if (Math.abs(to - from) < CONFIG.scrollGuardMinJumpPx) return false;
     if (Date.now() - state.lastUserInputAt < 400) return false;
     return Date.now() - state.lastUserScrollAt < CONFIG.scrollGuardMs;
