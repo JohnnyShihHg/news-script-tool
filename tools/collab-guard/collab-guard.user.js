@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.0.0
+// @version      1.0.1
 // @description  擋住協作工具的三個毛病：改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
-// @match        https://*.chatgpt.site/helper4*
+// @match        https://*.chatgpt.site/*
+// @match        http://*.chatgpt.site/*
 // @run-at       document-idle
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/JohnnyShihHg/news-script-tool/main/tools/collab-guard/collab-guard.user.js
@@ -33,6 +34,28 @@
     debugScroll: false,        // 開了會在 console 印出每一次程式捲動的來源堆疊
   };
 
+  // 比對刻意放寬到整個 chatgpt.site：原本綁死 /helper4 這個路徑，只要網址帶了不同的
+  // 路徑或子頁就整支不執行，而且在竄改猴裡只會顯示「尚未執行過」，看不出原因。
+  //
+  // 放寬之後改由「這一頁有沒有 Quill 編輯器」決定要不要啟動 —— 以頁面內容判斷比以
+  // 網址判斷可靠。Quill 是動態載入的，所以最多等 20 秒。
+  function waitForEditor(onReady) {
+    let waited = 0;
+    const tick = () => {
+      if (document.querySelector(".ql-editor")) {
+        onReady();
+        return;
+      }
+      waited += 500;
+      if (waited > 20_000) {
+        console.log("[守門員] 這一頁沒有協作編輯器，不啟動");
+        return;
+      }
+      setTimeout(tick, 500);
+    };
+    tick();
+  }
+
   const state = {
     lastPushAt: 0,
     lastPullAt: 0,
@@ -56,12 +79,17 @@
       /* 忽略：戳失敗不影響頁面 */
     }
   }
-  setInterval(nudgePush, CONFIG.pushEverySeconds * 1000);
 
   // ---- 2. 看得見的同步狀態 ----------------------------------------------
   //
   // 頁面本身就有狀態文字（已同步／待同步 N 筆／正在載入共同文章／連線中），
   // 但它很小、不會叫。卡住時整頁加紅框，讓靜默失敗變成躲不掉的警告。
+  // 到這裡只定義了函式與狀態，還沒動到頁面。真正啟動要等編輯器出現。
+  waitForEditor(startGuard);
+
+  function startGuard() {
+  setInterval(nudgePush, CONFIG.pushEverySeconds * 1000);
+
   const hud = document.createElement("div");
   hud.style.cssText =
     "position:fixed;right:12px;bottom:12px;z-index:2147483647;font:12px/1.6 system-ui,sans-serif;" +
@@ -253,4 +281,5 @@
   };
 
   console.log("[守門員] 已啟動：推送看門狗、同步狀態、螢光限流、捲動防跳");
+  }
 })();
