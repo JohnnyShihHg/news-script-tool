@@ -6,7 +6,13 @@
 // @match        https://*.chatgpt.site/helper4*
 // @run-at       document-idle
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/JohnnyShihHg/news-script-tool/main/tools/collab-guard/collab-guard.user.js
+// @downloadURL  https://raw.githubusercontent.com/JohnnyShihHg/news-script-tool/main/tools/collab-guard/collab-guard.user.js
 // ==/UserScript==
+
+// 自動更新：竄改猴會定期抓上面那個網址比對 @version，比較新才提示／安裝。
+// 所以**改完程式一定要把 @version 往上加**，否則大家手上永遠是舊的 —— 竄改猴只看
+// 版本號，不看檔案內容有沒有變。
 
 // 為什麼需要這支：協作工具的同步只在它內部的 bootstrapFinalized 亮起時才排程上傳，
 // 沒亮就把改動堆在記憶體裡而且不再重試 —— 那一頁變成只收不發，外觀完全正常，別台

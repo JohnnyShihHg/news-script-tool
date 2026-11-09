@@ -31,9 +31,29 @@ if (serverSyncState.bootstrapFinalized) {   // ← 閘門
 
 ## 安裝
 
-1. Chrome 裝 [Tampermonkey](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
-2. Tampermonkey → 新增腳本 → 把 `collab-guard.user.js` 的內容整段貼上 → 存檔
-3. 重新整理協作工具那一頁，右下角出現「守門員」小面板就是裝好了
+先裝 [Tampermonkey](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)，然後選一種：
+
+**從網址安裝（推薦，發給同事就發這一行）**
+
+```
+https://raw.githubusercontent.com/JohnnyShihHg/news-script-tool/main/tools/collab-guard/collab-guard.user.js
+```
+
+貼進網址列按 Enter，Tampermonkey 會跳出安裝頁。這條路**有自動更新**。
+
+**貼上安裝**
+
+Tampermonkey → 新增腳本 → **全選範本**、把 `collab-guard.user.js` 整段**貼上蓋掉** → 存檔。
+
+⚠ 一定要蓋掉不要接在後面：範本自帶一段 `// ==UserScript==` 標頭，兩段並存腳本不會生效，
+而且不會報錯——這是「裝了沒反應」最常見的原因。
+
+裝好後重新整理協作工具那一頁，右下角出現「守門員」小面板就是生效了。
+
+## 改了程式要記得加版本號
+
+`@updateURL` / `@downloadURL` 指到 repo 的 raw 網址，Tampermonkey 會定期比對 `@version`。
+**改完一定要把 `@version` 往上加**，否則大家手上永遠是舊的——它只看版本號，不看內容。
 
 **為什麼不是書籤？** 書籤一重載就沒了，而這支要常駐（自動重載自救那條更是會把自己
 載掉）。查標記那支維持書籤沒問題，因為那是點一下用完就收。
