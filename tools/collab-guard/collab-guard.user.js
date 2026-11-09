@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.0.3
+// @version      1.0.4
 // @description  擋住協作工具的三個毛病：改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
@@ -361,20 +361,33 @@
     let adjusting = false;
     const reposition = () => {
       if (adjusting) return;
+
+      // 他有一條分支：「文件分頁收合時，就把動作列停進那一欄裡」
+      // （canUseCollapsedOutline，可用寬度 = 欄寬 - 8*2）。以前那一欄收合後還是
+      // 220px，塞得下；我們把它修成真的縮到 42px 之後，可用寬度只剩 26px，於是
+      // 動作列被壓成 26px 寬又加上 wrap 變多行，整個咬在最左邊。
+      //
+      // 把那個擠壓解掉：拿掉 wrap、清掉他寫死的寬度，讓它回到自然寬度，再由下面的
+      // 邏輯決定位置。收合後的那一欄本來就是空的（只有頂端一個漢堡），動作列蓋在
+      // 上面沒有任何損失。
+      if (bar.classList.contains("wrap")) bar.classList.remove("wrap");
+      if (bar.style.width) bar.style.width = "";
+
       const barRect = bar.getBoundingClientRect();
       if (!barRect.width || !barRect.height) return;
       const textLeft = editor.getBoundingClientRect().left;
-      if (barRect.right <= textLeft - 2) {
-        bar.style.opacity = "";
-        return; // 已經在文字左邊，不用動
-      }
-      adjusting = true;
+
+      // 一律貼齊文字左緣：不只是「不要蓋到字」，還要離你正在看的那一行夠近。
+      // 他原本可能把它丟在左邊很遠的地方（收合分頁欄那條分支就是），眼睛要跑很遠。
       const wanted = Math.round(textLeft - barRect.width - 6);
+      if (Math.abs(barRect.left - wanted) <= 1 && !bar.style.opacity) return;
+
+      adjusting = true;
       if (wanted >= 2) {
         bar.style.left = `${wanted}px`;
         bar.style.opacity = "";
       } else {
-        // 真的沒空間：留在原處但淡化，讓底下的字看得見。
+        // 真的沒空間（放大到左邊幾乎沒有留白）：留在原處但淡化，讓底下的字看得見。
         bar.style.opacity = "0.35";
       }
       requestAnimationFrame(() => { adjusting = false; });
