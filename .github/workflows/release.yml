@@ -45,6 +45,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # tauri build downloads its NSIS toolchain from GitHub Releases on every run
+      # (tauri-apps/binary-releases). On 2026-11-09 that download returned 504 during
+      # a GitHub incident and failed the v0.3.13 release twice although the app itself
+      # compiled. Keep the bundler tools between runs so a release only depends on that
+      # download once. Bump the key if tauri moves to a newer NSIS.
+      - name: Cache Tauri bundler tools (NSIS)
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/tauri
+          key: tauri-bundler-tools-${{ runner.os }}-nsis-3.13
+
       - name: Build, sign and publish
         uses: tauri-apps/tauri-action@v0
         env:
