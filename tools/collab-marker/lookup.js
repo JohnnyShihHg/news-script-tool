@@ -377,9 +377,13 @@
    * 文件裡所有「跟這個查詢很像」的勿上網稿。
    * 不管查詢本身命中與否都會跑；命中的結果本身就是勿上網時才不需要。
    */
+  // 太短的字串別進這一關：三個字的 slug 差一個字就有 0.67 的相似度，等於任兩則短稿
+  // 都「很像」，紅字會滿天飛，然後沒人再把紅字當一回事。真實 slug 都在五個字以上。
+  var MIN_RELATED_LEN = 5;
+
   function relatedNoUpload(docLines, wanted, cap) {
     var q = compact(wanted).text;
-    if (q.length < 3) return [];
+    if (q.length < MIN_RELATED_LEN) return [];
     var out = [];
     var seen = {};
     for (var d = 0; d < docLines.length; d++) {
@@ -389,6 +393,7 @@
       var cands = slugCandidates(rest);
       for (var c = 0; c < cands.length; c++) {
         var cc = compact(cands[c]).text;
+        if (cc.length < MIN_RELATED_LEN) continue;
         if (cc === q) continue; // 完全一樣的話，它已經是命中結果了
         if (!isRelated(q, cc)) continue;
         if (seen[cands[c]]) continue;
@@ -514,7 +519,23 @@
   // 不像完全命中的無標記那樣可以直接放過。
   var RANK = { "no-upload": 0, other: 1, missing: 2, partial: 2.5, none: 3 };
 
+  // 這一筆有沒有任何「⛔」要讓人看到：命中的、警示的、或錯字建議裡的。
+  function hasRedFlag(result) {
+    var i;
+    for (i = 0; i < (result.warnings || []).length; i++) return true;
+    for (i = 0; i < (result.suggestions || []).length; i++) {
+      if (result.suggestions[i].status === "no-upload") return true;
+    }
+    for (i = 0; i < (result.groups || []).length; i++) {
+      if (result.groups[i].status === "no-upload") return true;
+    }
+    return false;
+  }
+
   function resultRank(result) {
+    // 紅字優先於一切：查不到、但相關的勿上網稿被掃出來的那一筆，跟直接命中勿上網
+    // 一樣危險（多半就是同事報錯了），所以也排在最前面，不要夾在中間讓人滑過去。
+    if (hasRedFlag(result)) return RANK["no-upload"];
     if (!result.found) return RANK.missing;
     var best = RANK.none;
     for (var i = 0; i < result.groups.length; i++) {
@@ -560,6 +581,7 @@
     slugCandidates: slugCandidates,
     lookup: lookup,
     resultRank: resultRank,
+    hasRedFlag: hasRedFlag,
     sortResults: sortResults,
     parseSlugInput: parseSlugInput,
   };

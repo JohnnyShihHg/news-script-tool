@@ -438,3 +438,45 @@ test("超長一行不會讓比對失控", () => {
   const r = lookup([long], ["合成甲"])[0];
   assert.equal(r.found, true);
 });
+
+// ---- 紅字一律排最前面 ----
+
+test("查不到但掃出相關勿上網的，排在最前面而不是夾在中間", () => {
+  const doc = [
+    "合成乾淨稿甲 SOT 18:00:00",
+    "(勿上網)女飛官211900 SOT 18:02:00",
+    "合成乾淨稿乙 SOT 18:04:00",
+  ];
+  const { sortResults } = require("../lookup.js").CollabMarkerLookup;
+  const sorted = sortResults(lookup(doc, ["合成乾淨稿甲", "飛官21 1800", "合成乾淨稿乙"]));
+  assert.equal(sorted[0].slug, "飛官21 1800", "有紅字的要在最前面");
+  assert.equal(sorted[0].found, false);
+  assert.equal(sorted[0].warnings.length, 1);
+});
+
+test("錯字建議裡是勿上網的也排最前面", () => {
+  const doc = ["(勿上網)合成蛋價續漲 2100 SOT 18:00:00", "合成乾淨稿 SOT 18:02:00"];
+  const { sortResults } = require("../lookup.js").CollabMarkerLookup;
+  const sorted = sortResults(lookup(doc, ["合成乾淨稿", "合成蛋假續漲 2100"]));
+  assert.equal(sorted[0].slug, "合成蛋假續漲 2100");
+});
+
+test("沒有紅字的找不到，維持原本的位置（在無標記之前）", () => {
+  const doc = ["合成乾淨稿 SOT 18:00:00"];
+  const { sortResults } = require("../lookup.js").CollabMarkerLookup;
+  const sorted = sortResults(lookup(doc, ["合成乾淨稿", "完全不相干的稿"]));
+  assert.deepEqual(sorted.map((r) => r.slug), ["完全不相干的稿", "合成乾淨稿"]);
+});
+
+test("太短的 slug 不進相關警示，避免紅字滿天飛", () => {
+  // 「合成乙」對「合成甲」差一個字就是 0.67 相似度，這種程度的「像」沒有意義。
+  const doc = ["(勿上網)合成甲 SOT 18:00:00", "合成乙 SOT 19:00:00"];
+  assert.deepEqual(lookup(doc, ["合成乙"])[0].warnings, []);
+  // 長度夠的照樣要有紅字 —— 這一筆是錯字建議接住的（同長度差一字），
+  // 警示那條路因為去重所以是空的，兩條路加起來才是「有沒有紅字」。
+  const { hasRedFlag } = require("../lookup.js").CollabMarkerLookup;
+  const doc2 = ["(勿上網)女飛官211900 SOT 18:00:00"];
+  const r = lookup(doc2, ["女飛官211800"])[0];
+  assert.equal(hasRedFlag(r), true);
+  assert.equal(r.suggestions[0].status, "no-upload");
+});
