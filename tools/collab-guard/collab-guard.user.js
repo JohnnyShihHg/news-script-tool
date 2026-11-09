@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.0.2
+// @version      1.0.3
 // @description  擋住協作工具的三個毛病：改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
@@ -314,9 +314,21 @@
       //   .main.outline-collapsed { grid-template-columns: 220px minmax(0,1fr) clamp(235px,20vw,250px) }
       // 所以按漢堡只會把標題和清單 display:none，那 220px 的空欄還杵在那裡 ——
       // 看起來就像「按了沒反應」。右邊快捷面板的收合有把欄寬改成 42px，所以是好的。
+      //
+      // 兩邊可以各自收合，所以**四種組合都要寫**。第一版只寫了左邊收合那一種，
+      // 結果把第三欄寫死成展開寬度：兩邊同時收合時，右邊會被這條規則蓋回去、縮不了。
+      // 三個 class 的選擇器比兩個 class 的更具體，所以組合那條會贏。
       rules.push(
         ".main.outline-collapsed{grid-template-columns:42px minmax(0,1fr) clamp(235px,20vw,250px) !important}",
-        "@media (max-width:860px){.main.outline-collapsed{grid-template-columns:42px minmax(0,1fr) 220px !important}}",
+        ".main.outline-collapsed.quick-panel-collapsed{grid-template-columns:42px minmax(0,1fr) 42px !important}",
+        "@media (max-width:860px){" +
+          ".main.outline-collapsed{grid-template-columns:42px minmax(0,1fr) 220px !important}" +
+          ".main.outline-collapsed.quick-panel-collapsed{grid-template-columns:42px minmax(0,1fr) 42px !important}" +
+        "}",
+        // 欄寬縮到 42px 之後，他原本的內距（左右各 10px + 標題列 4px）只留 14px，
+        // 塞不下 30px 的漢堡按鈕。照他右邊面板收合時的做法：內距縮小、按鈕置中。
+        ".main.outline-collapsed .outline-panel{padding:16px 5px !important}",
+        ".main.outline-collapsed .outline-header{padding:0 !important;justify-content:center !important}",
       );
     }
 
