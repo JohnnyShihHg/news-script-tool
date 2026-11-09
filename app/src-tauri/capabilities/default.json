@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Permissions for the main window. Because build.rs declares an app ACL manifest, every app-defined command the main window invokes must be listed here explicitly -- omitting one fails at runtime with 'Command X not allowed by ACL'. receive_scraped_text is deliberately absent: only the collab window ever calls it.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "dialog:default",
@@ -28,6 +30,7 @@
     "allow-diagnose-collab-bridge",
     "allow-export-collab-text",
     "allow-append-to-collab-doc",
+    "allow-append-to-collab-doc-checked",
     "allow-compare-evening",
     "allow-generate-group-keywords",
     "allow-load-evening-state",

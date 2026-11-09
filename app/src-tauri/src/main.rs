@@ -980,26 +980,37 @@ async fn eval_in_collab_and_wait(
     state: &tauri::State<'_, AppState>,
     script: &str,
 ) -> Result<String, String> {
+    let _turn = collab_turn(state).await?;
+    eval_in_collab_locked(app, state, script).await
+}
+
+/// 取得「協作操作」的排隊權。
+///
+/// 一次只跑一個協作操作：讀文件／寫入／校正共用同一條回覆通道，不排隊就會互搶。
+/// 等不到就回報錯誤，不要無限等 —— tokio 的 Mutex 不可重入，萬一哪天有人把兩個協作
+/// 操作寫成巢狀就會自己鎖死自己，那會是沒有任何訊息的永久卡住。
+async fn collab_turn<'a>(
+    state: &'a tauri::State<'_, AppState>,
+) -> Result<tokio::sync::MutexGuard<'a, ()>, String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(30), state.collab_turn.lock()).await {
+        Ok(guard) => Ok(guard),
+        Err(_) => Err("另一個協作操作還在進行中（等了 30 秒）。請等它跑完再試；一直出現請回報。".to_string()),
+    }
+}
+
+/// 真正做事的那一半，**呼叫前必須已經持有 `collab_turn`**。
+///
+/// 需要「讀文件 → 判斷 → 寫入」不被別人插隊的流程（例如寫入前的最後確認）就連續呼叫
+/// 這個，整段只佔一次排隊權。直接呼叫 `eval_in_collab_and_wait` 會重新排隊，中間就有
+/// 別的操作插進來的空隙。
+async fn eval_in_collab_locked(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    script: &str,
+) -> Result<String, String> {
     let collab = app
         .get_webview_window(COLLAB_WINDOW_LABEL)
         .ok_or_else(|| "還沒開啟協作工具視窗，請先點「開啟協作工具」。".to_string())?;
-
-    // 一次只跑一個協作操作。讀文件／寫入／校正共用同一條回覆通道，不排隊就會互搶。
-    //
-    // 等不到就回報錯誤，不要無限等：tokio 的 Mutex 不可重入，萬一哪天有人把兩個
-    // 協作操作寫成巢狀（在一個操作裡面再叫一個），就會自己鎖死自己。那會是沒有任何
-    // 訊息的永久卡住 —— 這個 App 最難查的就是這種無聲故障。30 秒換一句看得懂的話。
-    let _turn = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        state.collab_turn.lock(),
-    )
-    .await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            return Err("另一個協作操作還在進行中（等了 30 秒）。請等它跑完再試；一直出現請回報。".to_string())
-        }
-    };
 
     let id = NEXT_COLLAB_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1094,6 +1105,72 @@ fn build_append_script(text: &str) -> String {
     }})();
     "#
     )
+}
+
+/// 寫入前的最後確認結果，回給畫面與紀錄。
+#[derive(Serialize)]
+struct CheckedAppendDto {
+    /// 協作工具回報的訊息；整批都已經在文件裡時是 None（沒有寫入動作）。
+    message: Option<String>,
+    /// 這次被濾掉的 slug 或分隔線 —— 多半是另一台電腦剛寫進去的。
+    dropped: Vec<String>,
+    /// slug 清單跟條目數對不上，這次沒有過濾、原樣寫出。
+    mismatched: bool,
+}
+
+/// 「重新讀文件 → 濾掉已經在裡面的 → 寫入」，整段佔住同一次協作排隊權。
+///
+/// 解決的是兩台電腦同時開自動寫入的重複寫入：比對跟寫入之間隔著產生關鍵字的那幾十
+/// 秒，對方在這段期間寫進去的東西這邊看不到。把確認挪到動手前一刻，危險窗就從幾十秒
+/// 縮到「重新讀完到寫下去」之間。
+///
+/// 這是降低機率不是保證：Yjs 同步還有零點幾秒的延遲，兩台在那個瞬間交錯仍會重複。
+/// 真正的保證只有「同一時間只開一台自動寫入」。
+#[tauri::command]
+async fn append_to_collab_doc_checked(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    text: String,
+    slugs: Vec<String>,
+    log_note: Option<String>,
+) -> Result<CheckedAppendDto, String> {
+    require_main_window(&window)?;
+    if text.trim().is_empty() {
+        return Err("沒有可寫入的內容。".to_string());
+    }
+    let refresh = lock_or_recover(&state.config).markers.refresh_keywords.clone();
+
+    let _turn = collab_turn(&state).await?;
+    let doc_text = eval_in_collab_locked(&app, &state, SCRAPE_SCRIPT).await?;
+    let filtered = news_script_core::doc_match::filter_already_written(&text, &slugs, &doc_text, &refresh);
+
+    let log = |line: String| {
+        if let Some(dir) = inews_log_dir() {
+            inews::append_log(&dir, &line);
+        }
+    };
+    if !filtered.dropped.is_empty() {
+        log(format!("[寫入] 寫入前重新比對，濾掉已在文件裡的：{}", filtered.dropped.join("、")));
+    }
+    if filtered.mismatched {
+        log("[寫入] 警告：slug 清單與條目數對不上，這次沒有過濾、原樣寫出".to_string());
+    }
+    if filtered.text.trim().is_empty() {
+        if let Some(note) = &log_note {
+            log(format!("[寫入] 整批都已經在文件裡，沒有寫入：{note}"));
+        }
+        return Ok(CheckedAppendDto { message: None, dropped: filtered.dropped, mismatched: filtered.mismatched });
+    }
+
+    let r = eval_in_collab_locked(&app, &state, &build_append_script(&filtered.text)).await;
+    if let Some(note) = &log_note {
+        match &r {
+            Ok(_) => log(format!("[寫入] 成功：{note}")),
+            Err(e) => log(format!("[寫入] 失敗：{note}｜{e}")),
+        }
+    }
+    Ok(CheckedAppendDto { message: Some(r?), dropped: filtered.dropped, mismatched: filtered.mismatched })
 }
 
 #[tauri::command]
@@ -1488,6 +1565,7 @@ fn main() {
             diagnose_collab_bridge,
             export_collab_text,
             append_to_collab_doc,
+            append_to_collab_doc_checked,
             compare_evening,
             generate_group_keywords,
             load_evening_state,

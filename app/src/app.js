@@ -790,7 +790,11 @@ async function writeBackToCollab() {
   status.textContent = "寫入中…";
   btn.disabled = true;
   try {
-    const msg = await invoke("append_to_collab_doc", { text: withDateHeader(text) });
+    const res = await invoke("append_to_collab_doc_checked", {
+      text: withDateHeader(text),
+      slugs: outgoing.map((i) => slugOf(i)),
+    });
+    const msg = res.message ?? "整批都已經在文件裡了，這次沒有寫入。";
     dateHeaderWritten();
     outgoing.forEach((i) => {
       writtenSlugs.add(slugOf(i));
@@ -1101,7 +1105,18 @@ async function writeInewsItems(ready) {
   status.className = "compare-status";
   status.textContent = written.length ? `寫入 ${written.length} 則到協作文件中…` : "寫入節次分隔線中…";
   try {
-    const msg = await invoke("append_to_collab_doc", { text: withDateHeader(text), logNote: writeLogNote(written, dividers) });
+    // 寫入前在同一個協作操作裡重新讀一次文件，濾掉另一台電腦剛寫進去的那幾則。
+    // 兩台同時開自動寫入時，比對跟寫入之間隔著產生關鍵字的那幾十秒，對方寫了什麼
+    // 這邊看不到 —— 把確認挪到動手前一刻，重複寫入的窗口就從幾十秒縮到零點幾秒。
+    const res = await invoke("append_to_collab_doc_checked", {
+      text: withDateHeader(text),
+      slugs: written.map((i) => slugOf(i)),
+      logNote: writeLogNote(written, dividers),
+    });
+    const msg = res.message ?? "整批都已經在文件裡了，這次沒有寫入。";
+    if (res.dropped.length) {
+      inewsStatus(`寫入前重新比對，已略過文件裡已有的 ${res.dropped.length} 則：${res.dropped.join("、")}`, "warn");
+    }
     dateHeaderWritten();
     for (const i of written) {
       const key = writtenKey(i);

@@ -1457,3 +1457,142 @@ mod time_tests {
         assert_eq!(changes(&p), vec![("１８：０５：５２".into(), "１８：０１：５１".into())]);
     }
 }
+
+// ---- 寫入前的最後一道確認（v0.3.12）----
+
+/// 把一份「準備寫進協作文件」的文字，濾掉已經在文件裡的部分。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WriteFilter {
+    /// 濾過之後真正要寫的文字；全部都已經在文件裡時是空字串。
+    pub text: String,
+    /// 被濾掉的 slug（或分隔線），給紀錄與畫面用。
+    pub dropped: Vec<String>,
+    /// 條目數量跟傳進來的 slug 數量對不上：寧可原樣寫出去，也不要猜錯而漏寫。
+    pub mismatched: bool,
+}
+
+/// 兩台電腦同時開自動寫入時，各自的「要寫哪幾則」是本機狀態，彼此不知道對方在寫。
+/// 比對跟寫入之間隔著產生關鍵字的那幾十秒，期間對方寫進去的東西這邊看不到，於是
+/// 同一則稿會被寫兩次（關鍵字還不一樣，因為兩台各問各的 Gemini）。
+///
+/// 這個函式配合呼叫端在「同一個協作操作裡重新讀一次文件」使用：把危險窗從
+/// 「關鍵字產生的那幾十秒」縮到「重新讀到寫入之間」。注意這是**降低機率不是保證**
+/// —— Yjs 的同步延遲仍有零點幾秒，兩台在那個瞬間交錯還是會重複。真正的保證只有
+/// 「同一時間只開一台自動寫入」。
+///
+/// `slugs` 要跟 `text` 裡的條目一一對應、順序相同（呼叫端本來就有這份清單，所以
+/// 不用從文字裡反推 slug —— slug 可能含空白，反推會出錯）。對不上就整份原樣寫出。
+pub fn filter_already_written(
+    text: &str,
+    slugs: &[String],
+    doc_text: &str,
+    refresh_keywords: &[String],
+) -> WriteFilter {
+    let blocks: Vec<&str> = text.split("\n\n").map(str::trim_end).filter(|b| !b.trim().is_empty()).collect();
+
+    // 條目 = 兩行以上的區塊（表頭／標題／內文／關鍵字）；單行區塊是分隔線。
+    let entry_count = blocks.iter().filter(|b| b.lines().count() > 1).count();
+    if entry_count != slugs.len() {
+        return WriteFilter { text: text.to_string(), dropped: Vec::new(), mismatched: true };
+    }
+
+    let doc_lines: Vec<&str> = doc_text.lines().map(str::trim).collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut dropped = Vec::new();
+    let mut idx = 0usize;
+
+    for block in blocks {
+        if block.lines().count() > 1 {
+            let slug = &slugs[idx];
+            idx += 1;
+            // 只濾「乾乾淨淨已經在文件裡」的那種 —— 那正是對方剛寫進去的樣子。
+            // (抓新) 要求重貼、或前面有其他標記的，維持原本行為不動。
+            if match_slug(slug, doc_text, refresh_keywords).status == MatchStatus::InDoc {
+                dropped.push(slug.clone());
+                continue;
+            }
+        } else {
+            let line = block.trim();
+            if !line.is_empty() && doc_lines.iter().any(|l| *l == line) {
+                dropped.push(line.to_string());
+                continue;
+            }
+        }
+        kept.push(block);
+    }
+
+    WriteFilter { text: kept.join("\n\n"), dropped, mismatched: false }
+}
+
+#[cfg(test)]
+mod write_filter_tests {
+    use super::*;
+
+    fn entry(slug: &str, title: &str) -> String {
+        format!("{slug} SOT 18:00:00 生活\n{title}\n內文一段。\n#關鍵字")
+    }
+
+    fn refresh() -> Vec<String> {
+        vec!["抓新".to_string(), "抓".to_string()]
+    }
+
+    #[test]
+    fn an_entry_the_other_machine_already_wrote_is_dropped() {
+        let text = [entry("合成甲", "標題甲"), entry("合成乙", "標題乙")].join("\n\n");
+        // 另一台在我們產生關鍵字的時候把合成甲寫進去了。
+        let doc = "==========1109==========\n合成甲 SOT 18:00:00 生活\n標題甲\n內文一段。\n#關鍵字";
+        let out = filter_already_written(&text, &["合成甲".into(), "合成乙".into()], doc, &refresh());
+        assert_eq!(out.dropped, vec!["合成甲".to_string()]);
+        assert!(out.text.contains("合成乙"));
+        assert!(!out.text.contains("合成甲"));
+        assert!(!out.mismatched);
+    }
+
+    #[test]
+    fn nothing_is_dropped_when_the_doc_has_none_of_them() {
+        let text = [entry("合成甲", "標題甲"), entry("合成乙", "標題乙")].join("\n\n");
+        let out = filter_already_written(&text, &["合成甲".into(), "合成乙".into()], "==========1109==========", &refresh());
+        assert_eq!(out.text, text, "沒有重複就要原樣寫出");
+        assert!(out.dropped.is_empty());
+    }
+
+    #[test]
+    fn a_divider_already_in_the_doc_is_dropped_but_a_new_one_is_kept() {
+        let text = format!("==========1109==========\n\n{}\n\n==== 18 ====", entry("合成甲", "標題甲"));
+        let doc = "==========1109==========\n舊的東西";
+        let out = filter_already_written(&text, &["合成甲".into()], doc, &refresh());
+        assert_eq!(out.dropped, vec!["==========1109==========".to_string()]);
+        assert!(out.text.contains("==== 18 ===="), "新的節次分隔線要留著");
+        assert!(out.text.starts_with("合成甲"));
+    }
+
+    #[test]
+    fn everything_already_there_leaves_nothing_to_write() {
+        let text = entry("合成甲", "標題甲");
+        let doc = "合成甲 SOT 18:00:00 生活";
+        let out = filter_already_written(&text, &["合成甲".into()], doc, &refresh());
+        assert_eq!(out.text, "");
+        assert_eq!(out.dropped, vec!["合成甲".to_string()]);
+    }
+
+    #[test]
+    fn a_refresh_request_line_is_not_treated_as_already_written() {
+        // 文件裡是「(抓新) 合成甲」：那是要求重貼，不是對方寫好的那一筆。
+        let text = entry("合成甲", "標題甲");
+        let doc = "(抓新) 合成甲 SOT 17:00:00";
+        let out = filter_already_written(&text, &["合成甲".into()], doc, &refresh());
+        assert_eq!(out.text, text, "要求重貼的照寫");
+        assert!(out.dropped.is_empty());
+    }
+
+    #[test]
+    fn a_count_mismatch_writes_everything_rather_than_guessing() {
+        // slug 清單跟條目數對不上（呼叫端出錯）時，寧可寫重複也不要漏寫。
+        let text = [entry("合成甲", "標題甲"), entry("合成乙", "標題乙")].join("\n\n");
+        let doc = "合成甲 SOT 18:00:00 生活";
+        let out = filter_already_written(&text, &["合成甲".into()], doc, &refresh());
+        assert!(out.mismatched);
+        assert_eq!(out.text, text);
+        assert!(out.dropped.is_empty());
+    }
+}

@@ -28,6 +28,7 @@ fn main() {
             "diagnose_collab_bridge",
             "export_collab_text",
             "append_to_collab_doc",
+            "append_to_collab_doc_checked",
             "compare_evening",
             "generate_group_keywords",
             "load_evening_state",

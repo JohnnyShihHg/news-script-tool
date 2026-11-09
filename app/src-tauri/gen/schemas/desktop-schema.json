@@ -183,6 +183,12 @@
           "markdownDescription": "Enables the append_to_collab_doc command without any pre-configured scope."
         },
         {
+          "description": "Enables the append_to_collab_doc_checked command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-append-to-collab-doc-checked",
+          "markdownDescription": "Enables the append_to_collab_doc_checked command without any pre-configured scope."
+        },
+        {
           "description": "Enables the clear_api_key command without any pre-configured scope.",
           "type": "string",
           "const": "allow-clear-api-key",
@@ -361,6 +367,12 @@
           "type": "string",
           "const": "deny-append-to-collab-doc",
           "markdownDescription": "Denies the append_to_collab_doc command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the append_to_collab_doc_checked command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-append-to-collab-doc-checked",
+          "markdownDescription": "Denies the append_to_collab_doc_checked command without any pre-configured scope."
         },
         {
           "description": "Denies the clear_api_key command without any pre-configured scope.",
