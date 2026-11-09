@@ -111,6 +111,8 @@ pub struct Guard {
     /// 這一節在可信的輪次（沒有異常）播出過、又不是可疑的稿。搬走再搬回原位的稿本來就
     /// 播過，不能因為它「這一輪才又變成已播出」就標成可疑。
     known: HashSet<String>,
+    /// story key → slug，上一輪（認出「換稿」用）。
+    prev_slug: HashMap<String, String>,
 }
 
 impl Guard {
@@ -136,6 +138,7 @@ impl Guard {
             // 換節：時間軸不同，不能跟上一節比。可疑稿留著，補掃、複查還要用。
             self.show = Some(show.to_string());
             self.prev.clear();
+            self.prev_slug.clear();
             self.prev_frontier = None;
             self.streak.clear();
             self.known.clear();
@@ -144,7 +147,32 @@ impl Guard {
         let th = cfg.threshold;
         let aired: Vec<&RowObs> = rows.iter().filter(|r| r.aired).collect();
         let frontier = aired.iter().map(|r| r.cume).max();
-        let was_aired = |key: &str| matches!(self.prev.get(key), Some((_, true))) || self.known.contains(key);
+        // 不算「往過去插入」的新列（v0.3.13，11/9 15:23 `里長介社區1430` 誤判）：
+        // - 換稿：上一輪已播出、這一輪不見了的列裡有同一個 slug，時間差在門檻內。製作人把
+        //   那一列換成新存的稿（同 slug、同位置，iNEWS ID 變了）。
+        // - 長度 0：下一列的時間跟它一樣。插進去不會讓任何一列移動，不可能是把還沒播的稿
+        //   往前搬（真的搬稿一定會把後面已播出的列往後推）。
+        let present: HashSet<&str> = aired.iter().map(|r| r.key.as_str()).collect();
+        let vanished: Vec<(&str, i64)> = self
+            .prev
+            .iter()
+            .filter(|(k, (_, a))| *a && !present.contains(k.as_str()))
+            .filter_map(|(k, (c, _))| self.prev_slug.get(k).filter(|s| !s.is_empty()).map(|s| (s.as_str(), *c)))
+            .collect();
+        let benign: HashSet<&str> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.aired && !matches!(self.prev.get(&r.key), Some((_, true))))
+            .filter(|(i, r)| {
+                let zero_len = rows.get(i + 1).is_some_and(|next| next.cume == r.cume);
+                let replaced = !r.slug.is_empty() && vanished.iter().any(|(s, c)| *s == r.slug && (r.cume - c).abs() <= th);
+                zero_len || replaced
+            })
+            .map(|(_, r)| r.key.as_str())
+            .collect();
+        let was_aired = |key: &str| {
+            matches!(self.prev.get(key), Some((_, true))) || self.known.contains(key) || benign.contains(key)
+        };
 
         // 1. 異常偵測（要有上一輪才比）。
         let mut reasons = Vec::new();
@@ -253,6 +281,7 @@ impl Guard {
 
         self.streak = streak;
         self.prev = rows.iter().map(|r| (r.key.clone(), (r.cume, r.aired))).collect();
+        self.prev_slug = rows.iter().map(|r| (r.key.clone(), r.slug.clone())).collect();
         self.prev_frontier = frontier;
         if anomaly.is_none() {
             for r in &aired {
@@ -456,6 +485,57 @@ mod tests {
         let s = g.step("1200", &rows(&normal(), "12:46:20"), t("12:46:20"), &CFG);
         assert!(s.new_suspects.is_empty(), "{:?}", s.new_suspects);
         assert_ne!(s.holds.get("D"), Some(&Hold::Suspect));
+    }
+
+    /// 11/9 15:23 1500 的形狀（slug 換成合成的）：時間一秒都沒動，只是一列換成新存的稿
+    /// （同 slug、新 ID），再多一個長度 0 的空白列。
+    fn swap_rounds() -> (Vec<RowObs>, Vec<RowObs>) {
+        let row = |k: &str, slug: &str, c: &str, aired: bool| RowObs { key: k.into(), slug: slug.into(), cume: t(c), aired };
+        let before = vec![
+            row("P", "拍合成1500", "15:00:27", true),
+            row("R-old", "里長合成1430", "15:01:16", true),
+            row("H", "火車合成1200", "15:02:53", true),
+            row("Q", "撤合成1800", "15:09:52", true),
+            row("CM3", "=====CM3=====", "15:20:57", true),
+            row("N", "番茄合成1420", "15:23:44", false),
+        ];
+        let after = vec![
+            row("P", "拍合成1500", "15:00:27", true),
+            row("R-new", "里長合成1430", "15:01:16", true),
+            row("H", "火車合成1200", "15:02:53", true),
+            row("BLANK", "", "15:09:52", true),
+            row("Q", "撤合成1800", "15:09:52", true),
+            row("CM3", "=====CM3=====", "15:20:57", true),
+            row("N", "番茄合成1420", "15:23:44", false),
+        ];
+        (before, after)
+    }
+
+    #[test]
+    fn a_story_swapped_for_a_new_copy_and_a_zero_length_row_are_not_an_anomaly() {
+        let (before, after) = swap_rounds();
+        let mut g = Guard::default();
+        g.step("1500", &before, t("15:21:31"), &CFG);
+        g.step("1500", &before, t("15:22:31"), &CFG);
+        let s = g.step("1500", &after, t("15:23:32"), &CFG);
+        assert!(s.anomaly.is_none(), "{:?}", s.anomaly);
+        assert!(!s.cooling && s.new_suspects.is_empty() && g.suspects().is_empty());
+        // 新 ID 是新的一則：照一般流程等一輪確認（文件裡已經有了，比對會擋重複寫入）。
+        assert_eq!(s.holds.get("R-new"), Some(&Hold::Confirm));
+        assert_eq!(s.holds.get("P"), None);
+    }
+
+    #[test]
+    fn a_swap_to_a_different_slug_is_still_suspect() {
+        // 換上去的是別的 slug、而且有長度：跟搬稿分不出來，照樣擋。
+        let (before, mut after) = swap_rounds();
+        after[1].slug = "別的合成1500".into();
+        after.remove(3);
+        let mut g = Guard::default();
+        g.step("1500", &before, t("15:21:31"), &CFG);
+        let s = g.step("1500", &after, t("15:23:32"), &CFG);
+        assert!(s.anomaly.is_some());
+        assert_eq!(s.holds.get("R-new"), Some(&Hold::Suspect));
     }
 
     #[test]
