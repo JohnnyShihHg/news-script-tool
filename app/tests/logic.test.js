@@ -668,14 +668,14 @@ function inewsSummary(show, stories) {
       kind: "Passed",
       Passed: { file_name: `${s.slug}.txt`, slug: s.slug, style: "SOT", time: "", group: "", title: `${s.slug}標題`, body: "內文", slug_marker: "", raw_title: "", raw_body: "", warnings: [] },
     })),
-    inews: { show, stories: stories.map((s) => ({ file_name: `${s.slug}.txt`, key: s.key, version: s.version, cume: "", show: s.show ?? show })) },
+    inews: { show, stories: stories.map((s) => ({ file_name: `${s.slug}.txt`, key: s.key, version: s.version, cume: "", show: s.show ?? show, hold: s.hold ?? null, recheck: !!s.recheck })) },
   };
 }
 
 test("iNEWS cards are keyed by story, not by position", () => {
   const items = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲", key: "A:1", version: "v1" }]));
   assert.equal(items[0].id, "inews-A:1");
-  assert.deepEqual(items[0].inews, { key: "A:1", version: "v1", show: "0800" });
+  assert.deepEqual(items[0].inews, { key: "A:1", version: "v1", show: "0800", hold: null, recheck: false });
   assert.equal(items[0].included, true);
 });
 
@@ -919,4 +919,63 @@ test("a show that is current again is no longer closed (App left running overnig
   L.noteInewsRound(closed, programs, { show: "2000" });
   L.noteInewsRound(closed, programs, { show: "2200", closed_show: "2000" });
   assert.ok(!programs.has("2000"));
+});
+
+// --- rundown 異常保護（v0.3.11）---
+
+test("held cards (等確認 / 冷卻 / 可疑) are never written automatically", () => {
+  const items = L.inewsItemsFromSummary(inewsSummary("1200", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v1", hold: "confirm" },
+    { slug: "丙", key: "A:3", version: "v1", hold: "cooldown" },
+    { slug: "丁", key: "A:4", version: "v1", hold: "suspect" },
+  ]));
+  items.forEach((i) => { i.matchStatus = "to_cut"; i.keywords = "#k"; });
+  assert.deepEqual(L.autoWriteCandidates(items, new Set(), "").map((i) => i.id), ["inews-A:1"]);
+  assert.equal(L.holdLabel(items[1]), "⏳ 等下一輪確認");
+  assert.equal(L.holdLabel(items[3]), "⚠ 可疑：時間異常，不寫入");
+  assert.equal(L.holdLabel(items[0]), "");
+});
+
+test("a suspect card gets no keywords until it is released", () => {
+  const items = L.inewsItemsFromSummary(inewsSummary("1200", [
+    { slug: "甲", key: "A:1", version: "v1", hold: "confirm" },
+    { slug: "乙", key: "A:2", version: "v1", hold: "suspect" },
+  ]));
+  assert.deepEqual(L.selectKeywordTargets(items, "").map((i) => i.id), ["inews-A:1"]);
+});
+
+test("a kept card takes the fresh hold, and a held card is not carried once it is gone", () => {
+  const first = L.inewsItemsFromSummary(inewsSummary("1200", [
+    { slug: "甲", key: "A:1", version: "v1", hold: "confirm" },
+    { slug: "乙", key: "B:1", version: "v1", show: "1100", hold: "suspect" },
+  ]));
+  first[0].keywords = "#a";
+  // 下一輪：甲確認過了；乙（上一節的可疑稿）不在這一輪裡。
+  const fresh = L.inewsItemsFromSummary(inewsSummary("1200", [{ slug: "甲", key: "A:1", version: "v1" }]));
+  const merged = L.mergeInewsItems(first, fresh, new Set());
+  assert.deepEqual(merged.map((i) => i.id), ["inews-A:1"]);
+  assert.equal(merged[0].inews.hold, null);
+  assert.equal(merged[0].keywords, "#a");
+});
+
+test("a story found by the 定時複查 is written at the bottom without a divider", () => {
+  const late = { slug: "漏寫", inews: { show: "1100", recheck: true } };
+  // 1100 是開程式之前的節次，不在 closed 裡，也不能被當成新的一節。
+  const r = L.composeInewsWrite([late, mk("午間", "1200")], { lastShow: "1200", closed: new Set() }, AFTER, toText);
+  assert.equal(r.text, "午間\n\n漏寫", "after the current show's stories, at the bottom");
+  assert.equal(r.lastShow, "1200");
+  assert.deepEqual(r.held, []);
+  assert.deepEqual(r.dividers, []);
+});
+
+test("疑似誤寫 lists written stories that the recheck no longer sees aired", () => {
+  const written = new Map([
+    ["A:1", { slug: "記憶卡破萬1200", show: "1200" }],
+    ["A:2", { slug: "國安救台股1200", show: "1200" }],
+    ["B:1", { slug: "早安稿0900", show: "0900" }],
+  ]);
+  const r = L.findMisfires(written, { shows: ["1100", "1200"], aired_keys: ["A:2"] });
+  assert.deepEqual(r, [{ key: "A:1", slug: "記憶卡破萬1200", show: "1200" }]);
+  assert.deepEqual(L.findMisfires(written, null), []);
 });

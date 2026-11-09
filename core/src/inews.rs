@@ -718,6 +718,76 @@ impl Planner<'_> {
     }
 }
 
+impl<'a> Planner<'a> {
+    fn new(
+        names: &[String],
+        spans: &std::collections::BTreeMap<String, String>,
+        lead_minutes: u32,
+        off_air: bool,
+        probe: &'a mut dyn FnMut(&str) -> ShowProbe,
+    ) -> Option<Self> {
+        let shows = sorted_shows(names);
+        if shows.is_empty() {
+            return None;
+        }
+        let span_list = spans
+            .iter()
+            .filter_map(|(from, to)| {
+                let i = shows.iter().position(|(name, _)| name == from.trim())?;
+                let to = show_start(to.trim())?;
+                Some((i, forward_gap(shows[i].1, to)))
+            })
+            .collect();
+        Some(Planner { shows, spans: span_list, lead_minutes, off_air, probes: HashMap::new(), probe, skipped: Vec::new() })
+    }
+
+    /// 目前節次的 index，以及是不是提前換過去的。
+    fn current(&mut self, now: u32) -> (usize, bool) {
+        let n = self.len();
+        let base = self.shows.iter().rposition(|(_, s)| *s <= now).unwrap_or(n - 1);
+        let mut cur = (0..n).map(|k| (base + n - k) % n).find(|&j| self.valid(j)).unwrap_or(base);
+        let mut switched_early = false;
+        for _ in 0..n {
+            let Some(nx) = self.next_valid(cur) else { break };
+            let (cur_slot, next_slot) = (self.slot(cur), self.slot(nx));
+            if cur_slot.axis(now as i64) >= cur_slot.later_start(&next_slot) {
+                cur = nx;
+                switched_early = true;
+            } else {
+                break;
+            }
+        }
+        (cur, switched_early)
+    }
+}
+
+/// 定時複查（v0.3.11）：目前節次之前的有效節次，由近到遠，最多 `max` 節（繞一圈就停）。
+/// 呼叫端再依播出日篩掉前一天的。
+pub fn earlier_windows(
+    names: &[String],
+    now: u32,
+    spans: &std::collections::BTreeMap<String, String>,
+    lead_minutes: u32,
+    off_air: bool,
+    probe: &mut dyn FnMut(&str) -> ShowProbe,
+    max: usize,
+) -> Vec<Window> {
+    let Some(mut p) = Planner::new(names, spans, lead_minutes, off_air, probe) else { return Vec::new() };
+    let (cur, _) = p.current(now);
+    let mut out = Vec::new();
+    let mut at = cur;
+    while out.len() < max {
+        match p.prev_valid(at) {
+            Some(j) if j != cur && !out.iter().any(|w: &Window| w.slot.show == p.shows[j].0) => {
+                out.push(p.window(j));
+                at = j;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
 /// 節次選擇。`probe` 讀一節的 rundown（呼叫端快取），只會被呼叫在需要判斷的節次上。
 ///
 /// - 有效節次 = 沒被跨節設定蓋過、而且有帶樣式的非 float 稿。
@@ -734,35 +804,8 @@ pub fn plan_slots(
     off_air: bool,
     probe: &mut dyn FnMut(&str) -> ShowProbe,
 ) -> Option<Plan> {
-    let shows = sorted_shows(names);
-    if shows.is_empty() {
-        return None;
-    }
-    let span_list = spans
-        .iter()
-        .filter_map(|(from, to)| {
-            let i = shows.iter().position(|(name, _)| name == from.trim())?;
-            let to = show_start(to.trim())?;
-            Some((i, forward_gap(shows[i].1, to)))
-        })
-        .collect();
-    let mut p = Planner { shows, spans: span_list, lead_minutes, off_air, probes: HashMap::new(), probe, skipped: Vec::new() };
-    let n = p.len();
-
-    let base = p.shows.iter().rposition(|(_, s)| *s <= now).unwrap_or(n - 1);
-    let mut cur = (0..n).map(|k| (base + n - k) % n).find(|&j| p.valid(j)).unwrap_or(base);
-
-    let mut switched_early = false;
-    for _ in 0..n {
-        let Some(nx) = p.next_valid(cur) else { break };
-        let (cur_slot, next_slot) = (p.slot(cur), p.slot(nx));
-        if cur_slot.axis(now as i64) >= cur_slot.later_start(&next_slot) {
-            cur = nx;
-            switched_early = true;
-        } else {
-            break;
-        }
-    }
+    let mut p = Planner::new(names, spans, lead_minutes, off_air, probe)?;
+    let (cur, switched_early) = p.current(now);
 
     let current = p.window(cur);
     let previous = p.prev_valid(cur).map(|j| p.window(j));
@@ -1243,6 +1286,21 @@ mod tests {
         let names: Vec<String> = d.keys().cloned().collect();
         let mut probe = |name: &str| ShowProbe::of(d.get(name).map_or(&[][..], |r| r.as_slice()));
         plan_slots(&names, now, spans, 5, true, &mut probe).unwrap()
+    }
+
+    #[test]
+    fn earlier_windows_walk_back_over_valid_shows_only() {
+        let d = day();
+        let names: Vec<String> = d.keys().cloned().collect();
+        let mut probe = |name: &str| ShowProbe::of(d.get(name).map_or(&[][..], |r| r.as_slice()));
+        // 14:10：目前 1400，往前是 1200（1300 併入 1200）、1100、1000、0900、0800。
+        let w = earlier_windows(&names, clock(14, 10, 0), &spans(), 5, true, &mut probe, 10);
+        let shows: Vec<&str> = w.iter().map(|w| w.slot.show.as_str()).collect();
+        assert_eq!(&shows[..5], ["1200", "1100", "1000", "0900", "0800"]);
+        assert!(!shows.contains(&"1300") && !shows.contains(&"1400"));
+        assert_eq!(w[0].end(), clock(13, 55, 0) as i64, "1200 runs to 1400's start");
+        let w = earlier_windows(&names, clock(14, 10, 0), &spans(), 5, true, &mut probe, 2);
+        assert_eq!(w.len(), 2);
     }
 
     fn titles(rows: &[RundownRow], sel: &Selection) -> Vec<String> {

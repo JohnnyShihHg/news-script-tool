@@ -34,6 +34,8 @@ const {
   buildEveningExport,
   mergeEveningEdits,
   inewsItemsFromSummary,
+  holdLabel,
+  findMisfires,
   diffInewsVersions,
   writtenKey,
   isPendingWrite,
@@ -379,6 +381,8 @@ function cardHtml(item) {
         ${marker ? `<span class="badge marker">${escapeHtml(marker)}</span>` : ""}
         ${matchLabel ? `<span class="badge ${matchClass}" title="${escapeHtml(item.matchedLine ?? "")}">${matchLabel}</span>` : ""}
         ${item.crossDay ? `<span class="badge marker" title="${escapeHtml(item.matchedLine ?? "")}">前一天已上傳的重播</span>` : ""}
+        ${holdLabel(item) ? `<span class="badge ${item.inews.hold === "suspect" ? "failed" : "marker"}">${holdLabel(item)}</span>` : ""}
+        ${item.inews?.recheck ? `<span class="badge marker">複查補寫</span>` : ""}
         <span>${escapeHtml(fields.style)}</span>
         <span>${escapeHtml(fields.time)}</span>
         <span>${escapeHtml(fields.group)}</span>
@@ -828,6 +832,10 @@ const programDividers = new Map();
 let inewsSessionStart = false;
 /** `${key}|${version}` written this session: one version is never written twice. */
 const writtenKeys = new Set();
+/** story key -> { slug, show } written this session, for the 疑似誤寫 check (v0.3.11). */
+const writtenStories = new Map();
+/** The last 疑似誤寫 report, shown under the round status until the next 定時複查. */
+let misfires = [];
 let inewsTimer = null;
 let inewsBusy = false;
 /** Keyword runs that hit the per-minute cap (or left entries over) wait this long. */
@@ -945,7 +953,15 @@ async function inewsRound() {
     // 時間校正不等關鍵字、節次暫存或分隔線：已經在文件裡的稿每一輪都對一次。
     if (inewsCfg.correct_time !== false) await correctCollabTimes(meta.time_rows ?? []);
 
-    const pending = items.some((i) => isPendingWrite(i, writtenKeys));
+    if (meta.recheck) misfires = findMisfires(writtenStories, meta.recheck);
+    if (misfires.length) {
+      el("inewsStatus").textContent +=
+        `\n⚠ 疑似誤寫 ${misfires.length} 則（寫進文件後，rundown 已經不是已播出；工具不會刪，請人工確認）：` +
+        misfires.map((m) => `${m.slug}（${m.show}）`).join("、");
+    }
+
+    // Held cards (等確認 / 冷卻 / 可疑) cannot be written this round, so they alone do not start the pipeline.
+    const pending = items.some((i) => isPendingWrite(i, writtenKeys) && !i.inews?.hold);
     if (added.length || changed.length || pending || meta.closed_show || dividerOwed()) await runInewsPipeline();
   } finally {
     inewsRoundActive = false;
@@ -1014,7 +1030,9 @@ async function runInewsPipeline() {
 function pendingShowsOutside(ready) {
   const inReady = new Set(ready);
   return new Set(
-    items.filter((i) => i.inews && !inReady.has(i) && isPendingWrite(i, writtenKeys)).map((i) => i.inews.show)
+    items
+      .filter((i) => i.inews && !inReady.has(i) && isPendingWrite(i, writtenKeys) && i.inews.hold !== "suspect")
+      .map((i) => i.inews.show)
   );
 }
 
@@ -1090,6 +1108,7 @@ async function writeInewsItems(ready) {
       if (key) writtenKeys.add(key);
       writtenSlugs.add(slugOf(i));
       writtenSlugs.add(`${slugOf(i)}|${i.inews?.version ?? ""}`);
+      if (i.inews) writtenStories.set(i.inews.key, { slug: slugOf(i), show: i.inews.show });
       // 已經在文件裡了：取消勾選，下一輪比對也會得到同樣的結果。
       i.included = false;
       i.defaultIncluded = false;
@@ -1517,6 +1536,11 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.correct_time" ${inewsSettings.correct_time !== false ? "checked" : ""} /> 時間校正：協作文件裡已寫入的稿，時間跟著 rundown 改</label>
             <div class="field"><label>時間校正：同一個新時間連續幾輪都一樣才改</label><input type="number" min="1" data-cfg-num="inews.correct_time_stable_rounds" value="${inewsSettings.correct_time_stable_rounds ?? 2}" /></div>
             <div class="field"><label>時間校正：新舊時間差超過幾分鐘就不改（疑似挪稿重播）</label><input type="number" min="1" data-cfg-num="inews.correct_time_max_delta_minutes" value="${inewsSettings.correct_time_max_delta_minutes ?? 10}" /></div>
+            <div class="field"><label>寫入確認：新稿連續幾輪都判定已播出才寫入（1 = 不等）</label><input type="number" min="1" data-cfg-num="inews.write_stable_rounds" value="${inewsSettings.write_stable_rounds ?? 2}" /></div>
+            <div class="field"><label>rundown 異常門檻（秒）：已播出的稿時間倒退或整段移動超過這麼多就暫停寫入</label><input type="number" min="1" data-cfg-num="inews.anomaly_threshold_seconds" value="${inewsSettings.anomaly_threshold_seconds ?? 120}" /></div>
+            <div class="field"><label>rundown 異常後連續幾輪穩定才恢復寫入</label><input type="number" min="1" data-cfg-num="inews.anomaly_quiet_rounds" value="${inewsSettings.anomaly_quiet_rounds ?? 3}" /></div>
+            <div class="field"><label>rundown 異常冷卻上限（分鐘，超過就恢復；可疑稿仍不寫）</label><input type="number" min="1" data-cfg-num="inews.anomaly_max_cooldown_minutes" value="${inewsSettings.anomaly_max_cooldown_minutes ?? 15}" /></div>
+            <div class="field"><label>定時複查：每隔幾分鐘重讀今天已結束的節次（0 = 關閉）</label><input type="number" min="0" data-cfg-num="inews.recheck_interval_minutes" value="${inewsSettings.recheck_interval_minutes ?? 30}" /></div>
             <div class="muted">自動刷新每一輪對目前節次（和還沒補掃完的上一節）已播出的稿，在今天的日期段落找同一個 slug、時間落在該節範圍內的行，rundown 時間不同就只改時間那幾個字，前綴、樣式、組別和格式都不動。範圍外的同 slug 行是其他節次的播出紀錄，不改；(抓新)、(19) 這類行不改；同一節有多則同 slug 時依時間先後配對，數量對不上就不改。編輯把播過的稿直接挪到後面重播時，rundown 時間會差很多：新舊時間差超過上面的分鐘數就不改，保留原本那次的播出紀錄。每次修改和略過都寫進決策紀錄（[校正]、[校正略過]）。</div>
             <div class="field"><label>節次分隔線格式（{hh} = 小時，{show} = 節次）</label><input type="text" data-cfg="inews.divider_format" value="${escapeHtml(inewsSettings.divider_format)}" /></div>
             <div class="field">

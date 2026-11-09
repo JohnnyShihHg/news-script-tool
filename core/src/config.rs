@@ -466,6 +466,19 @@ pub struct InewsConfig {
     /// 直接挪到後面重播（17:43 播完拖到 19:05），時間會差幾十分鐘，那行是上一次的播出
     /// 紀錄，不能改。
     pub correct_time_max_delta_minutes: u32,
+    /// 寫入確認（v0.3.11）：新稿要連續幾輪都判定已播出（累積時間沒有大跳）才寫入。
+    /// 製作人搬稿、還沒重設硬時間的那一分鐘，還沒播的稿會被算成已播出（11/9 12:45）。
+    pub write_stable_rounds: u32,
+    /// rundown 異常門檻（v0.3.11，秒）：同一節內「最後納入」倒退、新播出的稿排到
+    /// 已播出範圍之前、或已播出的稿同時大幅移動，超過這個秒數就算異常。
+    pub anomaly_threshold_seconds: u32,
+    /// 異常後連續幾輪穩定才恢復寫入與校正。
+    pub anomaly_quiet_rounds: u32,
+    /// 冷卻上限（分鐘）：超過就警告並恢復一般判定。可疑稿不受影響，照樣不寫。
+    pub anomaly_max_cooldown_minutes: u32,
+    /// 定時複查（v0.3.11，分鐘，0 = 關閉）：這個播出日已經結束、程式跟過的節次，
+    /// 每隔這麼久重讀一次：時間校正，補掃後才出現的已播出稿寫到最下面。
+    pub recheck_interval_minutes: u32,
 }
 
 impl Default for InewsConfig {
@@ -501,13 +514,18 @@ impl Default for InewsConfig {
             correct_time: true,
             correct_time_stable_rounds: 2,
             correct_time_max_delta_minutes: 10,
+            write_stable_rounds: 2,
+            anomaly_threshold_seconds: 120,
+            anomaly_quiet_rounds: 3,
+            anomaly_max_cooldown_minutes: 15,
+            recheck_interval_minutes: 30,
         }
     }
 }
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 12;
+pub const CURRENT_CONFIG_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -610,6 +628,8 @@ pub fn migrate(cfg: &mut Config) -> bool {
     // v11 (v0.3.9): [inews] 加 correct_time / correct_time_stable_rounds，serde 預設補上；
     // filter.blank_style_body_pass_terms（氣象）上面 union 補進去。
     // v12 (v0.3.10): [inews] 加 correct_time_max_delta_minutes，serde 預設補上。
+    // v13 (v0.3.11): [inews] 加 write_stable_rounds、anomaly_*、recheck_interval_minutes，
+    // serde 預設補上。
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -954,4 +974,29 @@ theme = "warm"
         assert_eq!(cfg.inews.correct_time_max_delta_minutes, 10);
     }
 
+    #[test]
+    fn a_version_12_config_gains_the_rundown_guard_and_keeps_its_settings() {
+        let mut old = Config::default();
+        old.config_version = 12;
+        old.inews.poll_seconds = 30;
+        old.inews.correct_time_max_delta_minutes = 7;
+        let guard_keys = ["write_stable_rounds", "anomaly_", "recheck_interval_minutes"];
+        let s: String = toml::to_string_pretty(&old)
+            .unwrap()
+            .lines()
+            .filter(|l| !guard_keys.iter().any(|k| l.starts_with(k)))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut cfg = load_from_str(&s).unwrap();
+        assert!(migrate(&mut cfg));
+        assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(cfg.inews.poll_seconds, 30);
+        assert_eq!(cfg.inews.correct_time_max_delta_minutes, 7);
+        assert_eq!(cfg.inews.write_stable_rounds, 2);
+        assert_eq!(cfg.inews.anomaly_threshold_seconds, 120);
+        assert_eq!(cfg.inews.anomaly_quiet_rounds, 3);
+        assert_eq!(cfg.inews.anomaly_max_cooldown_minutes, 15);
+        assert_eq!(cfg.inews.recheck_interval_minutes, 30);
+    }
 }

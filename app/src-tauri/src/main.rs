@@ -296,7 +296,17 @@ async fn import_inews(
         if let Some(dir) = &log_dir {
             let tag = if mode == inews::FetchMode::Manual { "[手動]" } else { "[自動]" };
             match &r {
-                Ok(f) => inews::append_log(dir, &format!("{tag} {}", f.log_line)),
+                Ok(f) => {
+                    inews::append_log(dir, &format!("{tag} {}", f.log_line));
+                    for line in &f.extra_logs {
+                        inews::append_log(dir, line);
+                    }
+                    // 異常那一輪的前後兩輪 rundown（v0.3.11）：寫不進去只少一份診斷資料。
+                    if let Some(json) = &f.anomaly_dump {
+                        let stamp = inews::taipei_now().format("%Y%m%d-%H%M%S");
+                        let _ = std::fs::write(dir.join(format!("anomaly-{stamp}.json")), json);
+                    }
+                }
                 Err(e) => inews::append_log(dir, &format!("{tag} 錯誤：{e}")),
             }
         }

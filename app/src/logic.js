@@ -106,7 +106,9 @@
         (i.keywords ?? "").trim() === "" &&
         i.matchStatus !== "removed" &&
         !i.alreadyInDoc &&
-        !isNoUpload(i, noUploadLabel)
+        !isNoUpload(i, noUploadLabel) &&
+        // 可疑稿（v0.3.11）不會自動寫，先不花額度產生關鍵字；放行後下一輪再產生。
+        i.inews?.hold !== "suspect"
     );
   }
 
@@ -510,7 +512,14 @@
       if (story) {
         item.id = `inews-${story.key}`;
         // 換節最後同步、延遲補掃的稿屬於舊節次，不是這一輪的目前節次。
-        item.inews = { key: story.key, version: story.version, show: story.show ?? meta.show };
+        // hold（v0.3.11）：這一輪不能自動寫入的原因；recheck：定時複查找到的漏寫稿。
+        item.inews = {
+          key: story.key,
+          version: story.version,
+          show: story.show ?? meta.show,
+          hold: story.hold ?? null,
+          recheck: !!story.recheck,
+        };
       }
       return item;
     });
@@ -555,6 +564,10 @@
    * The 累積時間 moves without the version changing when the rundown is retimed. A
    * kept card not yet written takes the fresh time, so it is written with the latest
    * one; a written one is left alone -- the doc line is fixed by 時間校正 (v0.3.9).
+   *
+   * The hold (等確認 / 冷卻 / 可疑, v0.3.11) always comes from the fresh poll, and a
+   * held card is never carried: it was held because this round could not be trusted,
+   * so once it is gone from the rundown it is gone.
    */
   function mergeInewsItems(previous, fresh, writtenKeys) {
     const prevById = new Map((previous ?? []).filter((p) => p.inews).map((p) => [p.id, p]));
@@ -563,6 +576,8 @@
     const merged = fresh.map((f) => {
       const p = prevById.get(f.id);
       if (!(p && f.inews && p.inews.version === f.inews.version)) return f;
+      p.inews.hold = f.inews.hold ?? null;
+      p.inews.recheck = !!f.inews.recheck;
       if (p.time !== f.time && !writtenKeys?.has(writtenKey(p))) {
         p.time = f.time;
         p.dto = f.dto;
@@ -570,7 +585,8 @@
       return p;
     });
     const carried = (previous ?? []).filter(
-      (p) => p.inews && !freshIds.has(p.id) && !freshShows.has(p.inews.show) && isPendingWrite(p, writtenKeys)
+      (p) =>
+        p.inews && !p.inews.hold && !freshIds.has(p.id) && !freshShows.has(p.inews.show) && isPendingWrite(p, writtenKeys)
     );
     return [...carried, ...merged];
   }
@@ -583,6 +599,7 @@
     return (items ?? []).filter(
       (i) =>
         isPendingWrite(i, writtenKeys) &&
+        !i.inews?.hold &&
         i.matchStatus != null &&
         i.keywordStatus !== "loading" &&
         ((i.keywords ?? "").trim() !== "" || (i.body ?? "").trim() === "" || isNoUpload(i, noUploadLabel))
@@ -704,7 +721,8 @@
       }
     };
     for (const g of groups) {
-      const late = g.show && g.show !== current && closed.has(g.show);
+      // 定時複查找到的漏寫稿（v0.3.11）也一樣：那一節早就結束了，直接寫在最下面。
+      const late = g.show && g.show !== current && (closed.has(g.show) || g.items.every((i) => i.inews?.recheck));
       if (g.show && g.show !== current && !late) {
         if (current && !done(current)) {
           held.push(...g.items);
@@ -721,7 +739,33 @@
     return { text: parts.filter((p) => p.trim() !== "").join("\n\n"), lastShow: current, written, held, dividers };
   }
 
+  /** A card held back this round (等確認 / 冷卻 / 可疑) -> its label, or "" (v0.3.11). */
+  function holdLabel(item) {
+    return { confirm: "⏳ 等下一輪確認", cooldown: "⏸ rundown 時間異常，暫停寫入", suspect: "⚠ 可疑：時間異常，不寫入" }[
+      item?.inews?.hold ?? ""
+    ] ?? "";
+  }
+
+  /**
+   * 疑似誤寫 (v0.3.11): stories this session wrote to the doc whose show the 定時複查
+   * just read again, and which are no longer aired there -- what a rundown read in the
+   * middle of a move looks like afterwards. Only reported; the doc is never edited.
+   *
+   *   written -- Map story key -> { slug, show } written this session
+   *   recheck -- `meta.recheck`: { shows, aired_keys }
+   */
+  function findMisfires(written, recheck) {
+    if (!recheck) return [];
+    const shows = new Set(recheck.shows ?? []);
+    const aired = new Set(recheck.aired_keys ?? []);
+    return [...(written ?? new Map()).entries()]
+      .filter(([key, w]) => shows.has(w.show) && !aired.has(key))
+      .map(([key, w]) => ({ key, ...w }));
+  }
+
   return {
+    holdLabel,
+    findMisfires,
     inewsItemsFromSummary,
     diffInewsVersions,
     writtenKey,

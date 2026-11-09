@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>logic.test.js harness</title>
+<pre id="out">running…</pre>
+<script>
+  // 沒有 Node.js 的電腦用：在瀏覽器裡跑 logic.test.js（node:test / node:assert 的最小替身）。
+  window.__errors = [];
+  window.addEventListener("error", (e) => window.__errors.push(`${e.filename?.split("/").pop()}: ${e.message}`));
+  const __tests = [];
+  function __deep(a, b) {
+    if (a == b) return true;
+    if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+    if (a instanceof Map || b instanceof Map) {
+      if (!(a instanceof Map && b instanceof Map) || a.size !== b.size) return false;
+      for (const [k, v] of a) if (!b.has(k) || !__deep(v, b.get(k))) return false;
+      return true;
+    }
+    if (a instanceof Set || b instanceof Set) {
+      if (!(a instanceof Set && b instanceof Set) || a.size !== b.size) return false;
+      for (const v of a) if (!b.has(v)) return false;
+      return true;
+    }
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    const ka = Object.keys(a), kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && __deep(a[k], b[k]));
+  }
+  const __fail = (msg, a, b) => { throw new Error(`${msg ?? "assertion failed"}\n  actual:   ${JSON.stringify(a)}\n  expected: ${JSON.stringify(b)}`); };
+  const __assert = {
+    equal: (a, b, m) => { if (!(a == b)) __fail(m, a, b); },
+    notEqual: (a, b, m) => { if (a == b) __fail(m, a, b); },
+    deepEqual: (a, b, m) => { if (!__deep(a, b)) __fail(m, a, b); },
+    ok: (v, m) => { if (!v) __fail(m, v, true); },
+    match: (s, re, m) => { if (!re.test(s)) __fail(m, s, String(re)); },
+  };
+  function require(name) {
+    if (name === "node:test") return (n, f) => __tests.push([n, f]);
+    if (name === "node:assert") return __assert;
+    return window.AppLogic;
+  }
+</script>
+<script src="../src/logic.js"></script>
+<script src="logic.test.js"></script>
+<script>
+  const lines = [];
+  let failed = 0;
+  for (const [n, f] of __tests) {
+    try { f(); } catch (e) { failed++; lines.push(`FAIL ${n}\n${e.message}`); }
+  }
+  lines.unshift(`${__tests.length - failed} passed, ${failed} failed (of ${__tests.length})`);
+  if (window.__errors.length) lines.push("load errors:", ...window.__errors);
+  document.getElementById("out").textContent = lines.join("\n\n");
+  window.__result = { total: __tests.length, failed, lines };
+</script>

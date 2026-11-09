@@ -3,6 +3,7 @@ pub mod config;
 pub mod doc_match;
 pub mod format;
 pub mod gemini;
+pub mod guard;
 pub mod inews;
 pub mod model;
 pub mod parse;
