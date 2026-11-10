@@ -36,6 +36,7 @@ const {
   inewsItemsFromSummary,
   holdLabel,
   findMisfires,
+  writeParts,
   diffInewsVersions,
   writtenKey,
   isPendingWrite,
@@ -68,10 +69,6 @@ let compareDay = "";
 /** The last compare could not find yesterday's section: auto-write waits for a click. */
 let compareHoldsAutoWrite = false;
 let dateHeaderWrittenFor = "";
-
-function withDateHeader(text) {
-  return dateHeaderOwed ? `${dateHeaderOwed}\n${text}` : text;
-}
 
 function dateHeaderWritten() {
   if (dateHeaderOwed) dateHeaderWrittenFor = compareDay;
@@ -791,8 +788,12 @@ async function writeBackToCollab() {
   btn.disabled = true;
   try {
     const res = await invoke("append_to_collab_doc_checked", {
-      text: withDateHeader(text),
-      slugs: outgoing.map((i) => slugOf(i)),
+      parts: outgoing
+        .map((i) => ({ slug: slugOf(i), text: buildOutputText([outputFieldsOf(i)]) }))
+        .filter((p) => p.text.trim() !== ""),
+      header: dateHeaderOwed || null,
+      // 手動寫入也留紀錄：以前只有自動流程會寫「成功」，手動的在紀錄裡看不出來。
+      logNote: `手動寫入 ${writeLogNote(outgoing, [])}`,
     });
     const msg = res.message ?? "整批都已經在文件裡了，這次沒有寫入。";
     dateHeaderWritten();
@@ -1095,7 +1096,7 @@ function hideInewsConfirm() {
 async function writeInewsItems(ready) {
   // 寫入前再擋一次：同一個版本（或這次 session 寫過的 slug）不重複寫入。
   const fresh = ready.filter((i) => isPendingWrite(i, writtenKeys) && !writtenSlugs.has(`${slugOf(i)}|${i.inews?.version ?? ""}`));
-  const { text, lastShow, written, held, dividers } = inewsWriteText(fresh);
+  const { text, pieces, lastShow, written, held, dividers } = inewsWriteText(fresh);
   if (!text.trim()) {
     if (held.length) showHeldNotice(held);
     return;
@@ -1108,9 +1109,10 @@ async function writeInewsItems(ready) {
     // 寫入前在同一個協作操作裡重新讀一次文件，濾掉另一台電腦剛寫進去的那幾則。
     // 兩台同時開自動寫入時，比對跟寫入之間隔著產生關鍵字的那幾十秒，對方寫了什麼
     // 這邊看不到 —— 把確認挪到動手前一刻，重複寫入的窗口就從幾十秒縮到零點幾秒。
+    // 每則稿分開傳（v0.3.14）：後端逐則判斷，不再從整串文字反推哪幾行是同一則。
     const res = await invoke("append_to_collab_doc_checked", {
-      text: withDateHeader(text),
-      slugs: written.map((i) => slugOf(i)),
+      parts: writeParts(pieces, slugOf, (list) => buildOutputText(list.map(outputFieldsOf))),
+      header: dateHeaderOwed || null,
       logNote: writeLogNote(written, dividers),
     });
     const msg = res.message ?? "整批都已經在文件裡了，這次沒有寫入。";

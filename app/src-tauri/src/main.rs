@@ -1124,8 +1124,6 @@ struct CheckedAppendDto {
     message: Option<String>,
     /// 這次被濾掉的 slug 或分隔線 —— 多半是另一台電腦剛寫進去的。
     dropped: Vec<String>,
-    /// slug 清單跟條目數對不上，這次沒有過濾、原樣寫出。
-    mismatched: bool,
 }
 
 /// 「重新讀文件 → 濾掉已經在裡面的 → 寫入」，整段佔住同一次協作排隊權。
@@ -1141,19 +1139,27 @@ async fn append_to_collab_doc_checked(
     window: tauri::Window,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    text: String,
-    slugs: Vec<String>,
+    parts: Vec<news_script_core::doc_match::WritePart>,
+    header: Option<String>,
     log_note: Option<String>,
 ) -> Result<CheckedAppendDto, String> {
     require_main_window(&window)?;
-    if text.trim().is_empty() {
+    if parts.iter().all(|p| p.text.trim().is_empty()) {
         return Err("沒有可寫入的內容。".to_string());
     }
-    let refresh = lock_or_recover(&state.config).markers.refresh_keywords.clone();
+    let cfg = lock_or_recover(&state.config).clone();
+    let (today, previous) = inews::broadcast_days(inews::taipei_now(), &cfg.inews.broadcast_day_start);
 
     let _turn = collab_turn(&state).await?;
     let doc_text = eval_in_collab_locked(&app, &state, SCRAPE_SCRIPT).await?;
-    let filtered = news_script_core::doc_match::filter_already_written(&text, &slugs, &doc_text, &refresh);
+    let filtered = news_script_core::doc_match::filter_write_parts(
+        &parts,
+        header.as_deref(),
+        &doc_text,
+        &today,
+        &previous,
+        &cfg.markers.refresh_keywords,
+    );
 
     let log = |line: String| {
         if let Some(dir) = inews_log_dir() {
@@ -1163,14 +1169,11 @@ async fn append_to_collab_doc_checked(
     if !filtered.dropped.is_empty() {
         log(format!("[寫入] 寫入前重新比對，濾掉已在文件裡的：{}", filtered.dropped.join("、")));
     }
-    if filtered.mismatched {
-        log("[寫入] 警告：slug 清單與條目數對不上，這次沒有過濾、原樣寫出".to_string());
-    }
     if filtered.text.trim().is_empty() {
         if let Some(note) = &log_note {
             log(format!("[寫入] 整批都已經在文件裡，沒有寫入：{note}"));
         }
-        return Ok(CheckedAppendDto { message: None, dropped: filtered.dropped, mismatched: filtered.mismatched });
+        return Ok(CheckedAppendDto { message: None, dropped: filtered.dropped });
     }
 
     let r = eval_in_collab_locked(&app, &state, &build_append_script(&filtered.text)).await;
@@ -1180,7 +1183,7 @@ async fn append_to_collab_doc_checked(
             Err(e) => log(format!("[寫入] 失敗：{note}｜{e}")),
         }
     }
-    Ok(CheckedAppendDto { message: Some(r?), dropped: filtered.dropped, mismatched: filtered.mismatched })
+    Ok(CheckedAppendDto { message: Some(r?), dropped: filtered.dropped })
 }
 
 #[tauri::command]

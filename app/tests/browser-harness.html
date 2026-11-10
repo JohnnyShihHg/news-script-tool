@@ -39,8 +39,11 @@
     return window.AppLogic;
   }
 </script>
-<script src="../src/logic.js"></script>
-<script src="logic.test.js"></script>
+<script>
+  // 瀏覽器會快取腳本；每次載入都加上時間戳，確保跑的是最新的檔案。
+  const v = Date.now();
+  document.write(`<script src="../src/logic.js?v=${v}"><\/script><script src="logic.test.js?v=${v}"><\/script>`);
+</script>
 <script>
   const lines = [];
   let failed = 0;

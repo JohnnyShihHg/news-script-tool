@@ -1458,17 +1458,31 @@ mod time_tests {
     }
 }
 
-// ---- 寫入前的最後一道確認（v0.3.12）----
+// ---- 寫入前的最後一道確認（v0.3.12；v0.3.14 改成逐則傳入）----
 
-/// 把一份「準備寫進協作文件」的文字，濾掉已經在文件裡的部分。
+/// 一段準備寫進協作文件的文字：一則稿（有 `slug`），或節次分隔線／節目分隔線（沒有）。
+///
+/// 前端把每一則稿的輸出文字**分開**傳進來，這裡不再從整串文字反推「哪幾行是同一則」。
+/// v0.3.12 是用空行切區塊、兩行以上算一則稿，但實際的輸出是「表頭＋標題」空一行再接
+/// 「內文＋關鍵字」，一則稿會被切成兩塊：
+/// - 有關鍵字的稿被算成兩則 → 條目數對不上 → 整份放棄過濾（防重複寫入對一般稿幾乎沒作用）；
+/// - 沒有關鍵字的稿（勿上網），內文是單獨一行，被當成分隔線 → 表頭被濾掉時內文留下來，
+///   文件裡多一段**沒有 slug、沒有標題**的內文（2026/11/10 08:38～08:40 就是這樣）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WritePart {
+    pub text: String,
+    /// 稿件的 slug；分隔線沒有。
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+/// 把一份「準備寫進協作文件」的內容，濾掉已經在文件裡的部分。
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteFilter {
     /// 濾過之後真正要寫的文字；全部都已經在文件裡時是空字串。
     pub text: String,
     /// 被濾掉的 slug（或分隔線），給紀錄與畫面用。
     pub dropped: Vec<String>,
-    /// 條目數量跟傳進來的 slug 數量對不上：寧可原樣寫出去，也不要猜錯而漏寫。
-    pub mismatched: bool,
 }
 
 /// 兩台電腦同時開自動寫入時，各自的「要寫哪幾則」是本機狀態，彼此不知道對方在寫。
@@ -1480,119 +1494,217 @@ pub struct WriteFilter {
 /// —— Yjs 的同步延遲仍有零點幾秒，兩台在那個瞬間交錯還是會重複。真正的保證只有
 /// 「同一時間只開一台自動寫入」。
 ///
-/// `slugs` 要跟 `text` 裡的條目一一對應、順序相同（呼叫端本來就有這份清單，所以
-/// 不用從文字裡反推 slug —— slug 可能含空白，反推會出錯）。對不上就整份原樣寫出。
-pub fn filter_already_written(
-    text: &str,
-    slugs: &[String],
+/// - **只看今天的段落**（沒有任何日期分隔線才退回整份），跟主比對一致。看整份的話，
+///   昨天文件裡同 slug 的乾淨一行（隔天重播的稿）會讓今天該寫的稿被濾掉，分隔線
+///   `==== 09 ====` 更是每天都會被昨天的同一行擋掉。
+/// - 稿件：今天的段落裡已經有乾乾淨淨的一行（`InDoc`）才整則濾掉。`(抓新)` 要求重貼、
+///   或前面有其他標記的，維持原本行為不動。
+/// - 分隔線：今天的段落裡已經有一模一樣的一行就濾掉。
+/// - `header`（今天的日期分隔線）：文件裡已經有今天的段落就不用補；所有內容都被濾掉
+///   時也不會單獨寫。寫的時候跟內容之間只隔一個換行，跟 `withDateHeader` 一樣。
+pub fn filter_write_parts(
+    parts: &[WritePart],
+    header: Option<&str>,
     doc_text: &str,
+    today: &str,
+    previous: &str,
     refresh_keywords: &[String],
 ) -> WriteFilter {
-    let blocks: Vec<&str> = text.split("\n\n").map(str::trim_end).filter(|b| !b.trim().is_empty()).collect();
+    let days = day_sections(doc_text, today, previous);
+    let scope: &str = if days.has_dividers { days.today.as_deref().unwrap_or("") } else { doc_text };
+    let scope_lines: Vec<&str> = scope.lines().map(str::trim).collect();
 
-    // 條目 = 兩行以上的區塊（表頭／標題／內文／關鍵字）；單行區塊是分隔線。
-    let entry_count = blocks.iter().filter(|b| b.lines().count() > 1).count();
-    if entry_count != slugs.len() {
-        return WriteFilter { text: text.to_string(), dropped: Vec::new(), mismatched: true };
-    }
-
-    let doc_lines: Vec<&str> = doc_text.lines().map(str::trim).collect();
-    let mut kept: Vec<&str> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
     let mut dropped = Vec::new();
-    let mut idx = 0usize;
-
-    for block in blocks {
-        if block.lines().count() > 1 {
-            let slug = &slugs[idx];
-            idx += 1;
-            // 只濾「乾乾淨淨已經在文件裡」的那種 —— 那正是對方剛寫進去的樣子。
-            // (抓新) 要求重貼、或前面有其他標記的，維持原本行為不動。
-            if match_slug(slug, doc_text, refresh_keywords).status == MatchStatus::InDoc {
-                dropped.push(slug.clone());
-                continue;
+    for part in parts {
+        if part.text.trim().is_empty() {
+            continue;
+        }
+        match &part.slug {
+            Some(slug) => {
+                if match_entry(slug, "", scope, refresh_keywords).status == MatchStatus::InDoc {
+                    dropped.push(slug.clone());
+                } else {
+                    kept.push(part.text.clone());
+                }
             }
-        } else {
-            let line = block.trim();
-            if !line.is_empty() && doc_lines.iter().any(|l| *l == line) {
-                dropped.push(line.to_string());
-                continue;
+            None => {
+                // 分隔線可能是「節次分隔線\n\n節目分隔線」兩塊；各自判斷。
+                let blocks: Vec<&str> = part
+                    .text
+                    .split("\n\n")
+                    .filter(|b| !b.trim().is_empty())
+                    .filter(|b| {
+                        let line = b.trim();
+                        let single = b.lines().filter(|l| !l.trim().is_empty()).count() == 1;
+                        if single && scope_lines.iter().any(|l| *l == line) {
+                            dropped.push(line.to_string());
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                if !blocks.is_empty() {
+                    kept.push(blocks.join("\n\n"));
+                }
             }
         }
-        kept.push(block);
     }
 
-    WriteFilter { text: kept.join("\n\n"), dropped, mismatched: false }
+    if kept.is_empty() {
+        return WriteFilter { text: String::new(), dropped };
+    }
+    let body = kept.join("\n\n");
+    let header = header.map(str::trim).filter(|h| !h.is_empty());
+    let header_needed = header.is_some() && !(days.has_dividers && days.today.is_some());
+    let text = match header {
+        Some(h) if header_needed => format!("{h}\n{body}"),
+        _ => body,
+    };
+    WriteFilter { text, dropped }
 }
 
 #[cfg(test)]
 mod write_filter_tests {
     use super::*;
 
-    fn entry(slug: &str, title: &str) -> String {
-        format!("{slug} SOT 18:00:00 生活\n{title}\n內文一段。\n#關鍵字")
-    }
-
     fn refresh() -> Vec<String> {
         vec!["抓新".to_string(), "抓".to_string()]
     }
 
+    /// 跟 `buildOutputText` 一模一樣的形狀：表頭、標題、空一行、內文、關鍵字（可以是空的）。
+    fn entry(slug: &str, title: &str, body: &str, keywords: &str) -> WritePart {
+        let text = [format!("{slug} SOT 18:00:00 生活"), title.to_string(), String::new(), body.to_string(), keywords.to_string()]
+            .join("\n");
+        WritePart { text, slug: Some(slug.to_string()) }
+    }
+
+    fn divider(text: &str) -> WritePart {
+        WritePart { text: text.to_string(), slug: None }
+    }
+
+    fn filter(parts: &[WritePart], doc: &str) -> WriteFilter {
+        filter_write_parts(parts, None, doc, "1109", "1108", &refresh())
+    }
+
+    const DAY: &str = "==========1109==========\n";
+
     #[test]
-    fn an_entry_the_other_machine_already_wrote_is_dropped() {
-        let text = [entry("合成甲", "標題甲"), entry("合成乙", "標題乙")].join("\n\n");
-        // 另一台在我們產生關鍵字的時候把合成甲寫進去了。
-        let doc = "==========1109==========\n合成甲 SOT 18:00:00 生活\n標題甲\n內文一段。\n#關鍵字";
-        let out = filter_already_written(&text, &["合成甲".into(), "合成乙".into()], doc, &refresh());
+    fn an_entry_the_other_machine_already_wrote_is_dropped_whole() {
+        let parts = [entry("合成甲", "標題甲", "內文甲。", "#甲"), entry("合成乙", "標題乙", "內文乙。", "#乙")];
+        let doc = format!("{DAY}合成甲 SOT 18:00:00 生活\n標題甲\n\n內文甲。\n#甲");
+        let out = filter(&parts, &doc);
         assert_eq!(out.dropped, vec!["合成甲".to_string()]);
-        assert!(out.text.contains("合成乙"));
-        assert!(!out.text.contains("合成甲"));
-        assert!(!out.mismatched);
+        assert!(out.text.contains("合成乙") && out.text.contains("內文乙。"));
+        assert!(!out.text.contains("合成甲") && !out.text.contains("內文甲。"), "{:?}", out.text);
+    }
+
+    #[test]
+    fn a_dropped_entry_without_keywords_leaves_no_orphan_body() {
+        // 2026/11/10 08:38～08:40：勿上網的稿沒有關鍵字，內文是單獨一行，以前表頭被濾掉
+        // 之後內文會被當成分隔線留下來，單獨寫進文件。
+        let parts = [
+            entry("沒按鈴爆吵0630", "男子深夜按鈴被拒", "鄰居說男子半夜到處按電鈴。", ""),
+            entry("貨車突爆胎0730", "貨車國道爆胎失控", "國道上一輛貨車突然爆胎。", ""),
+        ];
+        let doc = format!("{DAY}沒按鈴爆吵0630 短sot\n貨車突爆胎0730 短sot\n");
+        let out = filter(&parts, &doc);
+        assert_eq!(out.text, "", "整則都在文件裡，連內文都不能留下：{:?}", out.text);
+        assert_eq!(out.dropped, vec!["沒按鈴爆吵0630".to_string(), "貨車突爆胎0730".to_string()]);
+    }
+
+    #[test]
+    fn entries_with_keywords_are_filtered_too() {
+        // v0.3.12 對有關鍵字的一般稿會算出兩倍條目數、整份放棄過濾。
+        let parts = [entry("合成甲", "標題甲", "內文甲。", "#甲 #乙")];
+        let out = filter(&parts, &format!("{DAY}合成甲 SOT 17:55:00 生活"));
+        assert_eq!((out.text.as_str(), out.dropped.len()), ("", 1));
     }
 
     #[test]
     fn nothing_is_dropped_when_the_doc_has_none_of_them() {
-        let text = [entry("合成甲", "標題甲"), entry("合成乙", "標題乙")].join("\n\n");
-        let out = filter_already_written(&text, &["合成甲".into(), "合成乙".into()], "==========1109==========", &refresh());
-        assert_eq!(out.text, text, "沒有重複就要原樣寫出");
+        let parts = [entry("合成甲", "標題甲", "內文甲。", "#甲"), entry("合成乙", "標題乙", "內文乙。", "")];
+        let out = filter(&parts, DAY);
+        let expected = format!("{}\n\n{}", parts[0].text, parts[1].text);
+        assert_eq!(out.text, expected, "沒有重複就要原樣寫出，跟以前串起來的文字一模一樣");
         assert!(out.dropped.is_empty());
     }
 
     #[test]
-    fn a_divider_already_in_the_doc_is_dropped_but_a_new_one_is_kept() {
-        let text = format!("==========1109==========\n\n{}\n\n==== 18 ====", entry("合成甲", "標題甲"));
-        let doc = "==========1109==========\n舊的東西";
-        let out = filter_already_written(&text, &["合成甲".into()], doc, &refresh());
-        assert_eq!(out.dropped, vec!["==========1109==========".to_string()]);
-        assert!(out.text.contains("==== 18 ===="), "新的節次分隔線要留著");
+    fn a_marked_or_refresh_line_is_not_treated_as_already_written() {
+        let parts = [entry("合成甲", "標題甲", "內文甲。", "#甲")];
+        // 前面有標記（已剔除）、要求重貼，都不是對方剛寫好的那一筆。
+        for doc in [format!("{DAY}(x)合成甲 短sot"), format!("{DAY}(抓新) 合成甲 SOT 17:00:00")] {
+            let out = filter(&parts, &doc);
+            assert_eq!(out.text, parts[0].text, "{doc}");
+            assert!(out.dropped.is_empty());
+        }
+    }
+
+    #[test]
+    fn yesterdays_plain_line_does_not_block_todays_story() {
+        // 18:00 的稿隔天早上重播：昨天文件裡同 slug 的乾淨一行，不能讓今天的稿被濾掉。
+        let parts = [entry("黃樂蓋身分1800", "標題", "內文。", "#k")];
+        let doc = "==========1108==========\n黃樂蓋身分1800 SOT 18:06:30 國\n==========1109==========\n別的稿 SOT 06:00:00\n";
+        let out = filter(&parts, doc);
+        assert_eq!(out.text, parts[0].text);
+        assert!(out.dropped.is_empty());
+    }
+
+    #[test]
+    fn without_any_date_divider_the_whole_doc_is_searched() {
+        let parts = [entry("合成甲", "標題甲", "內文甲。", "#甲")];
+        let out = filter(&parts, "合成甲 SOT 18:00:00 生活");
+        assert_eq!(out.text, "");
+    }
+
+    #[test]
+    fn a_divider_already_in_todays_section_is_dropped_but_yesterdays_does_not_count() {
+        let parts = [divider("==== 18 ===="), entry("合成甲", "標題甲", "內文甲。", "#甲"), divider("==== 19 ====")];
+        let doc = "==========1108==========\n==== 19 ====\n==========1109==========\n==== 18 ====\n舊的東西";
+        let out = filter(&parts, doc);
+        assert_eq!(out.dropped, vec!["==== 18 ====".to_string()]);
+        assert!(out.text.ends_with("==== 19 ===="), "昨天的 19 不算，今天的要寫：{:?}", out.text);
+        assert!(!out.text.contains("==== 18 ===="));
         assert!(out.text.starts_with("合成甲"));
     }
 
     #[test]
+    fn a_divider_with_a_program_line_is_judged_block_by_block() {
+        let parts = [divider("==== 22 ====\n\n==== 22 關鍵時刻 ====")];
+        let doc = "==========1109==========\n==== 22 ====\n";
+        let out = filter(&parts, doc);
+        assert_eq!(out.text, "==== 22 關鍵時刻 ====");
+        assert_eq!(out.dropped, vec!["==== 22 ====".to_string()]);
+    }
+
+    #[test]
     fn everything_already_there_leaves_nothing_to_write() {
-        let text = entry("合成甲", "標題甲");
-        let doc = "合成甲 SOT 18:00:00 生活";
-        let out = filter_already_written(&text, &["合成甲".into()], doc, &refresh());
-        assert_eq!(out.text, "");
+        let parts = [entry("合成甲", "標題甲", "內文甲。", "#甲")];
+        let out = filter_write_parts(&parts, Some("==========1109=========="), &format!("{DAY}合成甲 SOT"), "1109", "1108", &refresh());
+        assert_eq!(out.text, "", "日期標題不會單獨寫");
         assert_eq!(out.dropped, vec!["合成甲".to_string()]);
     }
 
     #[test]
-    fn a_refresh_request_line_is_not_treated_as_already_written() {
-        // 文件裡是「(抓新) 合成甲」：那是要求重貼，不是對方寫好的那一筆。
-        let text = entry("合成甲", "標題甲");
-        let doc = "(抓新) 合成甲 SOT 17:00:00";
-        let out = filter_already_written(&text, &["合成甲".into()], doc, &refresh());
-        assert_eq!(out.text, text, "要求重貼的照寫");
-        assert!(out.dropped.is_empty());
+    fn the_date_header_goes_first_only_while_todays_section_is_missing() {
+        let parts = [entry("合成甲", "標題甲", "內文甲。", "#甲")];
+        let h = "==========1110==========";
+        // 文件裡還沒有今天（1110）的段落：補日期標題，跟內容只隔一個換行。
+        let out = filter_write_parts(&parts, Some(h), DAY, "1110", "1109", &refresh());
+        assert_eq!(out.text, format!("{h}\n{}", parts[0].text));
+        // 另一台已經補過了：不重複補。
+        let doc = format!("{DAY}{h}\n別的稿");
+        let out = filter_write_parts(&parts, Some(h), &doc, "1110", "1109", &refresh());
+        assert_eq!(out.text, parts[0].text);
     }
 
     #[test]
-    fn a_count_mismatch_writes_everything_rather_than_guessing() {
-        // slug 清單跟條目數對不上（呼叫端出錯）時，寧可寫重複也不要漏寫。
-        let text = [entry("合成甲", "標題甲"), entry("合成乙", "標題乙")].join("\n\n");
-        let doc = "合成甲 SOT 18:00:00 生活";
-        let out = filter_already_written(&text, &["合成甲".into()], doc, &refresh());
-        assert!(out.mismatched);
-        assert_eq!(out.text, text);
+    fn blank_parts_are_ignored() {
+        let parts = [WritePart { text: "  \n".into(), slug: Some("被取消勾選的".into()) }, entry("合成甲", "標題甲", "內文甲。", "")];
+        let out = filter(&parts, DAY);
+        assert_eq!(out.text, parts[1].text);
         assert!(out.dropped.is_empty());
     }
 }

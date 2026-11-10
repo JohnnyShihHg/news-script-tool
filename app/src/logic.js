@@ -695,13 +695,21 @@
     groups.sort((a, b) => (b.show === lastShow) - (a.show === lastShow));
 
     const parts = [];
+    // The same pieces as `parts`, keeping which stories each one holds (v0.3.14): the
+    // write-time re-check judges story by story and cannot rebuild that from the joined
+    // text -- one story is "head+title", a blank line, then "body+keywords".
+    const pieces = [];
     const written = [];
     const held = [];
     const dividers = [];
+    const push = (text, stories) => {
+      parts.push(text);
+      pieces.push(stories ? { text, items: stories } : { text });
+    };
     const divider = (show) => {
       const d = formatDivider(format, show);
       const program = position !== "before" ? programs.get(show) : undefined;
-      parts.push(program ? `${d}\n\n${program}` : d);
+      push(program ? `${d}\n\n${program}` : d);
       dividers.push(d);
       if (program) dividers.push(program);
     };
@@ -715,7 +723,7 @@
       } else if (programs.has(current)) {
         // An off-air program has no story of its own to put a before-divider over.
         const program = programs.get(current);
-        parts.push(program);
+        push(program);
         dividers.push(program);
         current = "";
       }
@@ -732,11 +740,39 @@
         else if (current) divider(current);
         current = g.show;
       }
-      parts.push(toText(g.items));
+      push(toText(g.items), g.items);
       written.push(...g.items);
     }
     closeIfDone();
-    return { text: parts.filter((p) => p.trim() !== "").join("\n\n"), lastShow: current, written, held, dividers };
+    return {
+      text: parts.filter((p) => p.trim() !== "").join("\n\n"),
+      pieces: pieces.filter((p) => p.text.trim() !== ""),
+      lastShow: current,
+      written,
+      held,
+      dividers,
+    };
+  }
+
+  /**
+   * What the write-time re-check receives (v0.3.14): one part per story (with its slug)
+   * and one per divider. Their texts joined by a blank line are exactly the text that
+   * would have been written. `toText` renders a list of stories, as for
+   * `composeInewsWrite`; a story it renders as nothing (unticked) is left out.
+   */
+  function writeParts(pieces, slugOf, toText) {
+    const parts = [];
+    for (const p of pieces ?? []) {
+      if (!p.items) {
+        if ((p.text ?? "").trim() !== "") parts.push({ text: p.text });
+        continue;
+      }
+      for (const item of p.items) {
+        const text = toText([item]);
+        if ((text ?? "").trim() !== "") parts.push({ slug: slugOf(item), text });
+      }
+    }
+    return parts;
   }
 
   /** A card held back this round (等確認 / 冷卻 / 可疑) -> its label, or "" (v0.3.11). */
@@ -764,6 +800,7 @@
   }
 
   return {
+    writeParts,
     holdLabel,
     findMisfires,
     inewsItemsFromSummary,

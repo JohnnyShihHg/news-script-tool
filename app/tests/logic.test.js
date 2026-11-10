@@ -979,3 +979,41 @@ test("疑似誤寫 lists written stories that the recheck no longer sees aired",
   assert.deepEqual(r, [{ key: "A:1", slug: "記憶卡破萬1200", show: "1200" }]);
   assert.deepEqual(L.findMisfires(written, null), []);
 });
+
+// --- 寫入前重新比對逐則傳入（v0.3.14）---
+
+const field = (slug, extra = {}) => ({
+  bucket: "passed", included: true, slug, slug_marker: "", style: "SOT", time: "18:00:00", group: "",
+  title: `${slug}標題`, body: `${slug}內文。`, keywords: "#k", ...extra,
+});
+
+test("每則稿分開傳給後端，串起來跟原本整串文字一模一樣（含沒有關鍵字、被取消勾選的）", () => {
+  const stories = [
+    { slug: "甲", inews: { show: "1800" }, f: field("甲") },
+    { slug: "乙", inews: { show: "1800" }, f: field("乙", { slug_marker: "(勿上網)", keywords: "" }) },
+    { slug: "丙", inews: { show: "1800" }, f: field("丙", { included: false }) },
+    { slug: "丁", inews: { show: "1800" }, f: field("丁", { body: "", keywords: "" }) },
+  ];
+  const textOf = (list) => L.buildOutputText(list.map((i) => i.f));
+  const r = L.composeInewsWrite(stories, { lastShow: "1800" }, AFTER, textOf);
+  const parts = L.writeParts(r.pieces, (i) => i.slug, textOf);
+  assert.equal(parts.map((p) => p.text).join("\n\n"), r.text, "joined parts == the old text");
+  assert.deepEqual(parts.map((p) => p.slug), ["甲", "乙", "丁"], "unticked stories are left out");
+});
+
+test("分隔線也是獨立的一段，沒有 slug", () => {
+  const closed = new Set(["1800"]);
+  const textOf = (list) => L.buildOutputText(list.map((i) => i.f));
+  const stories = [{ slug: "甲", inews: { show: "1800" }, f: field("甲") }, { slug: "戊", inews: { show: "1900" }, f: field("戊") }];
+  const r = L.composeInewsWrite(stories, { lastShow: "1800", closed }, AFTER, textOf);
+  const parts = L.writeParts(r.pieces, (i) => i.slug, textOf);
+  assert.deepEqual(parts.map((p) => p.slug), ["甲", undefined, "戊"]);
+  assert.equal(parts[1].text, "==== 18 ====");
+  assert.equal(parts.map((p) => p.text).join("\n\n"), r.text);
+});
+
+test("沒有任何內容時 pieces 是空的", () => {
+  const r = L.composeInewsWrite([], { lastShow: "" }, AFTER, toText);
+  assert.deepEqual(r.pieces, []);
+  assert.deepEqual(L.writeParts(undefined, () => "", toText), []);
+});
