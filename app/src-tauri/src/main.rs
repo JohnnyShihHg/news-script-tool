@@ -400,10 +400,18 @@ fn search_rundown_slugs(
     let dir = inews_search_dir().ok_or_else(|| "找不到搜尋紀錄資料夾路徑".to_string())?;
     let date = inews::broadcast_date(inews::taipei_now(), &day_start);
     let path = dir.join(date.format("%Y%m%d").to_string()).join("index.json");
-    let day = match std::fs::read_to_string(&path) {
+    let mut day = match std::fs::read_to_string(&path) {
         Ok(text) => news_script_core::search::SearchDay::from_json(&text).map_err(|e| format!("讀不懂 {}：{e}", path.display()))?,
         Err(_) => news_script_core::search::SearchDay::default(),
     };
+    // 同一天更早的節次只在剪輯工具的 rundown 檔（搜尋紀錄是 0.3.16 之後才開始存的）：
+    // 補進來一起搜，今天全部都找得到（v0.3.16）。只讀，讀不到就算了。
+    if let Some(rundown) = inews_rundown_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join(format!("{}.json", date.format("%Y%m%d")))).ok())
+        .and_then(|text| news_script_core::rundown::RundownDay::from_json(&text).ok())
+    {
+        day.fill_from_rundown(&rundown);
+    }
     let hits = news_script_core::search::search_slugs(&day, &query, |show| inews::show_day_order(&day_start, show));
     Ok(SlugSearchDto {
         date: date.format("%Y-%m-%d").to_string(),

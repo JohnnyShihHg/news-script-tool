@@ -56,6 +56,29 @@ impl SearchDay {
         }
     }
 
+    /// 剪輯工具的 rundown 檔裡有、搜尋紀錄沒有的稿補進來（v0.3.16）。搜尋紀錄是更新到
+    /// 0.3.16 之後才開始存的，同一天更早的節次只在 rundown 檔裡；這樣「今天全部」都搜得到。
+    /// 補進來的沒有播出時間，也沒有版本（本地沒有原文，載入時會改連 iNEWS）。只在記憶體裡
+    /// 合併，兩個檔案都不改。
+    pub fn fill_from_rundown(&mut self, rundown: &crate::rundown::RundownDay) {
+        for (show, stories) in &rundown.shows {
+            let list = self.shows.entry(show.clone()).or_default();
+            for s in stories {
+                let known = list.iter().any(|o| if s.id.is_empty() { o.slug == s.slug } else { o.id == s.id });
+                if !known {
+                    list.push(SearchEntry {
+                        slug: s.slug.clone(),
+                        id: s.id.clone(),
+                        version: String::new(),
+                        style: s.style.clone(),
+                        air_time: String::new(),
+                        updated: s.updated.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -196,6 +219,25 @@ mod tests {
         assert_eq!((d.shows["0900"][0].slug.as_str(), d.shows["0900"].len()), ("合成氣象改名0900", 3));
         let back = SearchDay::from_json(&d.to_json()).unwrap();
         assert_eq!(back, d);
+    }
+
+    #[test]
+    fn todays_earlier_shows_come_from_the_rundown_file() {
+        use crate::rundown::{RundownDay, RundownStory};
+        let mut rundown = RundownDay::new("2026-11-11");
+        let rec = |slug: &str, id: &str| RundownStory { slug: slug.into(), id: id.into(), style: "SOT".into(), ..Default::default() };
+        // 0600 只在 rundown 檔；0900 兩邊都有同一則（ID 一樣）。
+        rundown.merge("0600", vec![rec("早安合成0600", "Z:1")]);
+        rundown.merge("0900", vec![rec("合成氣象0900", "B:1"), rec("只在舊檔0900", "B:9")]);
+        let mut d = day();
+        d.fill_from_rundown(&rundown);
+        let hit = &search_slugs(&d, "早安", order)[0];
+        assert_eq!((hit.show.as_str(), hit.air_time.as_str(), hit.version.as_str()), ("0600", "", ""));
+        // 兩邊都有的不重複，而且留著搜尋紀錄那份（有播出時間）。
+        let weather: Vec<_> = search_slugs(&d, "合成氣象0900", order);
+        assert_eq!(weather.len(), 1);
+        assert_eq!(weather[0].air_time, "09:12:58");
+        assert_eq!(search_slugs(&d, "只在舊檔", order).len(), 1);
     }
 
     #[test]
