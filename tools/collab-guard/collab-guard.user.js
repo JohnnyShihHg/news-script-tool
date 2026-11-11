@@ -39,7 +39,8 @@
     staleReloadCooldownMinutes: 10, // 停擺重整兩次至少間隔這麼久
     debugScroll: false,        // 開了會在 console 印出每一次程式捲動的來源堆疊
 
-    showHud: false,            // 右下角那個狀態小框。關掉仍然會紅框示警
+    showHud: false,            // 右下角那個狀態小框
+    showAlertFrame: false,     // 卡住時整頁紅框。預設不顯示（使用者 11/11 決定）；偵測和自動重整照常
     compactLineButtons: true,  // 行動作按鈕縮小，比較容易塞進左邊空白不蓋到文字
     keepLineButtonsOffText: true, // 行動作列蓋到文字時往左挪開
     fixOutlineCollapse: true,  // 修他「文件分頁」漢堡收合後寬度沒縮的 bug
@@ -358,7 +359,7 @@
     } else {
       state.stuckSince = 0;
     }
-    alertFrame.style.display = stuck ? "block" : "none";
+    alertFrame.style.display = stuck && CONFIG.showAlertFrame ? "block" : "none";
     hud.innerHTML =
       `<b>守門員</b>　${pageStatus || "（讀不到狀態）"}<br>` +
       `上次推送 ${ago(state.lastPushAt)}・上次收取 ${ago(state.lastPullAt)}` +

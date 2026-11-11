@@ -10,7 +10,12 @@
 <div id="bar"><span id="s">已同步</span></div>
 <div class="ql-editor"><p>測試</p></div>
 <script>
-  window.__collabGuardTestConfig = { staleSeconds: 4, staleMinUpdates: 3 };
+  // 紅框預設關閉；測試頁打開才看得到判定結果。?frame=0 測預設值（判定了也不顯示）。
+  window.__collabGuardTestConfig = {
+    staleSeconds: 4,
+    staleMinUpdates: 3,
+    showAlertFrame: new URLSearchParams(location.search).get("frame") !== "0",
+  };
   const mode = new URLSearchParams(location.search).get("mode") || "stale";
   const n = Number(localStorage.getItem("fakeLoads") || 0) + 1;
   localStorage.setItem("fakeLoads", String(n));
