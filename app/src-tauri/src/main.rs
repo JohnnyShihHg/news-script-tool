@@ -799,6 +799,9 @@ async fn open_collab_window(window: tauri::Window, app: tauri::AppHandle) -> Res
     tauri::WebviewWindowBuilder::new(&app, COLLAB_WINDOW_LABEL, tauri::WebviewUrl::External(url))
         .title("同事協作工具")
         .inner_size(1100.0, 800.0)
+        // 守門員（tools/collab-guard）每次載入都注入：App 的協作視窗是獨立的 WebView，
+        // 沒有竄改猴（v0.3.15）。只內嵌同一份檔案，不另外維護一份。
+        .initialization_script(COLLAB_GUARD_SCRIPT)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -841,6 +844,10 @@ fn receive_scraped_text(
 /// everything this app writes -- is invisible there, which made comparison silently
 /// miss entries that were demonstrably already in the doc. `getText()` returns every
 /// line regardless of formatting, which is also the flat text spec §6 assumes.
+/// 協作工具守門員（竄改猴腳本），原封不動注入 App 的協作視窗。開頭的 `==UserScript==`
+/// 表頭只是註解；腳本自己會看頁面上有沒有編輯器才啟動。
+const COLLAB_GUARD_SCRIPT: &str = include_str!("../../../tools/collab-guard/collab-guard.user.js");
+
 const SCRAPE_SCRIPT: &str = r#"
 (function() {
   function send(payload) {
@@ -852,6 +859,23 @@ const SCRAPE_SCRIPT: &str = r#"
       .catch((e) => console.error('[news-script-tool] receive_scraped_text invoke rejected', e));
   }
   try {
+    // 文件還沒讀完（新開或剛自動重整，停在「正在載入共同文章」）或沒連上時，讀到的是
+    // 不完整的文件：拿去比對會把已經寫過的稿當成沒寫，重複寫入。回 [未就緒]，前端
+    // 這一輪先跳過，下一輪再試，不停掉自動刷新（v0.3.15）。狀態文字在編輯器外面，
+    // 文件內容裡剛好有這幾個字不算。
+    var notReady = ['正在載入共同文章', '連線中', '離線'];
+    var nodes = document.querySelectorAll('span, div, small, p');
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (n.children.length || (n.closest && n.closest('.ql-editor'))) continue;
+      var t = (n.textContent || '').trim();
+      for (var j = 0; j < notReady.length; j++) {
+        if (t.indexOf(notReady[j]) === 0) {
+          send({ Err: '[未就緒] 協作工具顯示「' + t + '」，文件還沒讀完或沒連上，這一輪先不比對、不寫入。' });
+          return;
+        }
+      }
+    }
     if (typeof Quill === 'undefined' || !Quill.find) {
       send({ Err: '協作工具頁面上找不到 Quill，無法讀取文件內容。' });
       return;

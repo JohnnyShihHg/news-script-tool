@@ -1002,6 +1002,11 @@ async function runInewsPipeline() {
   try {
     await compareWithCollabDoc({ silent: false });
   } catch (err) {
+    // 協作工具還在載入或沒連上：這一輪跳過，下一輪再試，不停掉自動刷新（v0.3.15）。
+    if (isCollabNotReady(err)) {
+      inewsStatus(`⏳ ${String(err).replace(COLLAB_NOT_READY, "").trim()}`, "warn");
+      return;
+    }
     stopInewsAuto(`⚠ 無法比對協作文件，自動刷新已停止：${err}\n請先「開啟協作工具」並登入，再重新打開「自動刷新」。`);
     return;
   }
@@ -1138,8 +1143,19 @@ async function writeInewsItems(ready) {
     renderFunnel();
     render();
   } catch (err) {
+    if (isCollabNotReady(err)) {
+      // 沒寫：稿子留著（還是待寫入），下一輪再試。
+      status.textContent = `⏳ ${String(err).replace(COLLAB_NOT_READY, "").trim()}`;
+      return;
+    }
     stopInewsAuto(`⚠ 寫入協作文件失敗，自動刷新已停止：${err}\n請確認協作工具視窗已開啟並登入。`);
   }
+}
+
+/** 協作工具還在載入或沒連上時，讀取文件的腳本回傳的錯誤帶這個記號（v0.3.15）。 */
+const COLLAB_NOT_READY = "[未就緒]";
+function isCollabNotReady(err) {
+  return String(err).includes(COLLAB_NOT_READY);
 }
 
 async function confirmInewsWrite() {

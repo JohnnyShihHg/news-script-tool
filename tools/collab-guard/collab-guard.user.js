@@ -127,7 +127,8 @@
     const texts = ["已同步", "同步中", "待同步", LOADING_TEXT, "連線中", "離線"];
     const nodes = document.querySelectorAll("span, div, small, p");
     for (const n of nodes) {
-      if (n.children.length) continue;
+      // 狀態文字在編輯器外面；文件內容裡剛好有「離線」之類的字不算。
+      if (n.children.length || (n.closest && n.closest(".ql-editor"))) continue;
       const t = (n.textContent || "").trim();
       if (texts.some((x) => t.startsWith(x))) return t;
     }
