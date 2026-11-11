@@ -112,11 +112,41 @@
   const COLD_LOG_KEY = "collabGuardColdLoads";
   const LOADING_TEXT = "正在載入共同文章";
   const cold = { seconds: null, reloadedBefore: false, typed: false, sawLoading: false };
-  try {
-    const at = Number(sessionStorage.getItem(COLD_RELOAD_KEY) || 0);
+
+  // 「這個分頁剛自動重整過」的記號存兩份：sessionStorage，加上 window.name。網站儲存被
+  // 封鎖時 sessionStorage 存不進也讀不到，只靠它的話每 20 秒就會重整一次、停不下來；
+  // window.name 跟著分頁走、重新整理後還在，不受儲存封鎖影響。頁面原本的 window.name
+  // 內容保留，只附加／替換我們這一段。
+  const COLD_NAME_RE = /\s*collabGuardColdReloadAt=(\d+)/;
+  function readColdMark() {
+    let at = 0;
+    try {
+      at = Number(sessionStorage.getItem(COLD_RELOAD_KEY) || 0);
+    } catch (e) {
+      /* 儲存被封鎖：改看 window.name */
+    }
+    if (!at) {
+      const m = String(window.name || "").match(COLD_NAME_RE);
+      if (m) at = Number(m[1]);
+    }
+    return at;
+  }
+  function writeColdMark(at) {
+    try {
+      sessionStorage.setItem(COLD_RELOAD_KEY, String(at));
+    } catch (e) {
+      /* 儲存被封鎖：還有 window.name 那份 */
+    }
+    try {
+      const rest = String(window.name || "").replace(COLD_NAME_RE, "");
+      window.name = `${rest ? `${rest} ` : ""}collabGuardColdReloadAt=${at}`;
+    } catch (e) {
+      /* 兩份都存不進去的話，最壞是下一次開頁再重整一次 */
+    }
+  }
+  {
+    const at = readColdMark();
     cold.reloadedBefore = at > 0 && Date.now() - at < 10 * 60_000;
-  } catch (e) {
-    /* 無痕模式之類的讀不到：當作沒重整過 */
   }
   for (const type of ["keydown", "input", "paste", "drop", "compositionstart"]) {
     window.addEventListener(type, () => { cold.typed = true; }, true);
@@ -266,11 +296,7 @@
         clearInterval(timer);
         console.warn(`[守門員] 開頁 ${Math.round(elapsed)} 秒還在「${LOADING_TEXT}」，自動重整一次`);
         recordColdLoad(Math.round(elapsed), true);
-        try {
-          sessionStorage.setItem(COLD_RELOAD_KEY, String(Date.now()));
-        } catch (e) {
-          /* 存不進去也照樣重整；下次可能會再重整一次 */
-        }
+        writeColdMark(Date.now());
         location.reload();
         return;
       }
