@@ -270,6 +270,12 @@ fn inews_log_dir() -> Option<std::path::PathBuf> {
 }
 
 /// 剪輯工具用的每節資料夾：`%APPDATA%\ebc\news-script-tool\rundown`，跟 `logs` 同一層。
+/// 搜尋用的本地紀錄：`%APPDATA%\ebc\news-script-tool\search`，跟 `rundown` 同一層（v0.3.15）。
+fn inews_search_dir() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("tw", "ebc", "news-script-tool")
+        .and_then(|d| d.config_dir().parent().map(|p| p.join("search")))
+}
+
 fn inews_rundown_dir() -> Option<std::path::PathBuf> {
     directories::ProjectDirs::from("tw", "ebc", "news-script-tool")
         .and_then(|d| d.config_dir().parent().map(|p| p.join("rundown")))
@@ -299,6 +305,7 @@ async fn import_inews(
     let log_dir = inews_log_dir();
     let state_file = inews_state_file();
     let rundown_dir = inews_rundown_dir();
+    let search_dir = inews_search_dir();
     let (day, _) = inews::broadcast_days(inews::taipei_now(), &inews_cfg.broadcast_day_start);
     let fetched = tauri::async_runtime::spawn_blocking(move || {
         let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -348,6 +355,17 @@ async fn import_inews(
             if let (Some(Err(e)), Some(dir)) = (written, &log_dir) {
                 inews::append_log(dir, &format!("[rundown] 警告：寫入 rundown JSON 失敗：{e}"));
             }
+            // 搜尋用的本地紀錄（v0.3.15）：同樣寫不進去只留警告。
+            let search = std::mem::take(&mut f.search);
+            let written = search_dir.as_ref().map(|dir| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    inews::write_search(dir, inews::taipei_now(), &inews_cfg.broadcast_day_start, search)
+                }))
+                .unwrap_or_else(|_| Err("寫入時發生未預期錯誤".to_string()))
+            });
+            if let (Some(Err(e)), Some(dir)) = (written, &log_dir) {
+                inews::append_log(dir, &format!("[搜尋紀錄] 警告：寫入失敗：{e}"));
+            }
         }
         r
     })
@@ -365,12 +383,12 @@ struct SlugSearchDto {
     /// 當天的檔案裡有幾節、幾則稿（讓使用者知道資料涵蓋多少）。
     shows: usize,
     stories: usize,
-    hits: Vec<news_script_core::rundown::SlugHit>,
+    hits: Vec<news_script_core::search::SlugHit>,
 }
 
-/// 當天 rundown 的 slug 搜尋（v0.3.15）：讀 App 每一輪存在本地的
-/// `rundown\YYYYMMDD.json`（剪輯工具用的同一份），只讀不寫，不打 iNEWS。只有 App 開著
-/// 時讀過的節次會在裡面。
+/// 當天 rundown 的 slug 搜尋（v0.3.15）：讀 App 每一輪存的搜尋紀錄 `search\YYYYMMDD\index.json`
+/// （跟剪輯工具的 rundown 檔分開，帶播出時間），只讀不寫，不打 iNEWS。只有 App 開著時讀過的
+/// 節次會在裡面。
 #[tauri::command]
 fn search_rundown_slugs(
     window: tauri::Window,
@@ -379,20 +397,78 @@ fn search_rundown_slugs(
 ) -> Result<SlugSearchDto, String> {
     require_main_window(&window)?;
     let day_start = lock_or_recover(&state.config).inews.broadcast_day_start.clone();
-    let dir = inews_rundown_dir().ok_or_else(|| "找不到 rundown 資料夾路徑".to_string())?;
+    let dir = inews_search_dir().ok_or_else(|| "找不到搜尋紀錄資料夾路徑".to_string())?;
     let date = inews::broadcast_date(inews::taipei_now(), &day_start);
-    let path = dir.join(format!("{}.json", date.format("%Y%m%d")));
+    let path = dir.join(date.format("%Y%m%d").to_string()).join("index.json");
     let day = match std::fs::read_to_string(&path) {
-        Ok(text) => news_script_core::rundown::RundownDay::from_json(&text).map_err(|e| format!("讀不懂 {}：{e}", path.display()))?,
-        Err(_) => news_script_core::rundown::RundownDay::new(""),
+        Ok(text) => news_script_core::search::SearchDay::from_json(&text).map_err(|e| format!("讀不懂 {}：{e}", path.display()))?,
+        Err(_) => news_script_core::search::SearchDay::default(),
     };
-    let hits = news_script_core::rundown::search_slugs(&day, &query, |show| inews::show_day_order(&day_start, show));
+    let hits = news_script_core::search::search_slugs(&day, &query, |show| inews::show_day_order(&day_start, show));
     Ok(SlugSearchDto {
         date: date.format("%Y-%m-%d").to_string(),
         shows: day.shows.len(),
         stories: day.shows.values().map(Vec::len).sum(),
         hits,
     })
+}
+
+
+#[derive(Serialize)]
+struct LoadedStoryDto {
+    summary: ImportSummaryDto,
+    /// 卡片用的 iNEWS 識別：story key、版本、所屬節次。
+    key: String,
+    version: String,
+    show: String,
+    /// 從哪裡讀到的：「本地紀錄」或「iNEWS」。
+    source: String,
+}
+
+/// 搜尋結果「載入成卡片」（v0.3.15）：先讀搜尋紀錄裡存的原文（這一輪 App 讀過的同一個
+/// 版本），沒有才到 iNEWS 那一節只讀這一則。照一般匯入的規則分類，回傳一張卡片的資料。
+/// 累積時間用搜尋清單上的播出時間補（稿件本身的 cume-time 常是空的）。
+#[tauri::command]
+async fn load_rundown_story(
+    window: tauri::Window,
+    state: tauri::State<'_, AppState>,
+    show: String,
+    slug: String,
+    id: String,
+    version: String,
+    air_time: String,
+) -> Result<LoadedStoryDto, String> {
+    require_main_window(&window)?;
+    let cfg = lock_or_recover(&state.config).clone();
+    let date = inews::broadcast_date(inews::taipei_now(), &cfg.inews.broadcast_day_start);
+    let local = inews_search_dir().and_then(|dir| inews::read_search_story(&dir, date, &id, &version));
+    let (story, key, story_version, source) = match local {
+        Some(raw) => (news_script_core::inews::parse_nsml(&raw), id.clone(), version.clone(), "本地紀錄"),
+        None => {
+            let creds = inews_credentials()?;
+            let shared = state.inews.clone();
+            let inews_cfg = cfg.inews.clone();
+            let (show2, id2, slug2) = (show.clone(), id.clone(), slug.clone());
+            let found = tauri::async_runtime::spawn_blocking(move || {
+                let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
+                st.fetch_story(&inews_cfg, &creds, &show2, &id2, &slug2)
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            let Some((entry, story)) = found else {
+                return Err(format!("本地沒有存到「{slug}」的原文，{show} 的 rundown 裡也已經找不到（可能被抽掉或搬到別節）。"));
+            };
+            (story, entry.story_key(), entry.version().to_string(), "iNEWS")
+        }
+    };
+    let fill = (cfg.inews.fill_computed_time && !air_time.trim().is_empty()).then_some(air_time.trim());
+    let text = news_script_core::inews::story_to_text(&story, fill);
+    let file_name = news_script_core::inews::unique_file_names(&[story.title().to_string()]).remove(0);
+    let summary = import_texts(&[(file_name, text)], &cfg).await;
+    if let Some(dir) = inews_log_dir() {
+        inews::append_log(&dir, &format!("[手動載入] {slug}（{show} {air_time}，{source}）"));
+    }
+    Ok(LoadedStoryDto { summary, key, version: story_version, show, source: source.to_string() })
 }
 
 /// 前端的決策寫進決策紀錄（v0.3.15：未知樣式審查）。只收一行，太長就截斷。
@@ -1711,7 +1787,8 @@ fn main() {
             correct_collab_times,
             append_decision_log,
             collab_idle_seconds,
-            search_rundown_slugs
+            search_rundown_slugs,
+            load_rundown_story
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

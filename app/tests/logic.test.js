@@ -1062,3 +1062,38 @@ test("a manually ticked 已剔除 card is still never written automatically", ()
   assert.equal(item.included, true);
   assert.deepEqual(L.autoWriteCandidates([item], new Set(), ""), [], "only the manual button writes it");
 });
+
+// --- 手動載入的卡片、TEL（v0.3.15）---
+
+test("a manually loaded card lives only in the show it was loaded in", () => {
+  const manual = { id: "inews-M:1", inews: { key: "M:1", version: "v1", show: "0700", manual: true, manualFor: "0900" } };
+  const fresh = [{ id: "inews-A:1", inews: { key: "A:1", version: "v1", show: "0900" } }];
+  assert.deepEqual(L.keepManualCards(fresh, [manual], "0900").map((i) => i.id), ["inews-A:1", "inews-M:1"]);
+  // 換節：不再接回來。
+  assert.deepEqual(L.keepManualCards(fresh, [manual], "1000").map((i) => i.id), ["inews-A:1"]);
+  // 這一輪的 rundown 也有同一則：以合併結果為準，不重複。
+  const same = [{ id: "inews-M:1", inews: { key: "M:1", version: "v1", show: "0900" } }];
+  assert.equal(L.keepManualCards(same, [manual], "0900").length, 1);
+});
+
+test("a manually loaded story of another show is written at the bottom without a divider", () => {
+  const manual = { slug: "手動", inews: { show: "0700", manual: true } };
+  const r = L.composeInewsWrite([manual, mk("九點", "0900")], { lastShow: "0900", closed: new Set() }, AFTER, toText);
+  assert.equal(r.text, "九點\n\n手動");
+  assert.deepEqual(r.held, []);
+  assert.deepEqual(r.dividers, []);
+});
+
+test("TEL stories get no keywords and are written without waiting for them", () => {
+  const items = L.inewsItemsFromSummary(inewsSummary("0900", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v1" },
+  ]));
+  items[0].dto.Passed.style = "TEL";
+  items[1].dto.Passed.style = "ＴＥＬ";
+  items.forEach((i) => { i.matchStatus = "to_cut"; });
+  assert.equal(L.isTelStyle(items[0]), true);
+  assert.equal(L.isTelStyle(items[1]), true, "全形也算");
+  assert.deepEqual(L.selectKeywordTargets(items, ""), []);
+  assert.deepEqual(L.autoWriteCandidates(items, new Set(), "").map((i) => i.id), ["inews-A:1", "inews-A:2"]);
+});

@@ -43,6 +43,7 @@ fn main() {
             "append_decision_log",
             "collab_idle_seconds",
             "search_rundown_slugs",
+            "load_rundown_story",
         ])),
     )
     .expect("failed to run tauri-build");

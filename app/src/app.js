@@ -38,6 +38,7 @@ const {
   findMisfires,
   writeParts,
   unknownReviewTargets,
+  keepManualCards,
   diffInewsVersions,
   writtenKey,
   isPendingWrite,
@@ -367,7 +368,7 @@ function cardHtml(item) {
   const noUpload = isNoUpload(item, noUploadLabel);
 
   return `
-    <div class="card ${bucket} ${item.collapsed ? "collapsed" : ""} ${item.alreadyInDoc ? "done" : ""}" data-bucket="${bucket}" data-id="${id}">
+    <div class="card ${bucket} ${item.collapsed ? "collapsed" : ""} ${item.alreadyInDoc ? "done" : ""} ${item.inews?.manual ? "manual-loaded" : ""}" data-bucket="${bucket}" data-id="${id}">
       <div class="card-head">
         <button class="collapse-toggle" data-id="${id}" title="展開／收合">${item.collapsed ? "▶" : "▼"}</button>
         <label class="include-toggle">
@@ -381,6 +382,7 @@ function cardHtml(item) {
         ${item.crossDay ? `<span class="badge marker" title="${escapeHtml(item.matchedLine ?? "")}">前一天已上傳的重播</span>` : ""}
         ${holdLabel(item) ? `<span class="badge ${item.inews.hold === "suspect" ? "failed" : "marker"}">${holdLabel(item)}</span>` : ""}
         ${item.inews?.recheck ? `<span class="badge marker">複查補寫</span>` : ""}
+        ${item.inews?.manual ? `<span class="badge manual-badge" title="從「搜尋 rundown」手動載入，換節次後清掉">手動載入</span>` : ""}
         <span>${escapeHtml(fields.style)}</span>
         <span>${escapeHtml(fields.time)}</span>
         <span>${escapeHtml(fields.group)}</span>
@@ -950,7 +952,11 @@ async function inewsRound() {
     if (meta.resumed_show && !lastWrittenShow) lastWrittenShow = meta.resumed_show;
     const { added, changed } = diffInewsVersions(inewsVersions, meta.stories);
     const hadCards = items.some((i) => i.inews);
-    items = sortByTime(mergeInewsItems(hadCards ? items : [], inewsItemsFromSummary(summary), writtenKeys));
+    const before = items;
+    // 手動載入的卡片（v0.3.15）只活在目前這一節：換節就不接回來。
+    items = sortByTime(
+      keepManualCards(mergeInewsItems(hadCards ? items : [], inewsItemsFromSummary(summary), writtenKeys), before, meta.show)
+    );
     rememberInewsVersions(summary);
     if (added.length || changed.length || !hadCards) hasCompared = false;
     updateStatsFromItems();
@@ -1412,21 +1418,78 @@ async function runRundownSearch() {
       out.innerHTML = `<p class="search-empty">找不到符合的 slug。</p>`;
       return;
     }
-    const rows = r.hits.slice(0, SEARCH_MAX_ROWS).map((h) => `
+    searchHits = r.hits.slice(0, SEARCH_MAX_ROWS);
+    const rows = searchHits.map((h, n) => `
       <tr>
         <td>${escapeHtml(h.show)}</td>
+        <td>${escapeHtml(h.air_time || "—")}</td>
         <td>${escapeHtml(h.slug)}</td>
         <td>${escapeHtml(h.style || "—")}</td>
         <td>${escapeHtml((h.updated || "").slice(11) || "—")}</td>
         <td>${escapeHtml(cardStateOf(h.slug))}</td>
+        <td><button class="search-load" data-hit="${n}">載入</button></td>
       </tr>`).join("");
     out.innerHTML =
       `<p class="search-meta">找到 ${r.hits.length} 則${r.hits.length > SEARCH_MAX_ROWS ? `，只顯示前 ${SEARCH_MAX_ROWS} 則` : ""}。</p>` +
-      `<table class="search-table"><thead><tr><th>節次</th><th>slug</th><th>樣式</th><th>iNEWS 修改</th><th>畫面上的卡片</th></tr></thead><tbody>${rows}</tbody></table>`;
+      `<table class="search-table"><thead><tr><th>節次</th><th>播出時間</th><th>slug</th><th>樣式</th><th>iNEWS 修改</th><th>畫面上的卡片</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    out.querySelectorAll(".search-load").forEach((btn) => {
+      btn.addEventListener("click", () => loadSearchHit(searchHits[Number(btn.dataset.hit)], btn));
+    });
   } catch (err) {
     if (seq !== searchSeq) return;
     meta.textContent = `⚠ 搜尋失敗：${err}`;
     out.innerHTML = "";
+  }
+}
+
+let searchHits = [];
+
+/**
+ * 把一則搜尋結果載入成卡片（v0.3.15）：後端先讀搜尋紀錄存的原文，沒有才到 iNEWS 讀。
+ * 卡片標成「手動載入」（虛線框），只活在目前這一節；勾選後照一般流程比對、產生關鍵字、
+ * 寫在文件最下面（不寫分隔線）。
+ */
+async function loadSearchHit(hit, btn) {
+  if (!hit) return;
+  const meta = el("searchMeta");
+  btn.disabled = true;
+  btn.textContent = "載入中…";
+  try {
+    const res = await invoke("load_rundown_story", {
+      show: hit.show,
+      slug: hit.slug,
+      id: hit.id,
+      version: hit.version,
+      airTime: hit.air_time,
+    });
+    const id = `inews-${res.key}`;
+    if (items.some((i) => i.id === id)) {
+      meta.textContent = `「${hit.slug}」已經在卡片裡了。`;
+      btn.textContent = "已在卡片";
+      return;
+    }
+    const entry = res.summary.entries?.[0];
+    if (!entry) throw new Error("讀到的稿件沒有內容");
+    const item = itemFromDto(entry, items.length);
+    item.id = id;
+    item.inews = { key: res.key, version: res.version, show: res.show, hold: null, recheck: false, manual: true, manualFor: inewsShow };
+    // 手動載入就是要寫：可以輸出的分類直接勾上，而且比對不會再取消（未知樣式照樣會跳審查）。
+    if (canOutputBucket(item.bucket)) {
+      item.included = true;
+      item.defaultIncluded = true;
+      item.userIncluded = true;
+    }
+    items = sortByTime([...items, item]);
+    hasCompared = false;
+    updateStatsFromItems();
+    renderFunnel();
+    render();
+    meta.textContent = `已載入「${hit.slug}」（${hit.show} ${hit.air_time || ""}，從${res.source}），下一輪會比對、寫入。`;
+    btn.textContent = "已載入";
+  } catch (err) {
+    meta.textContent = `⚠ 載入失敗：${err}`;
+    btn.disabled = false;
+    btn.textContent = "載入";
   }
 }
 

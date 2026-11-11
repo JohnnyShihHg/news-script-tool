@@ -111,9 +111,21 @@
         i.matchStatus !== "removed" &&
         !i.alreadyInDoc &&
         !isNoUpload(i, noUploadLabel) &&
+        // TEL 稿不產生關鍵字（v0.3.15，使用者決定）。
+        !isTelStyle(i) &&
         // 可疑稿（v0.3.11）不會自動寫，先不花額度產生關鍵字；放行後下一輪再產生。
         i.inews?.hold !== "suspect"
     );
+  }
+
+  /** 樣式是 TEL（大小寫、全形半形不分）。TEL 稿不產生關鍵字，也不用等關鍵字就能寫入。 */
+  function isTelStyle(item) {
+    const fields = item?.dto ? item.dto[item.kind] ?? item.dto : item;
+    const style = String(fields?.style ?? item?.style ?? "")
+      .replace(/[！-～]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+      .trim()
+      .toUpperCase();
+    return style === "TEL";
   }
 
   /**
@@ -606,8 +618,24 @@
         !i.inews?.hold &&
         i.matchStatus != null &&
         i.keywordStatus !== "loading" &&
-        ((i.keywords ?? "").trim() !== "" || (i.body ?? "").trim() === "" || isNoUpload(i, noUploadLabel))
+        ((i.keywords ?? "").trim() !== "" ||
+          (i.body ?? "").trim() === "" ||
+          isNoUpload(i, noUploadLabel) ||
+          isTelStyle(i))
     );
+  }
+
+  /**
+   * 手動載入的卡片（v0.3.15，搜尋 rundown 點選載入）：只活在載入時的那一節。每一輪合併
+   * 完，把還屬於目前節次、這一輪沒出現的手動卡片接回來；換節就不再接，自然清掉。
+   * 這一輪的 rundown 裡也有同一則（id 相同）時，以合併的結果為準。
+   */
+  function keepManualCards(merged, previous, currentShow) {
+    const ids = new Set((merged ?? []).map((i) => i.id));
+    const kept = (previous ?? []).filter(
+      (p) => p.inews?.manual && p.inews.manualFor === currentShow && !ids.has(p.id)
+    );
+    return [...(merged ?? []), ...kept];
   }
 
   /**
@@ -734,7 +762,9 @@
     };
     for (const g of groups) {
       // 定時複查找到的漏寫稿（v0.3.11）也一樣：那一節早就結束了，直接寫在最下面。
-      const late = g.show && g.show !== current && (closed.has(g.show) || g.items.every((i) => i.inews?.recheck));
+      // 手動載入的卡片（v0.3.15）也一樣寫在最下面、不寫分隔線。
+      const late =
+        g.show && g.show !== current && (closed.has(g.show) || g.items.every((i) => i.inews?.recheck || i.inews?.manual));
       if (g.show && g.show !== current && !late) {
         if (current && !done(current)) {
           held.push(...g.items);
@@ -821,6 +851,8 @@
   return {
     writeParts,
     unknownReviewTargets,
+    isTelStyle,
+    keepManualCards,
     holdLabel,
     findMisfires,
     inewsItemsFromSummary,

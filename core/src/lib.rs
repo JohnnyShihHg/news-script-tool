@@ -9,6 +9,7 @@ pub mod model;
 pub mod parse;
 pub mod punctuation;
 pub mod rundown;
+pub mod search;
 
 use config::Config;
 use model::{Header, NewsEntry, Outcome, StyleClass};

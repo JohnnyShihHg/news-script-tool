@@ -471,3 +471,8 @@ select {
 .search-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
 .search-table th, .search-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
 .search-table th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+
+/* 手動載入的卡片（v0.3.15）：虛線框，換節次後清掉。 */
+.card.manual-loaded { border: 2px dashed var(--accent); }
+.badge.manual-badge { background: var(--accent); color: #fff; }
+.search-load { font-size: 12px; padding: 2px 10px; }

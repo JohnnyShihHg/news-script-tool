@@ -16,6 +16,7 @@ use news_script_core::guard::{Guard, GuardConfig, Hold, RowObs};
 use news_script_core::inews::{self, ListEntry, ListKind, NsmlStory, RundownRow};
 use news_script_core::parse;
 use news_script_core::rundown::{self, RundownDay, RundownStory};
+use news_script_core::search::{SearchDay, SearchEntry};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -249,6 +250,8 @@ pub fn test_connection(cfg: &InewsConfig, creds: &Credentials) -> Result<String,
 
 struct CachedStory {
     story: NsmlStory,
+    /// RETR 回來的原文（v0.3.15）：存進搜尋用的本地紀錄，之後載入成卡片不用再連 iNEWS。
+    raw: String,
 }
 
 /// 一個 queue 讀回來的樣子：rundown 順序的 (LIST 項目, 稿件)。
@@ -388,10 +391,25 @@ pub struct ShowSnapshot {
     pub stories: Vec<RundownStory>,
 }
 
+/// 搜尋用的本地紀錄裡的一節（v0.3.15）。
+pub struct SearchShow {
+    pub show: String,
+    pub nominal: u32,
+    pub stories: Vec<SearchRow>,
+}
+
+pub struct SearchRow {
+    pub entry: SearchEntry,
+    /// 稿件原文；這一輪快取裡沒有就是 None（不寫原文檔）。
+    pub raw: Option<String>,
+}
+
 pub struct FetchResult {
     pub files: Vec<(String, String)>,
     pub meta: InewsMeta,
     pub rundown: Vec<ShowSnapshot>,
+    /// 搜尋用的本地紀錄（跟剪輯工具的 `rundown` 分開存）。
+    pub search: Vec<SearchShow>,
     /// 決策紀錄的這一行（不含時間戳）。
     pub log_line: String,
     /// 接在後面的決策紀錄（`[異常]`、`[可疑]`、`[複查]`…，v0.3.11）。
@@ -570,13 +588,67 @@ impl InewsState {
                     let text = self.session(cfg, creds)?.retr(&entry.name)?;
                     *retrieved += 1;
                     let story = inews::parse_nsml(&text);
-                    self.cache.insert(entry.name.clone(), CachedStory { story: story.clone() });
+                    self.cache.insert(entry.name.clone(), CachedStory { story: story.clone(), raw: text });
                     story
                 }
             };
             out.push((entry, story));
         }
         Ok(out)
+    }
+
+    /// 搜尋結果「載入成卡片」用（v0.3.15）：讀一節的 LIST，找到同一則稿（先比 story key，
+    /// 沒有 key 再比 slug），只 RETR 這一則。找不到（稿子被抽掉了）回 None。連線斷了重連
+    /// 再試一次，跟自動刷新一樣。
+    pub fn fetch_story(
+        &mut self,
+        cfg: &InewsConfig,
+        creds: &Credentials,
+        show: &str,
+        key: &str,
+        slug: &str,
+    ) -> Result<Option<(ListEntry, NsmlStory)>, String> {
+        match self.fetch_story_once(cfg, creds, show, key, slug) {
+            Ok(r) => Ok(r),
+            // 跟 `fetch` 一樣：閒置被踢（421）、登入狀態失效（530）、連線層錯誤都重新登入再試。
+            Err(FtpError::Io(_)) | Err(FtpError::Protocol(_)) if self.session.is_some() => {
+                self.drop_session();
+                self.fetch_story_once(cfg, creds, show, key, slug).map_err(|e| e.to_string())
+            }
+            Err(FtpError::Reply { ref reply, .. }) if self.session.is_some() && matches!(reply.code, 421 | 530) => {
+                self.drop_session();
+                self.fetch_story_once(cfg, creds, show, key, slug).map_err(|e| e.to_string())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn fetch_story_once(
+        &mut self,
+        cfg: &InewsConfig,
+        creds: &Credentials,
+        show: &str,
+        key: &str,
+        slug: &str,
+    ) -> FtpResult<Option<(ListEntry, NsmlStory)>> {
+        let path = format!("{}.{}.{}", cfg.root, show, cfg.queue);
+        let entries: Vec<ListEntry> =
+            self.list_dir(cfg, creds, &path)?.into_iter().filter(|e| e.kind == ListKind::Story).collect();
+        let found = entries
+            .iter()
+            .find(|e| !key.is_empty() && e.story_key() == key)
+            .or_else(|| entries.iter().find(|e| e.slug().trim() == slug.trim()));
+        let Some(entry) = found.cloned() else { return Ok(None) };
+        let story = match self.cache.get(&entry.name) {
+            Some(c) => c.story.clone(),
+            None => {
+                let text = self.session(cfg, creds)?.retr(&entry.name)?;
+                let story = inews::parse_nsml(&text);
+                self.cache.insert(entry.name.clone(), CachedStory { story: story.clone(), raw: text });
+                story
+            }
+        };
+        Ok(Some((entry, story)))
     }
 
     fn fetch_once(&mut self, cfg: &InewsConfig, creds: &Credentials, now: u32, mode: FetchMode) -> FtpResult<FetchResult> {
@@ -959,12 +1031,40 @@ impl InewsState {
             let stories = r.iter().filter_map(|(e, s)| rundown::story_record(e, s)).collect();
             Some(ShowSnapshot { show: w.slot.show.clone(), nominal: w.slot.nominal, stories })
         };
+        // 搜尋用的本地紀錄（v0.3.15）：同樣的節次，另外記播出時間和稿件原文。跟剪輯工具的
+        // 檔案分開：播出時間會跟著編輯調整一直變，剪輯工具要自己判斷，不能拿這裡的。
+        let search_of = |w: &inews::Window| -> Option<SearchShow> {
+            let r = rundowns.get(&w.slot.show).filter(|_| !w.slot.off_air)?;
+            let rows: Vec<RundownRow> = r.iter().map(|(e, s)| RundownRow::from_story(s, e.floated)).collect();
+            let cume = inews::compute_cume(&rows);
+            let stories = r
+                .iter()
+                .zip(cume)
+                .filter_map(|((e, s), c)| {
+                    let rec = rundown::story_record(e, s)?;
+                    Some(SearchRow {
+                        entry: SearchEntry {
+                            slug: rec.slug,
+                            id: e.story_key(),
+                            version: e.version().to_string(),
+                            style: rec.style,
+                            air_time: c.map(clock).unwrap_or_default(),
+                            updated: rec.updated,
+                        },
+                        raw: self.cache.get(&e.name).map(|c| c.raw.clone()),
+                    })
+                })
+                .collect();
+            Some(SearchShow { show: w.slot.show.clone(), nominal: w.slot.nominal, stories })
+        };
         // 上一個有效節次會繞回前一天（一天的第一節的上一節是昨晚的最後一節，裡面是昨天的
         // 殘留稿），所以只收同一個播出日、排在目前節次前面的。
         let day_start = cfg.broadcast_day_start.as_str();
         let same_day = |w: &&inews::Window| day_order(day_start, w.slot.nominal) < day_order(day_start, cur.slot.nominal);
         let snapshots: Vec<ShowSnapshot> =
             plan.previous.iter().filter(same_day).chain(std::iter::once(&cur)).filter_map(snapshot_of).collect();
+        let search: Vec<SearchShow> =
+            plan.previous.iter().filter(same_day).chain(std::iter::once(&cur)).filter_map(search_of).collect();
 
         // 快取只留這一輪還看得到的稿件，換節後舊的就放掉。
         let kept: std::collections::HashSet<&String> = rundowns.values().flatten().map(|(e, _)| &e.name).collect();
@@ -1033,6 +1133,7 @@ impl InewsState {
             files,
             log_line,
             rundown: snapshots,
+            search,
             meta: InewsMeta {
                 show_label: inews::show_hour_label(&cur.slot.show),
                 show: cur.slot.show.clone(),
@@ -1302,6 +1403,63 @@ pub fn write_rundown(
 }
 
 /// 刪掉檔名日期比今天早 30 天以上的 `YYYYMMDD.json`。
+/// 搜尋用的本地紀錄（v0.3.15）：`dir\YYYYMMDD\index.json` 整份重寫（先寫暫存檔再改名），
+/// 稿件原文 `dir\YYYYMMDD\stories\<ID>_<版本>.nsml` 每個版本只寫一次。
+pub fn write_search(dir: &std::path::Path, now: chrono::NaiveDateTime, day_start: &str, shows: Vec<SearchShow>) -> Result<(), String> {
+    let mut by_day: std::collections::BTreeMap<chrono::NaiveDate, Vec<SearchShow>> = Default::default();
+    for s in shows {
+        by_day.entry(show_broadcast_date(now, day_start, s.nominal)).or_default().push(s);
+    }
+    for (date, shows) in by_day {
+        let day_dir = dir.join(date.format("%Y%m%d").to_string());
+        let stories_dir = day_dir.join("stories");
+        std::fs::create_dir_all(&stories_dir).map_err(|e| format!("建立 {} 失敗：{e}", stories_dir.display()))?;
+        let index = day_dir.join("index.json");
+        let mut day = std::fs::read_to_string(&index)
+            .ok()
+            .and_then(|t| SearchDay::from_json(&t).ok())
+            .unwrap_or_default();
+        day.date = date.format("%Y-%m-%d").to_string();
+        for s in shows {
+            let mut entries = Vec::with_capacity(s.stories.len());
+            for row in s.stories {
+                if let (Some(raw), Some(name)) = (&row.raw, news_script_core::search::story_file_name(&row.entry.id, &row.entry.version)) {
+                    let path = stories_dir.join(name);
+                    if !path.exists() {
+                        std::fs::write(&path, raw).map_err(|e| format!("寫入 {} 失敗：{e}", path.display()))?;
+                    }
+                }
+                entries.push(row.entry);
+            }
+            day.merge(&s.show, entries);
+        }
+        let tmp = day_dir.join("index.json.tmp");
+        std::fs::write(&tmp, day.to_json()).map_err(|e| format!("寫入 {} 失敗：{e}", tmp.display()))?;
+        std::fs::rename(&tmp, &index).map_err(|e| format!("改名 {} 失敗：{e}", index.display()))?;
+    }
+    prune_search(dir, now.date());
+    Ok(())
+}
+
+/// 搜尋紀錄保留 14 天（含稿件原文，比決策紀錄短沒有意義，比剪輯工具的 30 天短：原文佔空間）。
+fn prune_search(dir: &std::path::Path, today: chrono::NaiveDate) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(&name, "%Y%m%d") {
+            if (today - d).num_days() >= LOG_KEEP_DAYS {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+}
+
+/// 讀搜尋紀錄裡的一個稿件原文；沒有回 None。
+pub fn read_search_story(dir: &std::path::Path, date: chrono::NaiveDate, id: &str, version: &str) -> Option<String> {
+    let name = news_script_core::search::story_file_name(id, version)?;
+    std::fs::read_to_string(dir.join(date.format("%Y%m%d").to_string()).join("stories").join(name)).ok()
+}
+
 fn prune_rundown(dir: &std::path::Path, today: chrono::NaiveDate) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -1895,6 +2053,35 @@ mod tests {
         std::fs::write(dir.join("20261027.json"), "{ broken").unwrap();
         write_rundown(&dir, now, "02:00", vec![snapshot("1000", 36000, &[("丁", "a")])]).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("20261027.json.bad")).unwrap(), "{ broken");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_search_store_keeps_air_time_and_story_text_apart_from_the_clip_file() {
+        let dir = std::env::temp_dir().join(format!("nst-search-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap().and_hms_opt(9, 30, 0).unwrap();
+        let row = |air: &str, raw: Option<&str>| SearchRow {
+            entry: SearchEntry {
+                slug: "合成稿0900".into(),
+                id: "040CE84D:0044D4CD".into(),
+                version: "6ADD2EE7".into(),
+                style: "SOT".into(),
+                air_time: air.into(),
+                updated: "2026-11-11 09:00:00".into(),
+            },
+            raw: raw.map(str::to_string),
+        };
+        let show = |r| vec![SearchShow { show: "0900".into(), nominal: 9 * 3600, stories: vec![r] }];
+        write_search(&dir, now, "02:00", show(row("09:12:58", Some("<nsml>原文</nsml>")))).unwrap();
+        // 下一輪：時間挪了、這一輪快取裡沒有原文。原文檔不會被刪、時間更新。
+        write_search(&dir, now, "02:00", show(row("09:13:30", None))).unwrap();
+        let day = SearchDay::from_json(&std::fs::read_to_string(dir.join("20261111").join("index.json")).unwrap()).unwrap();
+        assert_eq!(day.shows["0900"].len(), 1);
+        assert_eq!(day.shows["0900"][0].air_time, "09:13:30");
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        assert_eq!(read_search_story(&dir, date, "040CE84D:0044D4CD", "6ADD2EE7").as_deref(), Some("<nsml>原文</nsml>"));
+        assert_eq!(read_search_story(&dir, date, "040CE84D:0044D4CD", "OTHER"), None, "別的版本沒存就是沒有");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
