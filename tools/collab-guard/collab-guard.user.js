@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.2.0
+// @version      1.3.0
 // @description  擋住協作工具的毛病：新分頁讀不完要手動重整、改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
@@ -27,7 +27,8 @@
 
   const CONFIG = {
     pushEverySeconds: 10,      // 多久補送一次
-    highlightMinGapMs: 1500,   // 重複行螢光最快多久重畫一次
+    highlightMinGapMs: 800,    // 重複行螢光最快多久重畫一次（被跳過的到時間一定補畫）
+    disableSpellcheck: true,   // 關掉編輯區的拼字檢查紅色波浪線
     scrollGuardMs: 1200,       // 使用者停止捲動後多久內的程式捲動視為「被拉走」
     scrollGuardMinJumpPx: 80,  // 跳超過這個距離才攔
     coldStartReloadSeconds: 20, // 新開分頁超過這麼久還在「正在載入共同文章」就自動重整一次。0 = 關閉
@@ -627,24 +628,131 @@
   //
   // renderDuplicateLineHighlights 每次更新後 140ms 就跑一次，走過全文每一行，
   // 對每個要標記的重複項呼叫 getClientRects（每次都強迫瀏覽器重算版面），然後整層
-  // 重建 —— 這就是螢光閃爍。限流成最多每 1.5 秒一次，標記還在，只是不再狂閃。
+  // 重建 —— 這就是螢光閃爍。限流成最多每 highlightMinGapMs 一次，標記還在，只是不再狂閃。
+  //
+  // 被跳過的那次一定補畫（1.3.0）：以前跳過就丟掉，等「下一次有變動」才重畫，你換完行
+  // 如果沒人再動文件，螢光就一直停在舊的。現在間隔一到就補畫一次最新的狀態。
   //
   // 認得出它是因為它是具名函式而且頁面沒有壓縮。哪天作者改名或上壓縮，這段會自動
   // 失效（變成沒效果，不會壞）。
   const originalRaf = window.requestAnimationFrame;
+  let highlightTrailing = 0;
   window.requestAnimationFrame = function (callback) {
     if (callback && callback.name === "renderDuplicateLineHighlights") {
       const now = Date.now();
       const since = now - state.lastHighlightAt;
       if (since < CONFIG.highlightMinGapMs) {
+        if (!highlightTrailing) {
+          highlightTrailing = setTimeout(() => {
+            highlightTrailing = 0;
+            window.requestAnimationFrame(callback);
+          }, CONFIG.highlightMinGapMs - since);
+        }
         return originalRaf.call(window, function skipped() {
-          /* 這一輪跳過，下一次更新會再排一次 */
+          /* 這一輪跳過，間隔到了由上面的計時器補畫 */
         });
       }
       state.lastHighlightAt = now;
+      return originalRaf.call(window, function renderDuplicateLineHighlights(ts) {
+        callback(ts);
+        anchorHighlightMarks();
+      });
     }
     return originalRaf.apply(window, arguments);
   };
+
+  // ---- 4b. 螢光黏住那一行（1.3.0）------------------------------------------
+  //
+  // 頁面的螢光不是畫在文字上，是另一層用「當下的像素座標」放的色條。你在上面換行、
+  // 文字往下移，色條還停在原本的像素位置，要等下一次重畫才跟上 —— 看起來就是螢光
+  // 「沒黏著那行」。
+  //
+  // 這裡在頁面每次畫完後，記下每個色條屬於編輯器的哪一行（.ql-editor 底下的哪個元素）、
+  // 離那行頂端多遠；之後編輯器一有變動，就照那行現在的位置把色條挪過去。行被刪掉的
+  // 色條先藏起來，等下一次重畫。只移動色條，不碰文件內容（不改編輯器裡的任何元素，
+  // 改了 Quill 會當成編輯、同步給所有人）。
+  let anchoredMarks = [];
+  function anchorHighlightMarks() {
+    anchoredMarks = [];
+    try {
+      const layer = document.getElementById("duplicateHighlightLayer");
+      const editor = document.querySelector(".ql-editor");
+      const page = document.querySelector(".doc-page");
+      if (!layer || !editor || !page) return;
+      const marks = Array.from(layer.children);
+      if (!marks.length) return;
+      const pageTop = page.getBoundingClientRect().top;
+      const blocks = Array.from(editor.children);
+      const tops = blocks.map((b) => {
+        const r = b.getBoundingClientRect();
+        return [r.top - pageTop, r.bottom - pageTop];
+      });
+      for (const mark of marks) {
+        const top = parseFloat(mark.style.top);
+        if (!Number.isFinite(top)) continue;
+        // 色條畫在文字底部往上 10px，用它中間那點找所屬的行（二分搜尋，行是由上往下排的）。
+        const y = top + 4;
+        let lo = 0;
+        let hi = tops.length - 1;
+        let found = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (y < tops[mid][0]) hi = mid - 1;
+          else if (y >= tops[mid][1]) lo = mid + 1;
+          else {
+            found = mid;
+            break;
+          }
+        }
+        if (found >= 0) anchoredMarks.push({ mark, block: blocks[found], offset: top - tops[found][0] });
+      }
+    } catch (e) {
+      anchoredMarks = []; // 出錯就退回原本的行為
+    }
+  }
+
+  let followPending = false;
+  function followHighlightMarks() {
+    if (followPending || !anchoredMarks.length) return;
+    followPending = true;
+    originalRaf.call(window, () => {
+      followPending = false;
+      try {
+        const page = document.querySelector(".doc-page");
+        if (!page) return;
+        const pageTop = page.getBoundingClientRect().top;
+        for (const a of anchoredMarks) {
+          if (!a.block.isConnected) {
+            a.mark.style.visibility = "hidden";
+            continue;
+          }
+          const want = Math.round(a.block.getBoundingClientRect().top - pageTop + a.offset);
+          if (parseFloat(a.mark.style.top) !== want) a.mark.style.top = `${want}px`;
+        }
+      } catch (e) {
+        /* 跟不上就等下一次重畫 */
+      }
+    });
+  }
+  {
+    const editor = document.querySelector(".ql-editor");
+    if (editor) {
+      new MutationObserver(followHighlightMarks).observe(editor, { childList: true, subtree: true, characterData: true });
+    }
+  }
+
+  // ---- 4c. 關掉拼字檢查的紅色波浪線（1.3.0）-----------------------------------
+  //
+  // 瀏覽器對可編輯區預設開拼字檢查，中文稿幾乎每行都被畫紅波浪。spellcheck 只是瀏覽器
+  // 的顯示設定，不是文件內容，不會同步給別人。編輯器之外的便條紙也一起關。
+  function disableSpellcheck() {
+    if (!CONFIG.disableSpellcheck) return;
+    for (const node of document.querySelectorAll(".ql-editor, #sideNoteInput")) {
+      if (node.getAttribute("spellcheck") !== "false") node.setAttribute("spellcheck", "false");
+    }
+  }
+  disableSpellcheck();
+  setInterval(disableSpellcheck, 5000);
 
   // ---- 5. 捲動防跳 --------------------------------------------------------
   //

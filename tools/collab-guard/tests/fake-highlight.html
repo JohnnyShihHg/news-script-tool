@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fake highlight</title>
+<!-- 守門員 1.3.0 螢光測試頁：結構照協作工具（.doc-page 裡的 .ql-editor ＋ #duplicateHighlightLayer）。
+     window.__renders 是頁面真的畫了幾次。手動測試在 console 跑：
+       scan(); setTimeout(scan, 200)          → 0 秒畫一次、200ms 那次被跳過、約 800ms 補畫（共 2 次）
+       insertTop()                            → 上面插一行，色條要馬上跟著往下（不等重畫）
+       removeDup(0)                           → 刪掉有色條的那行，色條藏起來
+       document.querySelector(".ql-editor").spellcheck → false -->
+<style>
+  body { margin: 0; font: 16px/24px sans-serif; }
+  .doc-page { position: relative; width: 600px; margin: 20px; }
+  .duplicate-highlight-layer { position: absolute; inset: 0; pointer-events: none; }
+  .duplicate-highlight-mark { position: absolute; height: 9px; background: rgba(255, 235, 59, .82); }
+  .ql-editor p { margin: 0; }
+</style>
+<div id="bar"><span id="s">已同步</span></div>
+<div class="doc-page">
+  <div id="duplicateHighlightLayer" class="duplicate-highlight-layer"></div>
+  <div class="ql-editor" contenteditable="true"></div>
+</div>
+<script>
+  // ?shimraf=1：測試面板被隱藏時瀏覽器不跑 requestAnimationFrame，用計時器代替。
+  if (new URLSearchParams(location.search).get("shimraf")) {
+    window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 16);
+    window.cancelAnimationFrame = (id) => clearTimeout(id);
+  }
+  const editor = document.querySelector(".ql-editor");
+  for (let i = 0; i < 30; i++) {
+    const p = document.createElement("p");
+    p.textContent = i === 10 || i === 20 ? `DUP 重複行 ${i}` : `一般內容 ${i}`;
+    editor.append(p);
+  }
+  window.__renders = 0;
+  // 跟頁面一樣的具名函式：守門員靠名字認它。
+  function renderDuplicateLineHighlights() {
+    window.__renders += 1;
+    const layer = document.getElementById("duplicateHighlightLayer");
+    const pageRect = document.querySelector(".doc-page").getBoundingClientRect();
+    const frag = document.createDocumentFragment();
+    for (const p of editor.children) {
+      if (!p.textContent.startsWith("DUP")) continue;
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      for (const rect of range.getClientRects()) {
+        const mark = document.createElement("span");
+        mark.className = "duplicate-highlight-mark";
+        mark.style.left = `${Math.round(rect.left - pageRect.left)}px`;
+        mark.style.top = `${Math.round(rect.bottom - pageRect.top - 10)}px`;
+        mark.style.width = `${Math.ceil(rect.width)}px`;
+        frag.append(mark);
+      }
+    }
+    layer.replaceChildren(frag);
+  }
+  let timer = 0;
+  window.scan = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => requestAnimationFrame(renderDuplicateLineHighlights), 140);
+  };
+  window.insertTop = () => {
+    const p = document.createElement("p");
+    p.textContent = "新插入的一行";
+    editor.prepend(p);
+  };
+  window.removeDup = (n) => [...editor.children].filter((p) => p.textContent.startsWith("DUP"))[n].remove();
+</script>
+<script src="../collab-guard.user.js"></script>
