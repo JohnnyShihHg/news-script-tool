@@ -140,6 +140,22 @@ Tampermonkey → 新增腳本 → **全選範本**、把 `collab-guard.user.js` 
 - 測試頁：`tests/fake-cold.html?mode=stuck`（一直載入中，應該剛好重整一次）、
   `?mode=ok`（3 秒讀完，不重整，記一筆約 3 秒）。
 
+### 快取診斷（1.1.0，只讀）
+
+懷疑冷啟動慢是協作工具的本地快取（IndexedDB）沒寫好、每次開頁都從頭讀。讀完 30 秒後，
+守門員**只數**這個網站有哪些 IndexedDB、每個物件庫幾筆、網站用了多少儲存空間，**不讀
+任何內容**（文件裡有未播出的稿）。結果記在 `localStorage` 的 `collabGuardCacheInfo`，
+HUD 顯示摘要；console 打 `collabGuardDiag()` 可以再跑一次。打開的連線數完馬上關，頁面
+要升級資料庫時也立刻讓開。
+
+用來判斷要不要做「每 15 分鐘寫一次快取」：開頁讀取很慢的那台，快取是不是幾乎是空的、
+或筆數一直很大（沒有合併）。在 console 打：
+
+```js
+JSON.parse(localStorage.collabGuardColdLoads)   // 每次開頁讀了幾秒、有沒有自動重整
+JSON.parse(localStorage.collabGuardCacheInfo)   // 快取有幾個資料庫、幾筆
+```
+
 ### 自動重載值不值得開
 
 積壓超過 48,000 字元時，「離開前補送」會**靜默放棄**（它沒有分塊，雖然同一支程式裡

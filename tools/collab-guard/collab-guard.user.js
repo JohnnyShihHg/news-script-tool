@@ -145,6 +145,102 @@
     }
   }
 
+  // ---- 0b. 快取診斷（v1.1.0，只讀）--------------------------------------------
+  //
+  // 冷啟動慢、要重整才讀得完，懷疑是協作工具的本地快取（IndexedDB）沒寫好，每次開頁都
+  // 從頭讀。這裡只「數」這個網站有哪些 IndexedDB、每個物件庫幾筆、整個網站用了多少儲存
+  // 空間，不讀任何內容（文件裡有未播出的稿）。讀完 30 秒後跑一次，記在 localStorage
+  // collabGuardCacheInfo，HUD 顯示摘要；console 打 collabGuardDiag() 可以再跑一次。
+  // 打開的連線數完馬上關；頁面要升級資料庫時也立刻讓開，不擋協作工具自己的存取。
+  const CACHE_INFO_KEY = "collabGuardCacheInfo";
+  const cacheInfo = { summary: "" };
+
+  function countDatabase(name) {
+    return new Promise((resolve) => {
+      const out = { name, stores: [], records: 0 };
+      let req;
+      try {
+        req = indexedDB.open(name);
+      } catch (e) {
+        out.error = String(e);
+        resolve(out);
+        return;
+      }
+      // 只有資料庫不存在才會走到這裡：不要替它建立，取消。
+      req.onupgradeneeded = () => {
+        try { req.transaction.abort(); } catch (e) { /* 已經結束 */ }
+      };
+      req.onerror = () => {
+        out.error = String(req.error);
+        resolve(out);
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => db.close();
+        const names = Array.from(db.objectStoreNames);
+        if (!names.length) {
+          db.close();
+          resolve(out);
+          return;
+        }
+        let pending = names.length;
+        const finish = () => {
+          if (--pending === 0) {
+            db.close();
+            resolve(out);
+          }
+        };
+        try {
+          const tx = db.transaction(names, "readonly");
+          for (const s of names) {
+            const c = tx.objectStore(s).count();
+            c.onsuccess = () => {
+              out.stores.push({ name: s, count: c.result });
+              out.records += c.result;
+              finish();
+            };
+            c.onerror = () => {
+              out.stores.push({ name: s, count: null });
+              finish();
+            };
+          }
+        } catch (e) {
+          out.error = String(e);
+          db.close();
+          resolve(out);
+        }
+      };
+    });
+  }
+
+  async function collectCacheInfo() {
+    const info = { at: new Date().toISOString(), databases: [], usageMB: null };
+    try {
+      if (navigator.storage && navigator.storage.estimate) {
+        const est = await navigator.storage.estimate();
+        info.usageMB = Math.round(((est.usage || 0) / 1048576) * 10) / 10;
+      }
+      const dbs = indexedDB.databases ? await indexedDB.databases() : [];
+      for (const d of dbs) {
+        if (d.name) info.databases.push(await countDatabase(d.name));
+      }
+    } catch (e) {
+      info.error = String(e);
+    }
+    const total = info.databases.reduce((n, d) => n + d.records, 0);
+    cacheInfo.summary =
+      `本地快取：${info.databases.length} 個資料庫、${total} 筆` +
+      (info.usageMB !== null ? `、網站用了 ${info.usageMB} MB` : "");
+    try {
+      localStorage.setItem(CACHE_INFO_KEY, JSON.stringify(info));
+    } catch (e) {
+      /* 存不進去只少一份診斷 */
+    }
+    console.info("[守門員] 快取診斷", info);
+    return info;
+  }
+  window.collabGuardDiag = collectCacheInfo;
+
   function watchColdStart() {
     const navStart = Date.now() - performance.now();
     const timer = setInterval(() => {
@@ -157,6 +253,7 @@
         cold.seconds = Math.round(elapsed * 10) / 10;
         console.info(`[守門員] 冷啟動讀取 ${cold.seconds} 秒${cold.reloadedBefore ? "（自動重整之後）" : ""}`);
         recordColdLoad(cold.seconds, false);
+        setTimeout(collectCacheInfo, 30_000);
         return;
       }
       if (
@@ -224,6 +321,7 @@
       `<b>守門員</b>　${pageStatus || "（讀不到狀態）"}<br>` +
       `上次推送 ${ago(state.lastPushAt)}・上次收取 ${ago(state.lastPullAt)}` +
       (cold.seconds !== null ? `<br>開頁讀取 ${cold.seconds} 秒${cold.reloadedBefore ? "（自動重整後）" : ""}` : "") +
+      (cacheInfo.summary ? `<br>${cacheInfo.summary}` : "") +
       (state.blockedScrolls ? `<br>已擋下 ${state.blockedScrolls} 次捲動跳動` : "") +
       (state.lastError ? `<br><span style="color:#991b1b">${state.lastError}</span>` : "") +
       (stuck && state.stuckSince ? `<br><span style="color:#991b1b">已卡住 ${ago(state.stuckSince)}</span>` : "");
