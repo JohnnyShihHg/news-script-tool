@@ -1351,6 +1351,95 @@ function closeUnknownReview() {
   if (box) box.style.display = "none";
 }
 
+// --- 當天 rundown 的 slug 搜尋（v0.3.15）---
+//
+// 讀 App 每一輪存在本地的 rundown 檔（剪輯工具用的同一份），不打 iNEWS。結果唯讀。
+
+let searchTimer = null;
+let searchSeq = 0;
+const SEARCH_MAX_ROWS = 300;
+
+function openRundownSearch() {
+  let box = el("rundownSearch");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "rundownSearch";
+    box.className = "modal-backdrop";
+    box.innerHTML = `
+      <div class="modal search-modal" role="dialog" aria-modal="true" aria-labelledby="searchTitle">
+        <div class="modal-head">
+          <h2 id="searchTitle">搜尋今天的 rundown</h2>
+          <button class="modal-close" id="searchClose" title="關閉">✕</button>
+        </div>
+        <div class="modal-body">
+          <input id="searchInput" class="search-input" type="search" autocomplete="off"
+            placeholder="輸入 slug 關鍵字；空白分開＝每個都要符合" />
+          <p id="searchMeta" class="search-meta"></p>
+          <div id="searchResults"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(box);
+    const close = () => { box.style.display = "none"; };
+    el("searchClose").addEventListener("click", close);
+    box.addEventListener("click", (e) => { if (e.target === box) close(); });
+    box.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+    el("searchInput").addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(runRundownSearch, 200);
+    });
+  }
+  box.style.display = "flex";
+  el("searchInput").focus();
+  runRundownSearch();
+}
+
+async function runRundownSearch() {
+  const query = el("searchInput").value;
+  const meta = el("searchMeta");
+  const out = el("searchResults");
+  const seq = ++searchSeq;
+  try {
+    const r = await invoke("search_rundown_slugs", { query });
+    if (seq !== searchSeq) return; // 打字很快時，舊的結果晚回來就丟掉
+    meta.textContent = r.shows
+      ? `播出日 ${r.date}：App 今天讀過 ${r.shows} 節、${r.stories} 則稿（App 沒開的時段不會有）。`
+      : `播出日 ${r.date}：今天還沒有存下任何 rundown（App 開著自動刷新才會存）。`;
+    if (!query.trim()) {
+      out.innerHTML = "";
+      return;
+    }
+    if (!r.hits.length) {
+      out.innerHTML = `<p class="search-empty">找不到符合的 slug。</p>`;
+      return;
+    }
+    const rows = r.hits.slice(0, SEARCH_MAX_ROWS).map((h) => `
+      <tr>
+        <td>${escapeHtml(h.show)}</td>
+        <td>${escapeHtml(h.slug)}</td>
+        <td>${escapeHtml(h.style || "—")}</td>
+        <td>${escapeHtml((h.updated || "").slice(11) || "—")}</td>
+        <td>${escapeHtml(cardStateOf(h.slug))}</td>
+      </tr>`).join("");
+    out.innerHTML =
+      `<p class="search-meta">找到 ${r.hits.length} 則${r.hits.length > SEARCH_MAX_ROWS ? `，只顯示前 ${SEARCH_MAX_ROWS} 則` : ""}。</p>` +
+      `<table class="search-table"><thead><tr><th>節次</th><th>slug</th><th>樣式</th><th>iNEWS 修改</th><th>畫面上的卡片</th></tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (err) {
+    if (seq !== searchSeq) return;
+    meta.textContent = `⚠ 搜尋失敗：${err}`;
+    out.innerHTML = "";
+  }
+}
+
+/** 這個 slug 在畫面上的卡片狀態；沒有卡片回「—」。 */
+function cardStateOf(slug) {
+  const card = items.find((i) => slugOf(i) === slug);
+  if (!card) return "—";
+  if (card.alreadyInDoc) return "已在文件中";
+  return { to_cut: "待處理", keep_refresh: "要重貼", removed: "已剔除" }[card.matchStatus] ?? "有卡片（還沒比對）";
+}
+
+el("rundownSearchBtn")?.addEventListener("click", openRundownSearch);
+
 /** 協作工具還在載入或沒連上時，讀取文件的腳本回傳的錯誤帶這個記號（v0.3.15）。 */
 const COLLAB_NOT_READY = "[未就緒]";
 function isCollabNotReady(err) {

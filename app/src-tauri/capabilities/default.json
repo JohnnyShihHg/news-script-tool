@@ -44,6 +44,7 @@
     "allow-correct-collab-times",
     "allow-append-decision-log",
     "core:window:allow-request-user-attention",
-    "allow-collab-idle-seconds"
+    "allow-collab-idle-seconds",
+    "allow-search-rundown-slugs"
   ]
 }

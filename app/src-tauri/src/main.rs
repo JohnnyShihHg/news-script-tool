@@ -358,6 +358,43 @@ async fn import_inews(
     Ok(dto)
 }
 
+#[derive(Serialize)]
+struct SlugSearchDto {
+    /// 播出日 `2026-11-11`。
+    date: String,
+    /// 當天的檔案裡有幾節、幾則稿（讓使用者知道資料涵蓋多少）。
+    shows: usize,
+    stories: usize,
+    hits: Vec<news_script_core::rundown::SlugHit>,
+}
+
+/// 當天 rundown 的 slug 搜尋（v0.3.15）：讀 App 每一輪存在本地的
+/// `rundown\YYYYMMDD.json`（剪輯工具用的同一份），只讀不寫，不打 iNEWS。只有 App 開著
+/// 時讀過的節次會在裡面。
+#[tauri::command]
+fn search_rundown_slugs(
+    window: tauri::Window,
+    state: tauri::State<'_, AppState>,
+    query: String,
+) -> Result<SlugSearchDto, String> {
+    require_main_window(&window)?;
+    let day_start = lock_or_recover(&state.config).inews.broadcast_day_start.clone();
+    let dir = inews_rundown_dir().ok_or_else(|| "找不到 rundown 資料夾路徑".to_string())?;
+    let date = inews::broadcast_date(inews::taipei_now(), &day_start);
+    let path = dir.join(format!("{}.json", date.format("%Y%m%d")));
+    let day = match std::fs::read_to_string(&path) {
+        Ok(text) => news_script_core::rundown::RundownDay::from_json(&text).map_err(|e| format!("讀不懂 {}：{e}", path.display()))?,
+        Err(_) => news_script_core::rundown::RundownDay::new(""),
+    };
+    let hits = news_script_core::rundown::search_slugs(&day, &query, |show| inews::show_day_order(&day_start, show));
+    Ok(SlugSearchDto {
+        date: date.format("%Y-%m-%d").to_string(),
+        shows: day.shows.len(),
+        stories: day.shows.values().map(Vec::len).sum(),
+        hits,
+    })
+}
+
 /// 前端的決策寫進決策紀錄（v0.3.15：未知樣式審查）。只收一行，太長就截斷。
 #[tauri::command]
 fn append_decision_log(window: tauri::Window, line: String) -> Result<(), String> {
@@ -1673,7 +1710,8 @@ fn main() {
             open_inews_log_folder,
             correct_collab_times,
             append_decision_log,
-            collab_idle_seconds
+            collab_idle_seconds,
+            search_rundown_slugs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -462,3 +462,12 @@ select {
 .review-reason { color: var(--warn); background: var(--warn-bg); padding: 6px 10px; border-radius: 6px; }
 .review-body { color: var(--muted); white-space: pre-wrap; }
 .review-more { color: var(--muted); font-size: 13px; margin-left: auto; }
+
+/* 當天 rundown 的 slug 搜尋（v0.3.15） */
+.search-modal { width: min(860px, 94vw); }
+.search-input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 8px 10px; margin: 12px 0 4px; }
+.search-meta { color: var(--muted); font-size: 13px; margin: 6px 0; }
+.search-empty { color: var(--muted); }
+.search-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
+.search-table th, .search-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.search-table th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }

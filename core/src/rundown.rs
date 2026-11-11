@@ -179,6 +179,108 @@ impl RundownDay {
     }
 }
 
+// ---- 當天 rundown 的 slug 搜尋（v0.3.15）----
+
+/// 一筆搜尋結果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SlugHit {
+    pub show: String,
+    pub slug: String,
+    pub style: String,
+    /// iNEWS 的最後修改時間（`yyyy-mm-dd HH:MM:SS`）。
+    pub updated: String,
+}
+
+/// 全形英數轉半形、全形空白轉半形、英文轉小寫，空白合併。
+fn fold_for_search(s: &str) -> String {
+    let folded: String = s
+        .chars()
+        .map(|c| match c as u32 {
+            code @ 0xFF01..=0xFF5E => char::from_u32(code - 0xFEE0).unwrap_or(c),
+            0x3000 => ' ',
+            _ => c,
+        })
+        .flat_map(char::to_lowercase)
+        .collect();
+    folded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 在當天的 rundown 資料裡找 slug：全形半形、大小寫不分，空白分開的每個關鍵字都要出現
+/// （AND）。`show_order` 決定節次的排列（播出日 02:00 分界時，0100 排在 2300 後面）；
+/// 同一節裡照 rundown 第一次看到的順序。空的查詢回空的結果。
+pub fn search_slugs(day: &RundownDay, query: &str, show_order: impl Fn(&str) -> i64) -> Vec<SlugHit> {
+    let terms: Vec<String> = fold_for_search(query).split(' ').filter(|t| !t.is_empty()).map(str::to_string).collect();
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let mut shows: Vec<(&String, &Vec<RundownStory>)> = day.shows.iter().collect();
+    shows.sort_by_key(|(name, _)| (show_order(name), (*name).clone()));
+    let terms = &terms;
+    shows
+        .into_iter()
+        .flat_map(|(show, stories)| {
+            stories.iter().filter_map(move |s| {
+                let hay = fold_for_search(&s.slug);
+                terms.iter().all(|t| hay.contains(t.as_str())).then(|| SlugHit {
+                    show: show.clone(),
+                    slug: s.slug.clone(),
+                    style: s.style.clone(),
+                    updated: s.updated.clone(),
+                })
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn story(slug: &str, style: &str) -> RundownStory {
+        RundownStory { slug: slug.into(), style: style.into(), updated: "2026-11-11 09:00:00".into(), ..Default::default() }
+    }
+
+    fn day() -> RundownDay {
+        let mut d = RundownDay::new("2026-11-11");
+        d.merge("0100", vec![story("深夜合成稿0100", "SOT")]);
+        d.merge("0900", vec![story("合成氣象0900", ""), story("ＳＯＴ全形合成0900", "SOT"), story("(寰)合成國際0900", "SOT")]);
+        d.merge("1200", vec![story("合成氣象1200", "LIVE")]);
+        d
+    }
+
+    /// 02:00 分界：0100 是播出日的最後。
+    fn order(show: &str) -> i64 {
+        let n: i64 = show.parse().unwrap_or(0);
+        (n - 200).rem_euclid(2400)
+    }
+
+    #[test]
+    fn finds_by_substring_in_broadcast_day_order() {
+        let hits = search_slugs(&day(), "氣象", order);
+        let got: Vec<(&str, &str)> = hits.iter().map(|h| (h.show.as_str(), h.slug.as_str())).collect();
+        assert_eq!(got, [("0900", "合成氣象0900"), ("1200", "合成氣象1200")]);
+        assert_eq!(hits[1].style, "LIVE");
+    }
+
+    #[test]
+    fn all_terms_must_match_and_width_and_case_do_not_matter() {
+        assert_eq!(search_slugs(&day(), "氣象 1200", order).len(), 1);
+        assert_eq!(search_slugs(&day(), "sot 全形", order)[0].slug, "ＳＯＴ全形合成0900");
+        assert_eq!(search_slugs(&day(), "（寰）", order)[0].slug, "(寰)合成國際0900");
+    }
+
+    #[test]
+    fn the_late_night_show_comes_last() {
+        let hits = search_slugs(&day(), "合成", order);
+        assert_eq!(hits.last().unwrap().show, "0100");
+    }
+
+    #[test]
+    fn an_empty_query_finds_nothing() {
+        assert!(search_slugs(&day(), "   ", order).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

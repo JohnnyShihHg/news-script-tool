@@ -1239,6 +1239,16 @@ fn day_offset(day_start: &str) -> chrono::Duration {
         .unwrap_or_default()
 }
 
+/// 現在屬於哪一個播出日（02:00 分界：01:30 還算前一天）。
+pub fn broadcast_date(now: chrono::NaiveDateTime, day_start: &str) -> chrono::NaiveDate {
+    (now - day_offset(day_start)).date()
+}
+
+/// 節次資料夾名稱（`0900`）在播出日裡的先後；認不得的排最後。
+pub fn show_day_order(day_start: &str, show: &str) -> i64 {
+    inews::show_start(show).map_or(i64::MAX, |n| day_order(day_start, n))
+}
+
 /// 節次在播出日裡的先後（秒）：02:00 分界下 0100 排在 2300 後面。
 fn day_order(day_start: &str, nominal: u32) -> i64 {
     (i64::from(nominal) - day_offset(day_start).num_seconds()).rem_euclid(86_400)
