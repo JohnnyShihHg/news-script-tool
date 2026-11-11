@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-collab-idle-seconds"
+description = "Enables the collab_idle_seconds command without any pre-configured scope."
+commands.allow = ["collab_idle_seconds"]
+
+[[permission]]
+identifier = "deny-collab-idle-seconds"
+description = "Denies the collab_idle_seconds command without any pre-configured scope."
+commands.deny = ["collab_idle_seconds"]

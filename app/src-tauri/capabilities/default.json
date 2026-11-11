@@ -43,6 +43,7 @@
     "allow-open-inews-log-folder",
     "allow-correct-collab-times",
     "allow-append-decision-log",
-    "core:window:allow-request-user-attention"
+    "core:window:allow-request-user-attention",
+    "allow-collab-idle-seconds"
   ]
 }

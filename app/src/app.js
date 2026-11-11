@@ -490,6 +490,10 @@ function render() {
         // is false for the buckets a user rescues from (已濾除, 未知樣式). Unticking
         // by hand sticks for the same reason.
         item.defaultIncluded = e.target.checked;
+        // 已剔除／已在文件的卡片，比對每輪都會強制取消勾選（defaultIncluded 也蓋不過）。
+        // 手動勾過就記下來，比對不再覆蓋（v0.3.15）。自動寫入本來就不寫這兩種，所以只
+        // 影響手動寫入。
+        item.userIncluded = e.target.checked;
       }
       renderFunnel();
       updateKeywordButton();
@@ -802,6 +806,8 @@ async function writeBackToCollab() {
       writtenSlugs.add(slugOf(i));
       const key = writtenKey(i);
       if (key) writtenKeys.add(key);
+      // 寫過了：手動勾選的記憶清掉，下一次比對照文件狀態重算（不然會一直勾著）。
+      delete i.userIncluded;
     });
     status.textContent = `✅ ${msg}`;
   } catch (err) {
@@ -957,6 +963,13 @@ async function inewsRound() {
       meta.warnings?.length ? "warn" : ""
     );
 
+    // 使用者正在操作（主視窗或協作視窗最近 30 秒有動作、或審查視窗開著）：這一輪不比對、
+    // 不寫入、不校正，免得卡片在使用者面前變動（v0.3.15）。讀 rundown 照常。
+    if (await operatingPause()) {
+      el("inewsStatus").textContent += `\n⏸ 操作中，暫停自動比對與寫入（停止操作 ${PAUSE_IDLE_MS / 1000} 秒後恢復，最長暫停 ${PAUSE_MAX_MS / 60000} 分鐘）。`;
+      return;
+    }
+
     // 時間校正不等關鍵字、節次暫存或分隔線：已經在文件裡的稿每一輪都對一次。
     if (inewsCfg.correct_time !== false) await correctCollabTimes(meta.time_rows ?? []);
 
@@ -975,6 +988,45 @@ async function inewsRound() {
     inewsBusy = false;
     if (renderDeferred && !isTypingInList()) render();
   }
+}
+
+// --- 操作中暫停（v0.3.15）---
+const PAUSE_IDLE_MS = 30_000;
+const PAUSE_MAX_MS = 180_000;
+let lastMainActivityAt = 0;
+let pausedSince = 0;
+for (const type of ["mousedown", "keydown", "wheel", "input", "touchstart"]) {
+  document.addEventListener(type, () => { lastMainActivityAt = Date.now(); }, true);
+}
+
+/** 這一輪要不要暫停自動比對與寫入。最長暫停 PAUSE_MAX_MS，之後強制跑一次。 */
+async function operatingPause() {
+  const now = Date.now();
+  let busy = reviewing !== null || now - lastMainActivityAt < PAUSE_IDLE_MS;
+  if (!busy) {
+    try {
+      const idle = await invoke("collab_idle_seconds");
+      busy = idle != null && idle * 1000 < PAUSE_IDLE_MS;
+    } catch {
+      /* 問不到協作視窗就當作沒在操作 */
+    }
+  }
+  if (!busy) {
+    if (pausedSince) logDecision("[恢復] 使用者停止操作，恢復自動比對與寫入");
+    pausedSince = 0;
+    return false;
+  }
+  if (!pausedSince) {
+    pausedSince = now;
+    logDecision("[暫停] 使用者操作中，暫停自動比對與寫入");
+    return true;
+  }
+  if (now - pausedSince >= PAUSE_MAX_MS) {
+    logDecision(`[恢復] 已暫停 ${PAUSE_MAX_MS / 60000} 分鐘，強制跑一輪`);
+    pausedSince = 0;
+    return false;
+  }
+  return true;
 }
 
 /// 時間校正（v0.3.9）。失敗只顯示，不停自動刷新：寫入前的比對會自己擋。
@@ -1136,6 +1188,7 @@ async function writeInewsItems(ready) {
       // 已經在文件裡了：取消勾選，下一輪比對也會得到同樣的結果。
       i.included = false;
       i.defaultIncluded = false;
+      delete i.userIncluded;
       i.alreadyInDoc = true;
     }
     lastWrittenShow = lastShow;
@@ -1279,8 +1332,9 @@ function resolveUnknownReview(write) {
   const item = items.find((x) => x.id === reviewing?.id);
   if (item) {
     item.included = write;
-    // 比對每輪都會依 defaultIncluded 重算勾選：照審查結果，不要被洗掉。
+    // 比對每輪都會重算勾選：照審查結果，不要被洗掉。
     item.defaultIncluded = write;
+    item.userIncluded = write;
     logDecision(`[審查] ${slugOf(item)} → ${write ? "寫入" : "略過"}`);
   }
   closeUnknownReview();
@@ -1441,7 +1495,7 @@ async function compareWithCollabDoc({ silent = false } = {}) {
       item.matchedLine = r.matched_line;
       item.crossDay = !!r.cross_day;
       item.alreadyInDoc = isAlreadyInDoc(r);
-      item.included = decideInclusion(r, item.defaultIncluded);
+      item.included = decideInclusion(r, item.defaultIncluded, item.userIncluded);
       // 已濾除 entries are matched so their badge and the duplicate guard are right,
       // but they stay out of the tally: it reads as "how much of today's run is left
       // to do", and BS stories are not part of that unless someone rescues one.

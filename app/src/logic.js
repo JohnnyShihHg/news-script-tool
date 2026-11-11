@@ -54,7 +54,11 @@
    * `defaultIncluded` keeps buckets that start unticked (unknown styles, which need
    * a human call) from being silently opted in.
    */
-  function decideInclusion(result, defaultIncluded) {
+  function decideInclusion(result, defaultIncluded, userIncluded) {
+    // 使用者手動勾過（或取消過）就照使用者的（v0.3.15）：以前已剔除／已在文件的卡片
+    // 每次比對都被強制取消勾選，手動勾的還沒按寫入就被洗掉。自動寫入本來就不寫這兩種
+    // （isPendingWrite），所以這只影響手動寫入。
+    if (typeof userIncluded === "boolean") return userIncluded;
     const handled = isAlreadyInDoc(result) || result.status === "removed";
     return !handled && defaultIncluded;
   }

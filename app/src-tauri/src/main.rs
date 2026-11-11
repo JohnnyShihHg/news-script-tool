@@ -815,6 +815,7 @@ async fn open_collab_window(window: tauri::Window, app: tauri::AppHandle) -> Res
         // 守門員（tools/collab-guard）每次載入都注入：App 的協作視窗是獨立的 WebView，
         // 沒有竄改猴（v0.3.15）。只內嵌同一份檔案，不另外維護一份。
         .initialization_script(COLLAB_GUARD_SCRIPT)
+        .initialization_script(COLLAB_ACTIVITY_SCRIPT)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -860,6 +861,47 @@ fn receive_scraped_text(
 /// 協作工具守門員（竄改猴腳本），原封不動注入 App 的協作視窗。開頭的 `==UserScript==`
 /// 表頭只是註解；腳本自己會看頁面上有沒有編輯器才啟動。
 const COLLAB_GUARD_SCRIPT: &str = include_str!("../../../tools/collab-guard/collab-guard.user.js");
+
+/// 協作視窗裡記下使用者最後一次操作的時間（v0.3.15，操作中暫停用）。
+const COLLAB_ACTIVITY_SCRIPT: &str = r#"
+(function () {
+  var mark = function () { window.__nstLastInputAt = Date.now(); };
+  ['keydown', 'input', 'mousedown', 'wheel', 'paste', 'touchstart'].forEach(function (t) {
+    window.addEventListener(t, mark, true);
+  });
+})();
+"#;
+
+/// 回報協作視窗多久沒有操作（秒）；開了之後都沒操作過回一個很大的數。
+const COLLAB_IDLE_SCRIPT: &str = r#"
+(function () {
+  var t = window.__nstLastInputAt || 0;
+  var secs = t ? Math.floor((Date.now() - t) / 1000) : 999999;
+  if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
+    window.__TAURI__.core.invoke('receive_scraped_text', { text: { Ok: String(secs) }, id: window.__nstReqId })
+      .catch(function () {});
+  }
+})();
+"#;
+
+/// 操作中暫停（v0.3.15）：協作視窗多久沒有操作（秒）。沒開協作視窗、別的協作操作正在
+/// 進行、或 3 秒內問不到，都回 None（當作沒在操作），不排隊等，免得拖慢每一輪。
+#[tauri::command]
+async fn collab_idle_seconds(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<u64>, String> {
+    require_main_window(&window)?;
+    if app.get_webview_window(COLLAB_WINDOW_LABEL).is_none() {
+        return Ok(None);
+    }
+    let Ok(_turn) = state.collab_turn.try_lock() else { return Ok(None) };
+    match tokio::time::timeout(std::time::Duration::from_secs(3), eval_in_collab_locked(&app, &state, COLLAB_IDLE_SCRIPT)).await {
+        Ok(Ok(text)) => Ok(text.trim().parse::<u64>().ok()),
+        _ => Ok(None),
+    }
+}
 
 const SCRAPE_SCRIPT: &str = r#"
 (function() {
@@ -1630,7 +1672,8 @@ fn main() {
             clear_inews_credentials,
             open_inews_log_folder,
             correct_collab_times,
-            append_decision_log
+            append_decision_log,
+            collab_idle_seconds
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

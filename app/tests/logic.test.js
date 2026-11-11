@@ -1036,3 +1036,29 @@ test("only new unknown-style iNEWS cards are queued for review, once per version
   // 資料夾匯入的卡片（沒有 inews）不跳審查。
   assert.deepEqual(L.unknownReviewTargets([{ bucket: "unknown", id: "entry-0" }], new Set()), []);
 });
+
+// --- 手動勾選記憶（v0.3.15）---
+
+test("a manual tick survives the next compare, even on 已剔除 and 已在文件中 cards", () => {
+  const removed = { status: "removed", matched_line: "(x)甲 短sot" };
+  const inDoc = { status: "in_doc", matched_line: "乙 短sot" };
+  const toCut = { status: "to_cut", matched_line: null };
+  // 沒手動動過：照文件狀態。
+  assert.equal(L.decideInclusion(removed, true), false);
+  assert.equal(L.decideInclusion(inDoc, true), false);
+  assert.equal(L.decideInclusion(toCut, true), true);
+  // 手動勾過／取消過：照使用者的。
+  assert.equal(L.decideInclusion(removed, false, true), true);
+  assert.equal(L.decideInclusion(inDoc, false, true), true);
+  assert.equal(L.decideInclusion(toCut, true, false), false);
+});
+
+test("a manually ticked 已剔除 card is still never written automatically", () => {
+  const [item] = L.inewsItemsFromSummary(inewsSummary("1200", [{ slug: "甲", key: "A:1", version: "v1" }]));
+  item.matchStatus = "removed";
+  item.keywords = "#k";
+  item.userIncluded = true;
+  item.included = L.decideInclusion({ status: "removed", matched_line: "(x)甲" }, false, item.userIncluded);
+  assert.equal(item.included, true);
+  assert.deepEqual(L.autoWriteCandidates([item], new Set(), ""), [], "only the manual button writes it");
+});
