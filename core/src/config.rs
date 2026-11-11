@@ -183,7 +183,9 @@ pub struct MarkersConfig {
 
 impl Default for MarkersConfig {
     fn default() -> Self {
-        Self { refresh_keywords: vec!["抓新".into(), "抓".into()] }
+        // BS（v0.3.19）：稿件本身看不出來、棚內臨時改成主播口述的，製作人在 slug 前面標
+        // (BS)；下一節照常播 SOT 時要重抓，跟 (抓新) 一樣。
+        Self { refresh_keywords: vec!["抓新".into(), "抓".into(), "BS".into()] }
     }
 }
 
@@ -543,7 +545,7 @@ impl Default for InewsConfig {
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 16;
+pub const CURRENT_CONFIG_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {

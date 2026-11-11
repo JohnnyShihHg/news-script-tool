@@ -137,7 +137,16 @@ pub fn search_slugs(day: &SearchDay, query: &str, show_order: impl Fn(&str) -> i
     shows
         .into_iter()
         .flat_map(|(show, stories)| {
-            stories.iter().filter_map(move |s| {
+            // 同一節同 slug 只留 iNEWS 修改時間最新的一筆（v0.3.19）。iNEWS 搬動稿件位置會換
+            // 稿件 ID，紀錄是認 ID 的，搬幾次就留幾筆舊的；rundown 檔是認 slug 的，這裡跟它一致。
+            // 只影響顯示，紀錄和原文都不刪。
+            let latest = |s: &SearchEntry| {
+                let key = fold_for_search(&s.slug);
+                !stories.iter().any(|o| fold_for_search(&o.slug) == key && o.updated > s.updated)
+                    && stories.iter().rposition(|o| fold_for_search(&o.slug) == key && o.updated == s.updated)
+                        == stories.iter().position(|o| std::ptr::eq(o, s))
+            };
+            stories.iter().filter(move |s| latest(s)).filter_map(move |s| {
                 let hay = fold_for_search(&s.slug);
                 terms.iter().all(|t| hay.contains(t.as_str())).then(|| SlugHit {
                     show: show.clone(),
@@ -238,6 +247,42 @@ mod tests {
         assert_eq!(weather.len(), 1);
         assert_eq!(weather[0].air_time, "09:12:58");
         assert_eq!(search_slugs(&d, "只在舊檔", order).len(), 1);
+    }
+
+    #[test]
+    fn a_story_moved_in_inews_shows_only_its_latest_version_in_that_show() {
+        // 11/11 賴瑞隆社工1500：1600 節次裡搬了 4 次，每次換 ID，搜出 5 筆。
+        let mut d = SearchDay { date: "2026-11-11".into(), ..Default::default() };
+        let moved = |id: &str, air: &str, updated: &str| SearchEntry {
+            updated: updated.into(),
+            ..entry("賴瑞隆社工1500", id, air)
+        };
+        d.merge(
+            "1600",
+            vec![
+                moved("X:1", "16:42:11", "2026-11-11 16:07:05"),
+                moved("X:2", "16:40:05", "2026-11-11 16:09:36"),
+                moved("X:3", "16:38:14", "2026-11-11 16:16:12"),
+                moved("X:5", "16:38:13", "2026-11-11 16:38:12"),
+                moved("X:4", "16:38:13", "2026-11-11 16:32:17"),
+            ],
+        );
+        // 別的節次同 slug 照樣出現。
+        d.merge("1700", vec![moved("Y:1", "17:05:00", "2026-11-11 17:00:00")]);
+        let hits = search_slugs(&d, "賴瑞隆", order);
+        let got: Vec<(&str, &str)> = hits.iter().map(|h| (h.show.as_str(), h.id.as_str())).collect();
+        assert_eq!(got, [("1600", "X:5"), ("1700", "Y:1")]);
+        // 紀錄本身不刪。
+        assert_eq!(d.shows["1600"].len(), 5);
+    }
+
+    #[test]
+    fn same_slug_with_the_same_update_time_shows_once() {
+        let mut d = SearchDay { date: "2026-11-11".into(), ..Default::default() };
+        d.merge("1600", vec![entry("同時間1600", "A:1", "16:00:00"), entry("同時間1600", "A:2", "16:01:00")]);
+        let hits = search_slugs(&d, "同時間", order);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "A:2", "時間一樣留後面那筆");
     }
 
     #[test]

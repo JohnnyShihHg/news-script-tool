@@ -114,8 +114,12 @@ fn is_refresh_prefix(prefix: &str, refresh_keywords: &[String]) -> bool {
         once_cell::sync::Lazy::new(|| regex::Regex::new(r"\(([^()]*)\)").unwrap());
     static SHORT_NUMBER: once_cell::sync::Lazy<regex::Regex> =
         once_cell::sync::Lazy::new(|| regex::Regex::new(r"(^|\D)\d{1,2}(\D|$)").unwrap());
-    refresh_keywords.iter().any(|k| prefix.contains(normalize_for_match(k).as_str()))
-        || BRACKET.captures_iter(prefix).any(|c| SHORT_NUMBER.is_match(&c[1]))
+    // 英文關鍵字（BS）大小寫不分：手打的 (bs) 也算。
+    let lower = prefix.to_lowercase();
+    refresh_keywords.iter().any(|k| {
+        let k = normalize_for_match(k).to_lowercase();
+        !k.is_empty() && lower.contains(k.as_str())
+    }) || BRACKET.captures_iter(prefix).any(|c| SHORT_NUMBER.is_match(&c[1]))
 }
 
 /// How one doc line reads for the slug `needle` (already normalized), or None when
@@ -670,6 +674,23 @@ YH 合成氣象 06：24：02
         // Single-digit hours and fullwidth colons still compare.
         let doc = "(抓新) 合成重貼新聞0900 SOT 9：05：00\n";
         assert_eq!(match_entry("合成重貼新聞0900", "09:05:00", doc, &refresh()).status, MatchStatus::InDoc);
+    }
+
+    #[test]
+    fn a_bs_tag_works_like_grab_new_with_the_default_keywords() {
+        // v0.3.19：稿件看不出來、棚內臨時改主播口述的，製作人在 slug 前面標 (BS)。
+        // 同一個時間＝已經在文件；下一次換了時間（照常播 SOT）要重抓。
+        let kw = crate::config::MarkersConfig::default().refresh_keywords;
+        let doc = "(BS)賴瑞隆社工1500 SOT 16:38:13\n";
+        assert_eq!(match_entry("賴瑞隆社工1500", "16:38:13", doc, &kw).status, MatchStatus::InDoc);
+        assert_eq!(match_entry("賴瑞隆社工1500", "17:12:40", doc, &kw).status, MatchStatus::KeepRefresh);
+        // 小寫、全形、括號前後有空白都算。
+        for doc in ["(bs) 賴瑞隆社工1500 SOT 16:38:13\n", "（ＢＳ）賴瑞隆社工1500 SOT 16:38:13\n"] {
+            assert_eq!(match_entry("賴瑞隆社工1500", "17:12:40", doc, &kw).status, MatchStatus::KeepRefresh, "{doc}");
+        }
+        // slug 後面的樣式欄寫 BS 不是標記：前綴是 03，照樣算已處理。
+        let doc = "03 合成開幕報導0600 BS 06:08:32\n";
+        assert_eq!(match_entry("合成開幕報導0600", "07:00:00", doc, &kw).status, MatchStatus::Removed);
     }
 
     #[test]
