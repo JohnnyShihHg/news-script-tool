@@ -1,0 +1,79 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>settings preview</title>
+<!-- 設定頁預覽（沒有 Tauri 的瀏覽器用）：假的 invoke 回一份設定，載入真的 index.html／app.js，
+     開好設定視窗。要用 http 開（python -m http.server，從 nst-dev 起），網址 /app/tests/settings-preview.html。
+     window.__saved 是按「儲存設定」時送出的設定。 -->
+<link rel="stylesheet" href="../src/styles.css" />
+<body>
+<script>
+  const config = {
+    config_version: 17,
+    gemini: { model: "gemini-2.5-flash", max_per_run: 12 },
+    import: { default_folder: "G:\\demo" },
+    inews: {
+      server: "inews", port: 21, root: "51新聞台.SHOWS", queue: "ONAIR", poll_seconds: 10, lead_minutes: 5,
+      include_floated: false, cutoff_preview_keyword: "預告", cutoff_page_prefix: "=", divider_format: "==== {hh} ====",
+      divider_position: "after", auto_write: true, fill_computed_time: true, slot_spans: { 1200: "1400", 1800: "2000" },
+      sweep_delay_minutes: 10, cutoff_by_marker: false, broadcast_day_start: "02:00", auto_date_header: true,
+      cross_day_title_match: true, hold_after_open_live: true, open_live_max_minutes: 30, off_air_on_empty: true,
+      programs: { 關鍵KS: "關鍵時刻" }, program_divider_format: "==== {hh} {name} ====", correct_time: true,
+      correct_time_stable_rounds: 2, correct_time_max_delta_minutes: 10, write_stable_rounds: 2,
+      anomaly_threshold_seconds: 120, anomaly_quiet_rounds: 3, anomaly_max_cooldown_minutes: 15,
+      recheck_interval_minutes: 30, unknown_review: true, unknown_review_sound: true,
+      unknown_review_sound_kind: "dingdong", unknown_review_volume: 60,
+    },
+    filter: {
+      allowed_styles: ["SOT", "SL"], blocked_styles: ["BS", "SO"], excluded_slug_suffixes: ["SOU"], flag_styles: ["TEL"],
+      title_tag_pattern: "^\\[BAR_.*大\\]$", title_tag_fallback_pattern: "^\\[BAR", slug_style_terms: ["推播"],
+      video_id_styles: ["X5=SL"], force_pass_slug_prefixes: ["專"], blank_style_timecode_pass: true,
+      blank_style_body_pass_terms: ["氣象"], no_body_pass_terms: ["氣象"], blocked_note_terms: ["預告"],
+    },
+    annotations: {
+      no_upload_terms: ["勿上網"], no_upload_label: "(勿上網)", copyright_terms: ["版權"], copyright_label: "(版權問題)",
+      allowed_upload_terms: ["可上網"], allowed_upload_label: "(可上網)", exclusive_terms: ["獨家"], exclusive_prefix: "獨家》",
+      latest_styles: ["SL"], latest_prefix: "最新》",
+    },
+    evening: { anchors: ["吳宇舒"], no_online_markers: ["(勿上網)"], blocked_styles: ["SL"], excluded_terms: ["專"] },
+    clean: { strip_marker_symbols: true, drop_non_cjk_lines: true, strip_trailing_symbols: true },
+    markers: { refresh_keywords: ["抓新", "抓", "BS"] },
+    punctuation: {
+      quotes_to_corner: true, title_dot_to_enumeration: false, dot_to_enumeration: true, protect_urls: true,
+      preserve_halfwidth_space: false, map: { ",": "，", ":": "：", "?": "？" },
+    },
+    output: { keyword_count: 4, keyword_separator: " ", entry_blank_lines: 1 },
+    ui: { theme: "warm" },
+  };
+  window.__saved = null;
+  window.__TAURI__ = {
+    core: {
+      invoke: async (cmd, args) => {
+        if (cmd === "get_config") return JSON.parse(JSON.stringify(config));
+        if (cmd === "get_api_key_status") return { has_key: true, source: "keyring" };
+        if (cmd === "get_inews_credential_status") return { has_credentials: true, username: "demo" };
+        if (cmd === "save_config") { window.__saved = args.config ?? args; return null; }
+        return null;
+      },
+    },
+    event: { listen: async () => () => {} },
+    app: { getVersion: async () => "0.3.22" },
+  };
+  (async () => {
+    const html = await (await fetch("../src/index.html")).text();
+    const body = new DOMParser().parseFromString(html, "text/html").body;
+    body.querySelectorAll("script").forEach((s) => s.remove());
+    document.body.insertAdjacentHTML("afterbegin", body.innerHTML);
+    for (const src of ["../src/logic.js", "../src/app.js"]) {
+      await new Promise((ok, bad) => {
+        const s = document.createElement("script");
+        s.src = src;
+        s.onload = ok;
+        s.onerror = bad;
+        document.body.append(s);
+      });
+    }
+    await openSettings();
+    window.__ready = true;
+  })().catch((e) => { window.__error = String(e); });
+</script>
+</body>

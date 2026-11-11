@@ -314,6 +314,19 @@ main { padding: 10px 20px 60px; display: flex; flex-direction: column; gap: 12px
 .settings-section { padding: 14px 0; border-bottom: 1px solid var(--border); }
 .settings-section:last-child { border-bottom: none; }
 .settings-section h3 { margin: 0 0 10px; font-size: 14px; color: var(--text); }
+/* 可收合的設定分組（v0.3.22）：一次只展開一組，收合時只剩標題列。 */
+.settings-section.collapsible { padding: 0; }
+.settings-section.collapsible .settings-toggle {
+  margin: 0; padding: 11px 4px; cursor: pointer; user-select: none;
+  display: flex; align-items: center; gap: 8px; font-weight: 600;
+}
+.settings-section.collapsible .settings-toggle:hover { color: var(--accent, var(--text)); }
+.settings-section.collapsible .settings-toggle:focus-visible { outline: 2px solid var(--accent, #888); outline-offset: 2px; }
+.settings-caret { display: inline-block; width: 1em; color: var(--muted); transition: transform .15s; }
+.settings-section.open .settings-caret { transform: rotate(90deg); }
+.settings-section.collapsible .settings-body { display: none; padding: 0 4px 14px 22px; }
+.settings-section.open .settings-body { display: block; }
+#soundVolumeInput { width: 220px; }
 
 .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 8px; }
 

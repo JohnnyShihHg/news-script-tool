@@ -497,6 +497,11 @@ pub struct InewsConfig {
     pub unknown_review: bool,
     /// 審查視窗開著時的提示音（每 30 秒一次，直到處理）。
     pub unknown_review_sound: bool,
+    /// 提示音的種類（v0.3.22）：`double` 雙響、`dingdong` 叮咚、`rising` 三連音、
+    /// `alarm` 警示、`marimba` 木琴。前端用 Web Audio 合成，不用音檔。
+    pub unknown_review_sound_kind: String,
+    /// 提示音音量 0～100（v0.3.22）。
+    pub unknown_review_volume: u32,
 }
 
 impl Default for InewsConfig {
@@ -539,6 +544,8 @@ impl Default for InewsConfig {
             recheck_interval_minutes: 30,
             unknown_review: true,
             unknown_review_sound: true,
+            unknown_review_sound_kind: "double".into(),
+            unknown_review_volume: 60,
         }
     }
 }
@@ -656,6 +663,9 @@ pub fn migrate(cfg: &mut Config) -> bool {
     // 已經開過設定頁的人存下來的清單會蓋掉新預設，真連永遠不會被放行。
 
     // v16 (v0.3.15): [inews] 加 unknown_review / unknown_review_sound，serde 預設補上。
+    // v17 (v0.3.19): refresh_keywords 加 BS（上面 union 補進去）。
+    // v0.3.22: [inews] 加 unknown_review_sound_kind / unknown_review_volume，serde 預設補上
+    // （純新欄位，不用升版）。
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
