@@ -35,8 +35,10 @@
     reloadCooldownMinutes: 5,  // 兩次自動重載至少間隔這麼久，避免伺服器掛掉時無限重載
     staleSeconds: 90,          // 收到別人的更新、畫面卻一直沒變超過這麼久，就當作「接收停擺」
     staleMinUpdates: 3,        // 而且這段時間至少收到這麼多筆（避免一兩筆不顯示的小更新誤判）
-    staleReload: true,         // 接收停擺時，你 30 秒沒打字就自動重整（false = 只顯示紅框）
-    staleReloadCooldownMinutes: 10, // 停擺重整兩次至少間隔這麼久
+    backfillCooldownMinutes: 2, // 收不到別人的內容時「背景補讀」整份，兩次至少間隔這麼久
+    backfillMaxPerHour: 10,    // 背景補讀一小時最多幾次（一次約 10 MB，別拖垮協作工具）
+    staleReload: true,         // 補讀後還是收不到：你 30 秒沒打字、沒有待上傳就自動重整
+    staleReloadCooldownMinutes: 10, // 這種重整兩次至少間隔這麼久
     debugScroll: false,        // 開了會在 console 印出每一次程式捲動的來源堆疊
 
     showHud: false,            // 右下角那個狀態小框
@@ -90,7 +92,7 @@
   // 「套上去畫面卻沒變」的更新、第一筆是什麼時候。
   const STALE_RELOAD_KEY = "collabGuardStaleReloadAt";
   const STALE_LOG_KEY = "collabGuardStaleEvents";
-  const stale = { count: 0, since: 0, lastDomAt: Date.now(), cursor: "" };
+  const stale = { count: 0, since: 0, lastDomAt: Date.now(), cursor: "", gap: null, gapConfirmed: false, reason: "" };
 
   // ---- 1. 推送看門狗 ----------------------------------------------------
   //
@@ -351,15 +353,17 @@
 
   function refreshHud() {
     const pageStatus = readPageStatus();
-    const receiveStalled = isReceiveStalled();
+    const receiveStalled = checkReceiveStall(pageStatus);
     const stuck = receiveStalled || /待同步|正在載入共同文章|連線中|離線/.test(pageStatus);
-    if (receiveStalled) maybeReloadForStale(pageStatus);
     if (stuck) {
       if (!state.stuckSince) state.stuckSince = Date.now();
     } else {
       state.stuckSince = 0;
     }
-    alertFrame.style.display = stuck && CONFIG.showAlertFrame ? "block" : "none";
+    // 紅框預設不顯示；唯一例外是「收不到別人的內容、你卻正在打字」—— 這時打的字可能被
+    // 排到文件中間，要讓你知道（使用者 11/11 決定）。
+    const typingWhileStalled = receiveStalled && Date.now() - state.lastUserInputAt < 30_000;
+    alertFrame.style.display = (stuck && CONFIG.showAlertFrame) || typingWhileStalled ? "block" : "none";
     hud.innerHTML =
       `<b>守門員</b>　${pageStatus || "（讀不到狀態）"}<br>` +
       `上次推送 ${ago(state.lastPushAt)}・上次收取 ${ago(state.lastPullAt)}` +
@@ -367,9 +371,8 @@
       (cacheInfo.summary ? `<br>${cacheInfo.summary}` : "") +
       (state.blockedScrolls ? `<br>已擋下 ${state.blockedScrolls} 次捲動跳動` : "") +
       (state.lastError ? `<br><span style="color:#991b1b">${state.lastError}</span>` : "") +
-      (receiveStalled
-        ? `<br><span style="color:#991b1b">收到 ${stale.count} 筆別人的更新，畫面都沒變（${ago(stale.since)}起）</span>`
-        : "") +
+      (receiveStalled ? `<br><span style="color:#991b1b">收不到別人的內容：${stale.reason}</span>` : "") +
+      (backfill.lastDoneAt ? `<br>上次背景補讀 ${ago(backfill.lastDoneAt)}（共 ${backfill.count} 次）` : "") +
       (stuck && state.stuckSince ? `<br><span style="color:#991b1b">已卡住 ${ago(state.stuckSince)}</span>` : "");
 
     if (
@@ -403,100 +406,200 @@
     const url = typeof input === "string" ? input : input?.url || "";
     const isSync = url.includes("/api/sync");
     const isWrite = isSync && (init?.method || "GET").toUpperCase() === "POST";
-    return originalFetch.apply(this, arguments).then(
+    // 背景補讀（第 7 節）：把頁面自己下一次的拉取改成「從頭拉」，伺服器會回整份快照，
+    // 頁面照它平常的流程套上去。只改網址，不自己另外發請求。
+    let callArgs = arguments;
+    const isBackfill = isSync && !isWrite && typeof input === "string" && takeBackfillTurn();
+    if (isBackfill) callArgs = [url.replace(/([?&]after=)\d+/, "$10"), init];
+    return originalFetch.apply(this, callArgs).then(
       (res) => {
         if (isSync) {
           if (res.ok) {
             if (isWrite) state.lastPushAt = Date.now();
             else {
               state.lastPullAt = Date.now();
-              // 另外讀一份副本看收到幾筆更新；頁面自己讀的那份不受影響。
-              res.clone().json().then(noteIncoming).catch(() => {});
+              // 另外讀一份副本看收到什麼；頁面自己讀的那份不受影響。
+              res.clone().json().then((p) => noteIncoming(p, url, isBackfill)).catch(() => {
+                if (isBackfill) finishBackfill(false);
+              });
             }
             state.lastError = "";
           } else {
             state.lastError = `同步 HTTP ${res.status}`;
+            if (isBackfill) finishBackfill(false);
           }
         }
         return res;
       },
       (err) => {
         if (isSync) state.lastError = `同步連線失敗：${err}`;
+        if (isBackfill) finishBackfill(false);
         throw err;
       },
     );
   };
 
-  // ---- 7. 接收停擺偵測（v1.2.0）--------------------------------------------
+  // ---- 7. 收不到別人的內容：偵測＋背景補讀（v1.2.0）---------------------------
   //
   // 11/11 實際遇到：Chrome 分頁停在 11:05 的內容，App 的協作視窗已經到 15:15，兩邊都寫
-  // 「已同步」。量了 60 秒：輪詢全部成功、伺服器進度編號有往前、收到 3 筆別人的更新，
-  // 但編輯器畫面一次都沒變。也就是**收得到、套不上去**。
+  // 「已同步」。在那個分頁量了 60 秒：輪詢全部成功、收到 3 筆別人的更新，但編輯器畫面
+  // 一次都沒變 —— **收得到、套不上去**。
   //
-  // 推測（沒辦法在頁面外驗證）：協作工具用 Yjs，更新只要漏掉一筆，之後所有依賴它的更新
-  // 都會卡在「等那一筆」、永遠不顯示；頁面的狀態只看連線和待上傳，所以一直是綠燈。
-  // 重整會從伺服器重新讀整份，就好了。
+  // 原因（11/11 直接問伺服器確認）：伺服器每收到一份「整份快照」，就把快照之前的逐筆
+  // 更新刪掉；之後用 after=N 來拉的人，只拿得到還沒被刪的。分頁如果落後（背景分頁被
+  // Chrome 節流成一分鐘才拉一次），中間那段在它拉到之前就被刪了，伺服器也不會補快照給它。
+  // 少了那一段，之後別人在那段之後打的字，Yjs 都會卡在「等前面那段」，永遠不顯示。頁面
+  // 的狀態燈只看連線和待上傳，所以一直是綠的。
   //
-  // 偵測：輪詢收到別人的更新後 1.5 秒內，編輯器畫面沒有任何變動，就記一筆「沒套上」。
-  // 畫面一有不是自己打字造成的變動就歸零。累積 staleMinUpdates 筆、持續 staleSeconds 秒
-  // 就判定停擺：紅框，並在你 30 秒沒打字、頁面沒有待上傳的東西時自動重整。
+  // 補救不需要重整：after=0 時伺服器會回整份快照，裡面就有漏掉的那段。所以把頁面自己
+  // 的下一次拉取改成 after=0，頁面照平常流程套上去，卡住的內容一次全部出現。這跟開頁時
+  // 頁面自己做的事一樣，只是不重建編輯器、不打斷打字。
   //
-  // 排除：自己剛上傳完 3 秒內收到的（伺服器把自己的更新送回來，套上去本來就不會變）、
-  // 分批讀取中（hasMore）、很大的一筆（整份快照，套上去也不會變）。
-  function noteIncoming(payload) {
-    if (!payload || payload.hasMore) return;
-    const ups = Array.isArray(payload.updates) ? payload.updates : [];
-    const n = ups.filter((e) => typeof e?.update === "string" && e.update.length < 20_000).length;
-    if (!n) return;
-    if (Date.now() - state.lastPushAt < 3000) return;
-    const arrivedAt = Date.now();
-    const cursor = String(payload.nextCursor ?? "");
-    setTimeout(() => {
-      if (stale.lastDomAt >= arrivedAt) return; // 畫面有跟著變：正常
-      if (!stale.count) stale.since = arrivedAt;
-      stale.count += n;
-      stale.cursor = cursor;
-    }, 1500);
-  }
+  // 兩種偵測：
+  //  a. 漏號：拉回來的第一筆編號 > 自己的進度＋1（中間那段被刪了）。先記著，等下一筆別人
+  //     的更新也沒顯示出來，就確定、馬上補讀。漏號但內容照樣顯示，表示漏的那段沒影響，不動。
+  //  b. 保底：收到別人的更新 1.5 秒內畫面沒變，累積 staleMinUpdates 筆、超過 staleSeconds 秒。
+  //
+  // 不能把協作工具拖垮（使用者 11/11 交代）：
+  //  - 只改頁面自己的拉取網址，不另外發請求；一次只補一份。
+  //  - 背景分頁不補（等你切回來再補），補讀至少間隔 backfillCooldownMinutes，一小時最多
+  //    backfillMaxPerHour 次。快照目前約 10 MB，跟重整一次讀的一樣。
+  //  - 補讀失敗或補完還是卡住，才走自動重整（30 秒沒打字、沒有待上傳、10 分鐘一次）。
+  const backfill = { wanted: false, inFlight: false, lastAt: 0, lastDoneAt: 0, count: 0, recent: [] };
 
-  function watchEditorChanges() {
-    const editor = document.querySelector(".ql-editor");
-    if (!editor) return;
-    new MutationObserver(() => {
-      // 自己打字造成的變動不算「別人的更新有顯示出來」。
-      if (Date.now() - state.lastUserInputAt < 1000) return;
-      stale.lastDomAt = Date.now();
-      stale.count = 0;
-      stale.since = 0;
-    }).observe(editor, { childList: true, subtree: true, characterData: true });
-  }
-  watchEditorChanges();
-
-  function isReceiveStalled() {
-    return (
-      stale.count >= CONFIG.staleMinUpdates &&
-      stale.since > 0 &&
-      Date.now() - stale.since >= CONFIG.staleSeconds * 1000
-    );
-  }
-
-  function recordStale(reloaded) {
+  function logStaleEvent(kind, detail) {
+    console.warn(`[守門員] ${kind}`, detail || "");
     try {
       const list = JSON.parse(localStorage.getItem(STALE_LOG_KEY) || "[]");
-      list.push({
-        at: new Date().toISOString(),
-        updates: stale.count,
-        seconds: Math.round((Date.now() - stale.since) / 1000),
-        cursor: stale.cursor,
-        reloaded,
-      });
-      localStorage.setItem(STALE_LOG_KEY, JSON.stringify(list.slice(-20)));
+      list.push({ at: new Date().toISOString(), kind, ...(detail || {}) });
+      localStorage.setItem(STALE_LOG_KEY, JSON.stringify(list.slice(-30)));
     } catch (e) {
       /* 存不進去只少一筆紀錄 */
     }
   }
 
-  let staleLogged = false;
+  function sideNoteValue() {
+    const box = document.getElementById("sideNoteInput");
+    return box ? box.value : "";
+  }
+
+  function noteIncoming(payload, url, wasBackfill) {
+    if (wasBackfill) {
+      finishBackfill(Array.isArray(payload?.updates) && payload.updates.length > 0);
+      return;
+    }
+    if (!payload || payload.hasMore) return;
+    const ups = Array.isArray(payload.updates) ? payload.updates : [];
+    if (!ups.length) return;
+
+    const after = Number((url.match(/[?&]after=(\d+)/) || [])[1] || 0);
+    const cursors = ups.map((e) => Number(e?.cursor)).filter((c) => Number.isFinite(c) && c > 0);
+    if (after > 0 && cursors.length) {
+      const first = Math.min(...cursors);
+      if (first > after + 1 && !stale.gap) {
+        stale.gap = { from: after + 1, to: first - 1 };
+        // 只印 console 不存：漏號但內容照樣顯示時很常見，存了會把紀錄洗掉。確定有影響才存。
+        console.info(`[守門員] 漏號 ${after + 1}～${first - 1}，看下一筆有沒有顯示`);
+      }
+    }
+
+    // 自己剛上傳完收到的，多半是伺服器把自己的更新送回來，套上去畫面本來就不會變。
+    if (Date.now() - state.lastPushAt < 3000) return;
+    // 很大的一筆是整份快照，套上去也不會變。
+    const n = ups.filter((e) => typeof e?.update === "string" && e.update.length < 20_000).length;
+    if (!n) return;
+    const arrivedAt = Date.now();
+    const sideBefore = sideNoteValue();
+    stale.cursor = String(payload.nextCursor ?? "");
+    setTimeout(() => {
+      // 畫面（或便條紙）有跟著變：正常。漏號也就沒有影響。
+      if (stale.lastDomAt >= arrivedAt || sideNoteValue() !== sideBefore) {
+        stale.gap = null;
+        return;
+      }
+      if (!stale.count) stale.since = arrivedAt;
+      stale.count += n;
+      if (stale.gap && !stale.gapConfirmed) {
+        stale.gapConfirmed = true;
+        logStaleEvent("漏號而且收到的內容沒顯示", { missing: `${stale.gap.from}～${stale.gap.to}` });
+      }
+    }, 1500);
+  }
+
+  function watchEditorChanges() {
+    const targets = [document.querySelector(".ql-editor"), document.getElementById("frozenTextPanel")];
+    const observer = new MutationObserver(() => {
+      // 自己打字造成的變動不算「別人的更新有顯示出來」。
+      if (Date.now() - state.lastUserInputAt < 1000) return;
+      stale.lastDomAt = Date.now();
+      stale.count = 0;
+      stale.since = 0;
+    });
+    for (const t of targets) {
+      if (t) observer.observe(t, { childList: true, subtree: true, characterData: true, attributes: t.id === "frozenTextPanel" });
+    }
+  }
+  watchEditorChanges();
+
+  function requestBackfill(reason) {
+    if (backfill.wanted || backfill.inFlight) return true;
+    const now = Date.now();
+    backfill.recent = backfill.recent.filter((t) => now - t < 3_600_000);
+    if (now - backfill.lastAt < CONFIG.backfillCooldownMinutes * 60_000) return false;
+    if (backfill.recent.length >= CONFIG.backfillMaxPerHour) return false;
+    backfill.wanted = true;
+    logStaleEvent("排定背景補讀", { reason });
+    return true;
+  }
+
+  // fetch 攔截呼叫：這一次拉取要不要改成補讀。背景分頁不補，等切回來。
+  function takeBackfillTurn() {
+    if (!backfill.wanted || backfill.inFlight || document.hidden) return false;
+    backfill.wanted = false;
+    backfill.inFlight = true;
+    backfill.lastAt = Date.now();
+    backfill.recent.push(backfill.lastAt);
+    backfill.count += 1;
+    return true;
+  }
+
+  function finishBackfill(ok) {
+    backfill.inFlight = false;
+    if (!ok) {
+      logStaleEvent("背景補讀失敗");
+      return;
+    }
+    backfill.lastDoneAt = Date.now();
+    // 頁面接著會把快照套上去，卡住的內容一次出現。重新開始觀察。
+    stale.count = 0;
+    stale.since = 0;
+    stale.gap = null;
+    stale.gapConfirmed = false;
+    logStaleEvent("背景補讀完成", { cursor: stale.cursor });
+  }
+
+  // 每秒由 refreshHud 呼叫。回傳「現在是不是收不到別人的內容」。
+  function checkReceiveStall(pageStatus) {
+    const heuristic =
+      stale.count >= CONFIG.staleMinUpdates &&
+      stale.since > 0 &&
+      Date.now() - stale.since >= CONFIG.staleSeconds * 1000;
+    const stalled = heuristic || stale.gapConfirmed;
+    if (!stalled) {
+      stale.reason = "";
+      return false;
+    }
+    stale.reason = stale.gapConfirmed
+      ? `伺服器那段（${stale.gap ? `${stale.gap.from}～${stale.gap.to}` : "?"}）沒拿到`
+      : `收到 ${stale.count} 筆，畫面都沒變（${Math.round((Date.now() - stale.since) / 1000)} 秒）`;
+    if (document.hidden) return true; // 背景分頁：等切回來再處理
+    if (backfill.wanted || backfill.inFlight) return true;
+    if (requestBackfill(stale.reason)) return true;
+    maybeReloadForStale(pageStatus); // 補讀用完次數或剛補過還是卡住
+    return true;
+  }
+
+  let reloadBlockedLogged = false;
   function maybeReloadForStale(pageStatus) {
     const canReload =
       CONFIG.staleReload &&
@@ -504,15 +607,13 @@
       Date.now() - state.lastUserInputAt > 30_000 &&
       Date.now() - readReloadMark(STALE_RELOAD_KEY) > CONFIG.staleReloadCooldownMinutes * 60_000;
     if (!canReload) {
-      if (!staleLogged) {
-        staleLogged = true;
-        console.warn(`[守門員] 接收停擺：收到 ${stale.count} 筆更新，畫面沒變`);
-        recordStale(false);
+      if (!reloadBlockedLogged) {
+        reloadBlockedLogged = true;
+        logStaleEvent("補讀後還是收不到，等時機重整", { reason: stale.reason });
       }
       return;
     }
-    console.warn(`[守門員] 接收停擺：收到 ${stale.count} 筆更新，畫面沒變，自動重整`);
-    recordStale(true);
+    logStaleEvent("補讀後還是收不到，自動重整", { reason: stale.reason });
     writeReloadMark(STALE_RELOAD_KEY, Date.now());
     try {
       if (scroller) sessionStorage.setItem(SCROLL_MARK_KEY, String(scroller.scrollTop));

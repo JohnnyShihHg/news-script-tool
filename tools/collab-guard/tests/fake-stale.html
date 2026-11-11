@@ -1,38 +1,64 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>fake stale</title>
-<!-- 守門員「接收停擺」的手動測試頁（秒數調短：停擺 4 秒、至少 3 筆）：
-     ?mode=stale  輪詢一直收到更新，但畫面不變 → 約 6 秒後應該自動重整「一次」（冷卻 10 分鐘）
-     ?mode=ok     收到更新後畫面跟著變 → 不重整、不紅框
-     ?mode=echo   只收到自己剛上傳的更新（上傳完 1 秒內）→ 不算，不重整
-     ?mode=typing 停擺，但一直在打字 → 紅框、不重整
+<!-- 守門員「收不到別人的內容」的手動測試頁（秒數調短：保底判定 4 秒、至少 3 筆，補讀冷卻 3 秒）。
+     假伺服器：after=N 回一筆小更新；after=0 回整份快照（大）。頁面「套上」後畫面會不會變看 mode：
+     ?mode=ok        收到就顯示 → 不補讀、不重整
+     ?mode=stale     小更新都不顯示，快照會 → 補讀一次就好，不重整
+     ?mode=gap       編號跳號＋不顯示 → 不用等 4 秒，第二筆就補讀，不重整
+     ?mode=gapok     編號跳號但照樣顯示 → 不補讀
+     ?mode=hard      快照也救不回來 → 補讀（上限 1 次）後自動重整一次
+     ?mode=typing    同 hard 但一直在打字 → 紅框、不重整
+     ?mode=hidden    背景分頁（document.hidden）→ 不補讀、不重整
+     ?mode=echo      只收到自己剛上傳的 → 不算
+     加 &frame=1 測 showAlertFrame 打開。window.__reqs 是頁面發出的拉取網址。
      測試前在 console 清掉：localStorage.clear(); sessionStorage.clear(); window.name = "" -->
 <div id="bar"><span id="s">已同步</span></div>
 <div class="ql-editor"><p>測試</p></div>
 <script>
-  // 紅框預設關閉；測試頁打開才看得到判定結果。?frame=0 測預設值（判定了也不顯示）。
+  const params = new URLSearchParams(location.search);
+  const mode = params.get("mode") || "stale";
   window.__collabGuardTestConfig = {
     staleSeconds: 4,
     staleMinUpdates: 3,
-    showAlertFrame: new URLSearchParams(location.search).get("frame") !== "0",
+    backfillCooldownMinutes: 0.05,
+    backfillMaxPerHour: mode === "hard" || mode === "typing" ? 1 : 10,
+    showAlertFrame: params.get("frame") === "1",
   };
-  const mode = new URLSearchParams(location.search).get("mode") || "stale";
+  if (mode === "hidden") Object.defineProperty(document, "hidden", { get: () => true });
   const n = Number(localStorage.getItem("fakeLoads") || 0) + 1;
   localStorage.setItem("fakeLoads", String(n));
   document.title = `loads=${n}`;
+  window.__reqs = [];
+  let serverCursor = 100;
   let cursor = 100;
-  // 假的伺服器：GET 每次回一筆小更新，POST 回 ok。
   window.fetch = async (input, init) => {
     const isPost = (init?.method || "GET").toUpperCase() === "POST";
-    const body = isPost ? {} : { updates: [{ update: "AAEC" }], nextCursor: ++cursor, hasMore: false };
+    if (isPost) return new Response("{}", { status: 200 });
+    window.__reqs.push(String(input));
+    const after = Number(String(input).match(/after=(\d+)/)[1]);
+    let body;
+    if (after === 0) {
+      body = { updates: [{ cursor: serverCursor, update: "S".repeat(50_000) }], nextCursor: serverCursor, snapshotCursor: serverCursor, hasMore: false };
+    } else {
+      serverCursor += (mode === "gap" || mode === "gapok") ? 5 : 1; // 跳號：中間被刪了
+      body = { updates: [{ cursor: serverCursor, update: "AAEC" }], nextCursor: serverCursor, hasMore: false };
+    }
     return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
   };
-  // 頁面的輪詢；guard 載入後會包住 window.fetch，所以要每次呼叫時才取 window.fetch。
   setInterval(async () => {
     if (mode === "echo") await window.fetch("/api/sync", { method: "POST" });
-    const res = await window.fetch(`/api/sync?room=x&after=${cursor}`);
-    await res.json();
-    if (mode === "ok") document.querySelector(".ql-editor p").textContent = `測試 ${cursor}`;
+    const url = `/api/sync?room=x&after=${cursor}`;
+    const res = await window.fetch(url, {});
+    const p = await res.json();
+    cursor = Math.max(cursor, p.nextCursor);
+    const isSnapshot = p.updates[0]?.update.length > 1000;
+    const shows =
+      mode === "ok" || mode === "gapok" ||
+      (isSnapshot && (mode === "stale" || mode === "gap")) ||
+      ((mode === "stale" || mode === "gap") && window.__fixed);
+    if (isSnapshot && (mode === "stale" || mode === "gap")) window.__fixed = true;
+    if (shows) document.querySelector(".ql-editor p").textContent = `測試 ${cursor}`;
   }, 850);
   if (mode === "typing") {
     setInterval(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" })), 2000);
