@@ -92,16 +92,33 @@ pub fn match_slug(slug: &str, doc_text: &str, refresh_keywords: &[String]) -> Ma
 /// a re-grab only makes sense once iNews has a different 累積時間. Lines or entries
 /// without a time fall back to the slug-only rule.
 pub fn match_entry(slug: &str, time: &str, doc_text: &str, refresh_keywords: &[String]) -> MatchResult {
+    match_entry_in_show(slug, time, "", doc_text, refresh_keywords)
+}
+
+/// `match_entry`，另外帶這則所在的節次（`1800`）：卡片沒有累積時間時，`(抓18)` 改看
+/// 節次有沒有到 1800（v0.3.20）。
+pub fn match_entry_in_show(slug: &str, time: &str, show: &str, doc_text: &str, refresh_keywords: &[String]) -> MatchResult {
     let needle = normalize_for_match(slug);
     if needle.is_empty() {
         return MatchResult::miss();
     }
     let entry_time = padded_time(time);
+    let show = show_minute(show);
     doc_text
         .lines()
         .rev()
-        .find_map(|line| line_status(line, &needle, entry_time.as_deref(), refresh_keywords))
+        .find_map(|line| line_status(line, &needle, entry_time.as_deref(), show, refresh_keywords))
         .unwrap_or_else(MatchResult::miss)
+}
+
+/// 節次資料夾名稱（`1800`、`0100`）→ 播出日裡的第幾分鐘；不是四位數字回 None。
+fn show_minute(show: &str) -> Option<i64> {
+    let s = show.trim();
+    if s.len() != 4 || !s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let n: i64 = s.parse().ok()?;
+    (n / 100 < 24 && n % 100 < 60).then(|| broadcast_minute(n / 100, n % 100))
 }
 
 /// Whether the text before a slug marks it for a re-grab: one of the refresh
@@ -152,7 +169,13 @@ fn refresh_marker_minute(prefix: &str) -> Option<i64> {
 
 /// How one doc line reads for the slug `needle` (already normalized), or None when
 /// the slug is not on it.
-fn line_status(line: &str, needle: &str, entry_time: Option<&str>, refresh_keywords: &[String]) -> Option<MatchResult> {
+fn line_status(
+    line: &str,
+    needle: &str,
+    entry_time: Option<&str>,
+    show_minute: Option<i64>,
+    refresh_keywords: &[String],
+) -> Option<MatchResult> {
     let hay = normalize_for_match(line);
     let idx = hay.find(needle)?;
     let prefix = hay[..idx].trim();
@@ -160,13 +183,15 @@ fn line_status(line: &str, needle: &str, entry_time: Option<&str>, refresh_keywo
         MatchStatus::InDoc
     } else if is_refresh_prefix(prefix, refresh_keywords) {
         // 標記帶時間（抓18）：這則在 rundown 上的時間還沒到 18:00，就先當作已在文件、
-        // 等它排進 1800 以後的節次再抓（v0.3.20）。rundown 時間算不出來的照舊直接抓。
-        let not_yet = match (refresh_marker_minute(prefix), entry_time) {
-            (Some(mark), Some(e)) => {
+        // 等它排進 1800 以後的節次再抓（v0.3.20）。卡片沒有累積時間（手動載入）就看它
+        // 所在的節次；連節次都不知道才照舊直接抓。
+        let not_yet = match (refresh_marker_minute(prefix), entry_time, show_minute) {
+            (Some(mark), Some(e), _) => {
                 let h: i64 = e[0..2].parse().unwrap_or(0);
                 let m: i64 = e[3..5].parse().unwrap_or(0);
                 broadcast_minute(h, m) < mark
             }
+            (Some(mark), None, Some(show)) => show < mark,
             _ => false,
         };
         match (entry_time, time_after(&hay[idx + needle.len()..])) {
@@ -253,6 +278,8 @@ pub struct EntryQuery<'a> {
     pub slug: &'a str,
     pub time: &'a str,
     pub title: &'a str,
+    /// 這則所在的節次（`1800`），沒有累積時間時判斷 (抓18) 用；不知道給空字串。
+    pub show: &'a str,
 }
 
 /// 以日期段落為範圍比對一則稿件。
@@ -271,9 +298,9 @@ pub fn match_in_days(
     title_strip: Option<&[String]>,
 ) -> MatchResult {
     if !days.has_dividers {
-        return match_entry(q.slug, q.time, whole_doc, refresh_keywords);
+        return match_entry_in_show(q.slug, q.time, q.show, whole_doc, refresh_keywords);
     }
-    let today = match_entry(q.slug, q.time, days.today.as_deref().unwrap_or(""), refresh_keywords);
+    let today = match_entry_in_show(q.slug, q.time, q.show, days.today.as_deref().unwrap_or(""), refresh_keywords);
     if today.matched_line.is_some() {
         return today;
     }
@@ -290,7 +317,7 @@ pub fn match_in_days(
     (0..lines.len())
         .rev()
         .find_map(|i| {
-            let r = line_status(lines[i], &needle, entry_time.as_deref(), refresh_keywords)?;
+            let r = line_status(lines[i], &needle, entry_time.as_deref(), show_minute(q.show), refresh_keywords)?;
             let doc_title = lines[i + 1..].iter().find(|l| !l.trim().is_empty())?;
             (normalize_title(doc_title, strip) == wanted).then_some(r)
         })
@@ -646,7 +673,13 @@ YH 合成氣象 06：24：02
         assert_eq!(at("18:00:00"), MatchStatus::KeepRefresh, "18 點整就抓");
         assert_eq!(at("18:44:00"), MatchStatus::KeepRefresh);
         assert_eq!(at("00:30:00"), MatchStatus::KeepRefresh, "0100 那節在 23 點之後");
-        // rundown 時間算不出來（手動載入的卡片）：照舊直接抓。
+        // 卡片沒有累積時間（手動載入）：看它所在的節次。
+        let in_show = |show: &str| match_entry_in_show("輝達打異議1200", "", show, doc, &kw).status;
+        assert_eq!(in_show("1500"), MatchStatus::InDoc, "1500 節還沒到 18");
+        assert_eq!(in_show("1800"), MatchStatus::KeepRefresh);
+        assert_eq!(in_show("0100"), MatchStatus::KeepRefresh, "0100 節在 18 之後");
+        // 連節次都不知道：照舊直接抓。
+        assert_eq!(in_show(""), MatchStatus::KeepRefresh);
         assert_eq!(match_entry("輝達打異議1200", "", doc, &kw).status, MatchStatus::KeepRefresh);
     }
 
@@ -843,7 +876,7 @@ UP 北投強風垮1800 SOT 18:10:00 社會
     }
 
     fn q<'a>(slug: &'a str, title: &'a str) -> EntryQuery<'a> {
-        EntryQuery { slug, time: "", title }
+        EntryQuery { slug, time: "", title, show: "" }
     }
 
     fn check(slug: &str, title: &str) -> MatchResult {

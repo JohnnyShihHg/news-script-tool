@@ -1558,6 +1558,9 @@ struct CompareEntry {
     /// 跨天比對用：前一天段落裡同一個 slug，標題也相同才算重播。
     #[serde(default)]
     title: String,
+    /// 這張卡片算在哪一節（`1800`）：沒有累積時間時判斷 (抓18) 用（v0.3.20）。
+    #[serde(default)]
+    show: String,
 }
 
 #[tauri::command]
@@ -1602,7 +1605,7 @@ async fn compare_with_collab_doc(
     let results: Vec<MatchResultDto> = entries
         .iter()
         .map(|e| {
-            let q = EntryQuery { slug: &e.slug, time: &e.time, title: &e.title };
+            let q = EntryQuery { slug: &e.slug, time: &e.time, title: &e.title, show: &e.show };
             let r = match_in_days(q, &days, &doc_text, &cfg.markers.refresh_keywords, title_strip);
             counts[match r.status {
                 MatchStatus::ToCut => 0,

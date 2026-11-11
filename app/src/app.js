@@ -1630,7 +1630,10 @@ async function compareWithCollabDoc({ silent = false } = {}) {
   // headline matches too.
   const entries = targets.map((i) => {
     const f = i.dto[i.kind] ?? i.dto;
-    return { slug: f.slug, time: f.time ?? "", title: i.title ?? "" };
+    // 節次：沒有累積時間的卡片（手動載入）判斷 (抓18) 用。搜尋載入的算在載入當時跟的
+    // 那一節，其他手動卡片算現在這一節。
+    const show = i.inews?.manualFor || i.inews?.show || inewsShow || "";
+    return { slug: f.slug, time: f.time ?? "", title: i.title ?? "", show };
   });
 
   try {
