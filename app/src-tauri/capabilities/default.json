@@ -41,6 +41,8 @@
     "allow-set-inews-credentials",
     "allow-clear-inews-credentials",
     "allow-open-inews-log-folder",
-    "allow-correct-collab-times"
+    "allow-correct-collab-times",
+    "allow-append-decision-log",
+    "core:window:allow-request-user-attention"
   ]
 }

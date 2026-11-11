@@ -40,6 +40,7 @@ fn main() {
             "clear_inews_credentials",
             "open_inews_log_folder",
             "correct_collab_times",
+            "append_decision_log",
         ])),
     )
     .expect("failed to run tauri-build");

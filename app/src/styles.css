@@ -454,3 +454,11 @@ select {
 .badge.not_found { color: var(--muted); background: var(--subtle); }
 .badge.pending { color: var(--warn); background: var(--warn-bg); }
 @media (max-width: 760px) { .ev-output { grid-template-columns: 1fr; } }
+
+/* 未知樣式強制審查（v0.3.15）：蓋在設定視窗之上。 */
+.review-backdrop { z-index: 60; }
+.review-modal { border: 2px solid var(--warn); }
+.review-slug { font-size: 18px; font-weight: 600; margin: 12px 0 4px; }
+.review-reason { color: var(--warn); background: var(--warn-bg); padding: 6px 10px; border-radius: 6px; }
+.review-body { color: var(--muted); white-space: pre-wrap; }
+.review-more { color: var(--muted); font-size: 13px; margin-left: auto; }

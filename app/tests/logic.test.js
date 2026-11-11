@@ -1017,3 +1017,22 @@ test("沒有任何內容時 pieces 是空的", () => {
   assert.deepEqual(r.pieces, []);
   assert.deepEqual(L.writeParts(undefined, () => "", toText), []);
 });
+
+// --- 未知樣式強制審查（v0.3.15）---
+
+test("only new unknown-style iNEWS cards are queued for review, once per version", () => {
+  const cards = L.inewsItemsFromSummary(inewsSummary("1200", [
+    { slug: "甲", key: "A:1", version: "v1" },
+    { slug: "乙", key: "A:2", version: "v1" },
+    { slug: "丙", key: "A:3", version: "v1" },
+  ]));
+  cards[0].bucket = "unknown";
+  cards[2].bucket = "unknown";
+  const seen = new Set(["A:3|v1"]);
+  assert.deepEqual(L.unknownReviewTargets(cards, seen), [{ key: "A:1|v1", id: "inews-A:1" }]);
+  // 內容改過（新版本）要重新審查。
+  cards[2].inews.version = "v2";
+  assert.deepEqual(L.unknownReviewTargets(cards, seen).map((t) => t.key), ["A:1|v1", "A:3|v2"]);
+  // 資料夾匯入的卡片（沒有 inews）不跳審查。
+  assert.deepEqual(L.unknownReviewTargets([{ bucket: "unknown", id: "entry-0" }], new Set()), []);
+});

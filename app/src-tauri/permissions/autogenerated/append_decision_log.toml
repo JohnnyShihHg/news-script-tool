@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-append-decision-log"
+description = "Enables the append_decision_log command without any pre-configured scope."
+commands.allow = ["append_decision_log"]
+
+[[permission]]
+identifier = "deny-append-decision-log"
+description = "Denies the append_decision_log command without any pre-configured scope."
+commands.deny = ["append_decision_log"]

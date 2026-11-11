@@ -490,6 +490,11 @@ pub struct InewsConfig {
     /// 定時複查（v0.3.11，分鐘，0 = 關閉）：這個播出日已經結束、程式跟過的節次，
     /// 每隔這麼久重讀一次：時間校正，補掃後才出現的已播出稿寫到最下面。
     pub recheck_interval_minutes: u32,
+    /// 未知樣式強制審查（v0.3.15）：自動刷新時新出現的未知樣式跳出審查視窗（寫入／略過），
+    /// 處理完才關。
+    pub unknown_review: bool,
+    /// 審查視窗開著時的提示音（每 30 秒一次，直到處理）。
+    pub unknown_review_sound: bool,
 }
 
 impl Default for InewsConfig {
@@ -530,13 +535,15 @@ impl Default for InewsConfig {
             anomaly_quiet_rounds: 3,
             anomaly_max_cooldown_minutes: 15,
             recheck_interval_minutes: 30,
+            unknown_review: true,
+            unknown_review_sound: true,
         }
     }
 }
 
 /// Bump whenever new entries are added to a list field that users already have on
 /// disk. See `migrate`.
-pub const CURRENT_CONFIG_VERSION: u32 = 15;
+pub const CURRENT_CONFIG_VERSION: u32 = 16;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -645,6 +652,8 @@ pub fn migrate(cfg: &mut Config) -> bool {
     // v14 (v0.3.11): filter.no_body_pass_terms（氣象沒內文也寫入）上面 union 補進去。
     // v15 (v0.3.12): allowed_styles 加「真連」（上面 union 補進去）。沒有這一版，
     // 已經開過設定頁的人存下來的清單會蓋掉新預設，真連永遠不會被放行。
+
+    // v16 (v0.3.15): [inews] 加 unknown_review / unknown_review_sound，serde 預設補上。
 
     cfg.config_version = CURRENT_CONFIG_VERSION;
     true
@@ -1030,5 +1039,6 @@ theme = "warm"
         assert_eq!(cfg.inews.anomaly_quiet_rounds, 3);
         assert_eq!(cfg.inews.anomaly_max_cooldown_minutes, 15);
         assert_eq!(cfg.inews.recheck_interval_minutes, 30);
+        assert!(cfg.inews.unknown_review && cfg.inews.unknown_review_sound);
     }
 }

@@ -775,6 +775,21 @@
     return parts;
   }
 
+  /**
+   * 未知樣式強制審查（v0.3.15）：還沒審查、也還沒排進佇列的未知樣式 iNEWS 卡片，依畫面
+   * 順序。key 是 story key＋版本：稿子內容改過（新版本）要重新審查。
+   */
+  function unknownReviewTargets(items, seen) {
+    const out = [];
+    for (const i of items ?? []) {
+      if (i.bucket !== "unknown" || !i.inews) continue;
+      const key = `${i.inews.key}|${i.inews.version}`;
+      if (seen?.has(key) || out.some((o) => o.key === key)) continue;
+      out.push({ key, id: i.id });
+    }
+    return out;
+  }
+
   /** A card held back this round (等確認 / 冷卻 / 可疑) -> its label, or "" (v0.3.11). */
   function holdLabel(item) {
     return { confirm: "⏳ 等下一輪確認", cooldown: "⏸ rundown 時間異常，暫停寫入", suspect: "⚠ 可疑：時間異常，不寫入" }[
@@ -801,6 +816,7 @@
 
   return {
     writeParts,
+    unknownReviewTargets,
     holdLabel,
     findMisfires,
     inewsItemsFromSummary,

@@ -358,6 +358,19 @@ async fn import_inews(
     Ok(dto)
 }
 
+/// 前端的決策寫進決策紀錄（v0.3.15：未知樣式審查）。只收一行，太長就截斷。
+#[tauri::command]
+fn append_decision_log(window: tauri::Window, line: String) -> Result<(), String> {
+    require_main_window(&window)?;
+    let line: String = line.replace(['\r', '\n'], " ").trim().chars().take(500).collect();
+    if line.is_empty() {
+        return Ok(());
+    }
+    let dir = inews_log_dir().ok_or_else(|| "找不到紀錄資料夾路徑".to_string())?;
+    inews::append_log(&dir, &line);
+    Ok(())
+}
+
 /// 「開啟紀錄資料夾」：在檔案總管打開決策紀錄所在的資料夾（沒有就先建立）。
 #[tauri::command]
 fn open_inews_log_folder(window: tauri::Window) -> Result<String, String> {
@@ -1616,7 +1629,8 @@ fn main() {
             set_inews_credentials,
             clear_inews_credentials,
             open_inews_log_folder,
-            correct_collab_times
+            correct_collab_times,
+            append_decision_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

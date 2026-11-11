@@ -37,6 +37,7 @@ const {
   holdLabel,
   findMisfires,
   writeParts,
+  unknownReviewTargets,
   diffInewsVersions,
   writtenKey,
   isPendingWrite,
@@ -949,6 +950,7 @@ async function inewsRound() {
     updateStatsFromItems();
     renderFunnel();
     render();
+    queueUnknownReviews();
     inewsStatus(
       describeInewsRound(meta) +
         (added.length || changed.length ? `\n本輪新增 ${added.length} 則、內容變動 ${changed.length} 則。` : ""),
@@ -1150,6 +1152,149 @@ async function writeInewsItems(ready) {
     }
     stopInewsAuto(`⚠ 寫入協作文件失敗，自動刷新已停止：${err}\n請確認協作工具視窗已開啟並登入。`);
   }
+}
+
+// --- 未知樣式強制審查（v0.3.15）---
+//
+// 自動刷新時新出現的未知樣式（沒看過的 story key＋版本）排進佇列，一次跳一則擋住畫面
+// 的審查視窗：寫入或略過，處理完才關。開窗時響一次、之後每 30 秒響一次，App 不在前景
+// 時工作列閃爍。使用者處理的是播出過的稿，不是直播中，所以擋住畫面可以接受。
+
+/** 已經審查過或排進佇列的 `${key}|${version}`。 */
+const unknownSeen = new Set();
+const unknownQueue = [];
+/** 目前審查中的 { key, id }。 */
+let reviewing = null;
+let reviewBeepTimer = null;
+let audioCtx = null;
+
+function logDecision(line) {
+  invoke("append_decision_log", { line }).catch(() => {});
+}
+
+function queueUnknownReviews() {
+  if (inewsCfg.unknown_review === false) return;
+  for (const t of unknownReviewTargets(items, unknownSeen)) {
+    unknownSeen.add(t.key);
+    unknownQueue.push(t);
+    const item = items.find((x) => x.id === t.id);
+    if (item) {
+      const f = item.dto[item.kind] ?? item.dto;
+      logDecision(`[未知樣式] ${f.slug} 樣式「${f.style || "空白"}」`);
+    }
+  }
+  showNextUnknownReview();
+}
+
+function reviewBeep() {
+  if (inewsCfg.unknown_review_sound === false) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume?.();
+    const t = audioCtx.currentTime;
+    for (const d of [0, 0.28]) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = 880;
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      gain.gain.setValueAtTime(0.0001, t + d);
+      gain.gain.exponentialRampToValueAtTime(0.3, t + d + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.2);
+      osc.start(t + d);
+      osc.stop(t + d + 0.22);
+    }
+  } catch {
+    /* 沒有音效就只靠畫面 */
+  }
+}
+
+function flashTaskbar() {
+  try {
+    const w = window.__TAURI__?.window;
+    w?.getCurrentWindow?.().requestUserAttention(w.UserAttentionType?.Critical ?? 1);
+  } catch {
+    /* 閃不了也不影響審查 */
+  }
+}
+
+function showNextUnknownReview() {
+  if (reviewing) {
+    renderUnknownReview();
+    return;
+  }
+  while (unknownQueue.length && !reviewing) {
+    const t = unknownQueue.shift();
+    // 排隊期間稿子被抽掉或改成別的分類（例如比對後變成已在文件）就不用審了。
+    if (items.some((x) => x.id === t.id && x.bucket === "unknown")) reviewing = t;
+  }
+  if (!reviewing) return;
+  renderUnknownReview();
+  reviewBeep();
+  flashTaskbar();
+  clearInterval(reviewBeepTimer);
+  reviewBeepTimer = setInterval(reviewBeep, 30_000);
+}
+
+function renderUnknownReview() {
+  const item = items.find((x) => x.id === reviewing?.id);
+  if (!item) {
+    // 審查中的卡片不見了（換節、稿子被抽掉）：換下一則。
+    closeUnknownReview();
+    showNextUnknownReview();
+    return;
+  }
+  let box = el("unknownReview");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "unknownReview";
+    box.className = "modal-backdrop review-backdrop";
+    document.body.appendChild(box);
+  }
+  const f = item.dto[item.kind] ?? item.dto;
+  const reasons = (f.warnings ?? []).join("；");
+  const body = (item.body ?? "").trim();
+  box.innerHTML = `
+    <div class="modal review-modal" role="alertdialog" aria-modal="true" aria-labelledby="reviewTitle">
+      <div class="modal-head"><h2 id="reviewTitle">⚠ 未知樣式，需要人工審查</h2></div>
+      <div class="modal-body">
+        <p class="review-slug">${escapeHtml(f.slug)}</p>
+        <p>樣式：${escapeHtml(f.style || "（空白）")}　累積時間：${escapeHtml(f.time || "—")}</p>
+        ${reasons ? `<p class="review-reason">${escapeHtml(reasons)}</p>` : ""}
+        ${item.title ? `<p><b>${escapeHtml(item.title)}</b></p>` : ""}
+        <p class="review-body">${escapeHtml(body.length > 160 ? `${body.slice(0, 160)}…` : body || "（沒有內文）")}</p>
+      </div>
+      <div class="modal-foot">
+        <button id="reviewWrite" class="primary">寫入</button>
+        <button id="reviewSkip">略過</button>
+        ${unknownQueue.length ? `<span class="review-more">還有 ${unknownQueue.length} 則待審查</span>` : ""}
+      </div>
+    </div>`;
+  box.querySelector("#reviewWrite").addEventListener("click", () => resolveUnknownReview(true));
+  box.querySelector("#reviewSkip").addEventListener("click", () => resolveUnknownReview(false));
+  box.style.display = "flex";
+}
+
+function resolveUnknownReview(write) {
+  const item = items.find((x) => x.id === reviewing?.id);
+  if (item) {
+    item.included = write;
+    // 比對每輪都會依 defaultIncluded 重算勾選：照審查結果，不要被洗掉。
+    item.defaultIncluded = write;
+    logDecision(`[審查] ${slugOf(item)} → ${write ? "寫入" : "略過"}`);
+  }
+  closeUnknownReview();
+  renderFunnel();
+  render();
+  showNextUnknownReview();
+}
+
+function closeUnknownReview() {
+  reviewing = null;
+  clearInterval(reviewBeepTimer);
+  reviewBeepTimer = null;
+  const box = el("unknownReview");
+  if (box) box.style.display = "none";
 }
 
 /** 協作工具還在載入或沒連上時，讀取文件的腳本回傳的錯誤帶這個記號（v0.3.15）。 */
@@ -1567,6 +1712,8 @@ function settingsModalHtml(config, apiStatus, inewsCred) {
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.fill_computed_time" ${inewsSettings.fill_computed_time ? "checked" : ""} /> 累積時間空白時填入自動算出的時間（關掉就跟手動匯出完全相同）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.auto_write" ${inewsSettings.auto_write ? "checked" : ""} /> 全自動寫入協作文件（不勾 = 產生關鍵字後等你按「確認寫入」）</label>
             <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.correct_time" ${inewsSettings.correct_time !== false ? "checked" : ""} /> 時間校正：協作文件裡已寫入的稿，時間跟著 rundown 改</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.unknown_review" ${inewsSettings.unknown_review !== false ? "checked" : ""} /> 未知樣式強制審查：自動刷新時新出現的未知樣式跳出視窗，選寫入或略過</label>
+            <label class="checkbox-row"><input type="checkbox" data-cfg-bool="inews.unknown_review_sound" ${inewsSettings.unknown_review_sound !== false ? "checked" : ""} /> 審查視窗的提示音（每 30 秒響一次，直到處理）</label>
             <div class="field"><label>時間校正：同一個新時間連續幾輪都一樣才改</label><input type="number" min="1" data-cfg-num="inews.correct_time_stable_rounds" value="${inewsSettings.correct_time_stable_rounds ?? 2}" /></div>
             <div class="field"><label>時間校正：新舊時間差超過幾分鐘就不改（疑似挪稿重播）</label><input type="number" min="1" data-cfg-num="inews.correct_time_max_delta_minutes" value="${inewsSettings.correct_time_max_delta_minutes ?? 10}" /></div>
             <div class="field"><label>寫入確認：新稿連續幾輪都判定已播出才寫入（1 = 不等）</label><input type="number" min="1" data-cfg-num="inews.write_stable_rounds" value="${inewsSettings.write_stable_rounds ?? 2}" /></div>
