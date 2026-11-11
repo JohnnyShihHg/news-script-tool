@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.0.5
-// @description  擋住協作工具的三個毛病：改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
+// @version      1.1.0
+// @description  擋住協作工具的毛病：新分頁讀不完要手動重整、改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
 // @run-at       document-idle
@@ -30,6 +30,7 @@
     highlightMinGapMs: 1500,   // 重複行螢光最快多久重畫一次
     scrollGuardMs: 1200,       // 使用者停止捲動後多久內的程式捲動視為「被拉走」
     scrollGuardMinJumpPx: 80,  // 跳超過這個距離才攔
+    coldStartReloadSeconds: 20, // 新開分頁超過這麼久還在「正在載入共同文章」就自動重整一次。0 = 關閉
     autoReloadAfterStuckSeconds: 0, // 0 = 關閉。設成例如 120 就會在卡住兩分鐘後自動重載
     reloadCooldownMinutes: 5,  // 兩次自動重載至少間隔這麼久，避免伺服器掛掉時無限重載
     debugScroll: false,        // 開了會在 console 印出每一次程式捲動的來源堆疊
@@ -94,6 +95,92 @@
   //
   // 頁面本身就有狀態文字（已同步／待同步 N 筆／正在載入共同文章／連線中），
   // 但它很小、不會叫。卡住時整頁加紅框，讓靜默失敗變成躲不掉的警告。
+  // ---- 0. 冷啟動自救（v1.1.0）----------------------------------------------
+  //
+  // 新開的分頁要把整份共同文章讀下來，狀態停在「正在載入共同文章」。常常就這樣卡住、
+  // 永遠讀不完，要手動重新整理一次才會好（重整會重跑一次載入流程）。這裡在開頁後
+  // coldStartReloadSeconds 秒還卡在「正在載入共同文章」、而且這段時間沒有打字時，自動
+  // 重整一次。冷啟動時還沒有任何編輯，重整不會掉資料。
+  //
+  // 一個分頁只自動重整一次：重整後還是卡住就不再重整（紅框照樣提示），避免本來就讀
+  // 很久的環境被一直重整。每次讀完花幾秒記在 localStorage（collabGuardColdLoads，
+  // 最近 20 筆），之後照實際數字調整秒數。
+  //
+  // 這一段不等編輯器出現就開始看：卡住的時候編輯器可能根本還沒出來。只認「正在載入
+  // 共同文章」這段協作工具才有的文字，30 秒內都沒看到狀態文字就當作不是協作工具，停止。
+  const COLD_RELOAD_KEY = "collabGuardColdReloadAt";
+  const COLD_LOG_KEY = "collabGuardColdLoads";
+  const LOADING_TEXT = "正在載入共同文章";
+  const cold = { seconds: null, reloadedBefore: false, typed: false, sawLoading: false };
+  try {
+    const at = Number(sessionStorage.getItem(COLD_RELOAD_KEY) || 0);
+    cold.reloadedBefore = at > 0 && Date.now() - at < 10 * 60_000;
+  } catch (e) {
+    /* 無痕模式之類的讀不到：當作沒重整過 */
+  }
+  for (const type of ["keydown", "input", "paste", "drop", "compositionstart"]) {
+    window.addEventListener(type, () => { cold.typed = true; }, true);
+  }
+
+  // 頁面的狀態文字沒有固定 id，用文字特徵找：那幾種寫法是 deriveSyncStatus 固定產出的。
+  function findStatusText() {
+    const texts = ["已同步", "同步中", "待同步", LOADING_TEXT, "連線中", "離線"];
+    const nodes = document.querySelectorAll("span, div, small, p");
+    for (const n of nodes) {
+      if (n.children.length) continue;
+      const t = (n.textContent || "").trim();
+      if (texts.some((x) => t.startsWith(x))) return t;
+    }
+    return "";
+  }
+
+  function recordColdLoad(seconds, reloaded) {
+    try {
+      const list = JSON.parse(localStorage.getItem(COLD_LOG_KEY) || "[]");
+      list.push({ at: new Date().toISOString(), seconds, reloaded, afterAutoReload: cold.reloadedBefore });
+      localStorage.setItem(COLD_LOG_KEY, JSON.stringify(list.slice(-20)));
+    } catch (e) {
+      /* 存不進去只少一筆量測 */
+    }
+  }
+
+  function watchColdStart() {
+    const navStart = Date.now() - performance.now();
+    const timer = setInterval(() => {
+      const elapsed = (Date.now() - navStart) / 1000;
+      const status = findStatusText();
+      const loading = status.startsWith(LOADING_TEXT);
+      if (loading) cold.sawLoading = true;
+      if (/^(已同步|同步中|待同步)/.test(status)) {
+        clearInterval(timer);
+        cold.seconds = Math.round(elapsed * 10) / 10;
+        console.info(`[守門員] 冷啟動讀取 ${cold.seconds} 秒${cold.reloadedBefore ? "（自動重整之後）" : ""}`);
+        recordColdLoad(cold.seconds, false);
+        return;
+      }
+      if (
+        loading &&
+        CONFIG.coldStartReloadSeconds > 0 &&
+        elapsed > CONFIG.coldStartReloadSeconds &&
+        !cold.typed &&
+        !cold.reloadedBefore
+      ) {
+        clearInterval(timer);
+        console.warn(`[守門員] 開頁 ${Math.round(elapsed)} 秒還在「${LOADING_TEXT}」，自動重整一次`);
+        recordColdLoad(Math.round(elapsed), true);
+        try {
+          sessionStorage.setItem(COLD_RELOAD_KEY, String(Date.now()));
+        } catch (e) {
+          /* 存不進去也照樣重整；下次可能會再重整一次 */
+        }
+        location.reload();
+        return;
+      }
+      if ((elapsed > 30 && !status && !cold.sawLoading) || elapsed > 600) clearInterval(timer);
+    }, 1000);
+  }
+  watchColdStart();
+
   // 到這裡只定義了函式與狀態，還沒動到頁面。真正啟動要等編輯器出現。
   waitForEditor(startGuard);
 
@@ -115,17 +202,7 @@
     "position:fixed;inset:0;z-index:2147483646;pointer-events:none;border:4px solid #dc2626;display:none";
   document.body.appendChild(alertFrame);
 
-  function readPageStatus() {
-    // 頁面的狀態文字沒有固定 id，用文字特徵找：那幾種寫法是 deriveSyncStatus 固定產出的。
-    const texts = ["已同步", "同步中", "待同步", "正在載入共同文章", "連線中", "離線"];
-    const nodes = document.querySelectorAll("span, div, small, p");
-    for (const n of nodes) {
-      if (n.children.length) continue;
-      const t = (n.textContent || "").trim();
-      if (texts.some((x) => t.startsWith(x))) return t;
-    }
-    return "";
-  }
+  const readPageStatus = findStatusText;
 
   function ago(ts) {
     if (!ts) return "—";
@@ -145,6 +222,7 @@
     hud.innerHTML =
       `<b>守門員</b>　${pageStatus || "（讀不到狀態）"}<br>` +
       `上次推送 ${ago(state.lastPushAt)}・上次收取 ${ago(state.lastPullAt)}` +
+      (cold.seconds !== null ? `<br>開頁讀取 ${cold.seconds} 秒${cold.reloadedBefore ? "（自動重整後）" : ""}` : "") +
       (state.blockedScrolls ? `<br>已擋下 ${state.blockedScrolls} 次捲動跳動` : "") +
       (state.lastError ? `<br><span style="color:#991b1b">${state.lastError}</span>` : "") +
       (stuck && state.stuckSince ? `<br><span style="color:#991b1b">已卡住 ${ago(state.stuckSince)}</span>` : "");

@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fake cold start</title>
+<!-- 守門員冷啟動規則的手動測試頁：?mode=stuck 一直停在載入中；?mode=ok 3 秒後讀完。 -->
+<div id="bar"><span id="s">正在載入共同文章</span></div>
+<div class="ql-editor"><p>測試</p></div>
+<script>
+  const mode = new URLSearchParams(location.search).get("mode") || "stuck";
+  const n = Number(sessionStorage.getItem("fakeLoads") || 0) + 1;
+  sessionStorage.setItem("fakeLoads", String(n));
+  document.title = `loads=${n}`;
+  if (mode === "ok") setTimeout(() => { document.getElementById("s").textContent = "已同步"; }, 3000);
+</script>
+<script src="../collab-guard.user.js"></script>
