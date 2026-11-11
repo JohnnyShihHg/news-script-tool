@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fake stale</title>
+<!-- 守門員「接收停擺」的手動測試頁（秒數調短：停擺 4 秒、至少 3 筆）：
+     ?mode=stale  輪詢一直收到更新，但畫面不變 → 約 6 秒後應該自動重整「一次」（冷卻 10 分鐘）
+     ?mode=ok     收到更新後畫面跟著變 → 不重整、不紅框
+     ?mode=echo   只收到自己剛上傳的更新（上傳完 1 秒內）→ 不算，不重整
+     ?mode=typing 停擺，但一直在打字 → 紅框、不重整
+     測試前在 console 清掉：localStorage.clear(); sessionStorage.clear(); window.name = "" -->
+<div id="bar"><span id="s">已同步</span></div>
+<div class="ql-editor"><p>測試</p></div>
+<script>
+  window.__collabGuardTestConfig = { staleSeconds: 4, staleMinUpdates: 3 };
+  const mode = new URLSearchParams(location.search).get("mode") || "stale";
+  const n = Number(localStorage.getItem("fakeLoads") || 0) + 1;
+  localStorage.setItem("fakeLoads", String(n));
+  document.title = `loads=${n}`;
+  let cursor = 100;
+  // 假的伺服器：GET 每次回一筆小更新，POST 回 ok。
+  window.fetch = async (input, init) => {
+    const isPost = (init?.method || "GET").toUpperCase() === "POST";
+    const body = isPost ? {} : { updates: [{ update: "AAEC" }], nextCursor: ++cursor, hasMore: false };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  // 頁面的輪詢；guard 載入後會包住 window.fetch，所以要每次呼叫時才取 window.fetch。
+  setInterval(async () => {
+    if (mode === "echo") await window.fetch("/api/sync", { method: "POST" });
+    const res = await window.fetch(`/api/sync?room=x&after=${cursor}`);
+    await res.json();
+    if (mode === "ok") document.querySelector(".ql-editor p").textContent = `測試 ${cursor}`;
+  }, 850);
+  if (mode === "typing") {
+    setInterval(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" })), 2000);
+  }
+</script>
+<script src="../collab-guard.user.js"></script>

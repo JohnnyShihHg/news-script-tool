@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.1.0
+// @version      1.2.0
 // @description  擋住協作工具的毛病：新分頁讀不完要手動重整、改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
@@ -33,6 +33,10 @@
     coldStartReloadSeconds: 20, // 新開分頁超過這麼久還在「正在載入共同文章」就自動重整一次。0 = 關閉
     autoReloadAfterStuckSeconds: 0, // 0 = 關閉。設成例如 120 就會在卡住兩分鐘後自動重載
     reloadCooldownMinutes: 5,  // 兩次自動重載至少間隔這麼久，避免伺服器掛掉時無限重載
+    staleSeconds: 90,          // 收到別人的更新、畫面卻一直沒變超過這麼久，就當作「接收停擺」
+    staleMinUpdates: 3,        // 而且這段時間至少收到這麼多筆（避免一兩筆不顯示的小更新誤判）
+    staleReload: true,         // 接收停擺時，你 30 秒沒打字就自動重整（false = 只顯示紅框）
+    staleReloadCooldownMinutes: 10, // 停擺重整兩次至少間隔這麼久
     debugScroll: false,        // 開了會在 console 印出每一次程式捲動的來源堆疊
 
     showHud: false,            // 右下角那個狀態小框。關掉仍然會紅框示警
@@ -40,6 +44,8 @@
     keepLineButtonsOffText: true, // 行動作列蓋到文字時往左挪開
     fixOutlineCollapse: true,  // 修他「文件分頁」漢堡收合後寬度沒縮的 bug
   };
+  // 測試頁用：在載入腳本前設定 window.__collabGuardTestConfig 就能把秒數調短。
+  if (window.__collabGuardTestConfig) Object.assign(CONFIG, window.__collabGuardTestConfig);
 
   const RELOAD_MARK_KEY = "collabGuardReloadedAt";
   const SCROLL_MARK_KEY = "collabGuardScrollTop";
@@ -79,6 +85,12 @@
     allowScrollUntil: 0,
   };
 
+  // 接收停擺偵測用（第 7 節）。count／since：從畫面最後一次跟著更新變動之後，累積收到幾筆
+  // 「套上去畫面卻沒變」的更新、第一筆是什麼時候。
+  const STALE_RELOAD_KEY = "collabGuardStaleReloadAt";
+  const STALE_LOG_KEY = "collabGuardStaleEvents";
+  const stale = { count: 0, since: 0, lastDomAt: Date.now(), cursor: "" };
+
   // ---- 1. 推送看門狗 ----------------------------------------------------
   //
   // 補送的是「伺服器還缺的部分」，沒缺就什麼都不送，所以多戳沒有副作用。
@@ -117,33 +129,35 @@
   // 封鎖時 sessionStorage 存不進也讀不到，只靠它的話每 20 秒就會重整一次、停不下來；
   // window.name 跟著分頁走、重新整理後還在，不受儲存封鎖影響。頁面原本的 window.name
   // 內容保留，只附加／替換我們這一段。
-  const COLD_NAME_RE = /\s*collabGuardColdReloadAt=(\d+)/;
-  function readColdMark() {
+  // 接收停擺的重整（第 7 節）也用同一套記號，只是 key 不同。
+  function readReloadMark(key) {
     let at = 0;
     try {
-      at = Number(sessionStorage.getItem(COLD_RELOAD_KEY) || 0);
+      at = Number(sessionStorage.getItem(key) || 0);
     } catch (e) {
       /* 儲存被封鎖：改看 window.name */
     }
     if (!at) {
-      const m = String(window.name || "").match(COLD_NAME_RE);
+      const m = String(window.name || "").match(new RegExp(`\\s*${key}=(\\d+)`));
       if (m) at = Number(m[1]);
     }
     return at;
   }
-  function writeColdMark(at) {
+  function writeReloadMark(key, at) {
     try {
-      sessionStorage.setItem(COLD_RELOAD_KEY, String(at));
+      sessionStorage.setItem(key, String(at));
     } catch (e) {
       /* 儲存被封鎖：還有 window.name 那份 */
     }
     try {
-      const rest = String(window.name || "").replace(COLD_NAME_RE, "");
-      window.name = `${rest ? `${rest} ` : ""}collabGuardColdReloadAt=${at}`;
+      const rest = String(window.name || "").replace(new RegExp(`\\s*${key}=(\\d+)`), "");
+      window.name = `${rest ? `${rest} ` : ""}${key}=${at}`;
     } catch (e) {
       /* 兩份都存不進去的話，最壞是下一次開頁再重整一次 */
     }
   }
+  const readColdMark = () => readReloadMark(COLD_RELOAD_KEY);
+  const writeColdMark = (at) => writeReloadMark(COLD_RELOAD_KEY, at);
   {
     const at = readColdMark();
     cold.reloadedBefore = at > 0 && Date.now() - at < 10 * 60_000;
@@ -336,7 +350,9 @@
 
   function refreshHud() {
     const pageStatus = readPageStatus();
-    const stuck = /待同步|正在載入共同文章|連線中|離線/.test(pageStatus);
+    const receiveStalled = isReceiveStalled();
+    const stuck = receiveStalled || /待同步|正在載入共同文章|連線中|離線/.test(pageStatus);
+    if (receiveStalled) maybeReloadForStale(pageStatus);
     if (stuck) {
       if (!state.stuckSince) state.stuckSince = Date.now();
     } else {
@@ -350,6 +366,9 @@
       (cacheInfo.summary ? `<br>${cacheInfo.summary}` : "") +
       (state.blockedScrolls ? `<br>已擋下 ${state.blockedScrolls} 次捲動跳動` : "") +
       (state.lastError ? `<br><span style="color:#991b1b">${state.lastError}</span>` : "") +
+      (receiveStalled
+        ? `<br><span style="color:#991b1b">收到 ${stale.count} 筆別人的更新，畫面都沒變（${ago(stale.since)}起）</span>`
+        : "") +
       (stuck && state.stuckSince ? `<br><span style="color:#991b1b">已卡住 ${ago(state.stuckSince)}</span>` : "");
 
     if (
@@ -388,7 +407,11 @@
         if (isSync) {
           if (res.ok) {
             if (isWrite) state.lastPushAt = Date.now();
-            else state.lastPullAt = Date.now();
+            else {
+              state.lastPullAt = Date.now();
+              // 另外讀一份副本看收到幾筆更新；頁面自己讀的那份不受影響。
+              res.clone().json().then(noteIncoming).catch(() => {});
+            }
             state.lastError = "";
           } else {
             state.lastError = `同步 HTTP ${res.status}`;
@@ -402,6 +425,101 @@
       },
     );
   };
+
+  // ---- 7. 接收停擺偵測（v1.2.0）--------------------------------------------
+  //
+  // 11/11 實際遇到：Chrome 分頁停在 11:05 的內容，App 的協作視窗已經到 15:15，兩邊都寫
+  // 「已同步」。量了 60 秒：輪詢全部成功、伺服器進度編號有往前、收到 3 筆別人的更新，
+  // 但編輯器畫面一次都沒變。也就是**收得到、套不上去**。
+  //
+  // 推測（沒辦法在頁面外驗證）：協作工具用 Yjs，更新只要漏掉一筆，之後所有依賴它的更新
+  // 都會卡在「等那一筆」、永遠不顯示；頁面的狀態只看連線和待上傳，所以一直是綠燈。
+  // 重整會從伺服器重新讀整份，就好了。
+  //
+  // 偵測：輪詢收到別人的更新後 1.5 秒內，編輯器畫面沒有任何變動，就記一筆「沒套上」。
+  // 畫面一有不是自己打字造成的變動就歸零。累積 staleMinUpdates 筆、持續 staleSeconds 秒
+  // 就判定停擺：紅框，並在你 30 秒沒打字、頁面沒有待上傳的東西時自動重整。
+  //
+  // 排除：自己剛上傳完 3 秒內收到的（伺服器把自己的更新送回來，套上去本來就不會變）、
+  // 分批讀取中（hasMore）、很大的一筆（整份快照，套上去也不會變）。
+  function noteIncoming(payload) {
+    if (!payload || payload.hasMore) return;
+    const ups = Array.isArray(payload.updates) ? payload.updates : [];
+    const n = ups.filter((e) => typeof e?.update === "string" && e.update.length < 20_000).length;
+    if (!n) return;
+    if (Date.now() - state.lastPushAt < 3000) return;
+    const arrivedAt = Date.now();
+    const cursor = String(payload.nextCursor ?? "");
+    setTimeout(() => {
+      if (stale.lastDomAt >= arrivedAt) return; // 畫面有跟著變：正常
+      if (!stale.count) stale.since = arrivedAt;
+      stale.count += n;
+      stale.cursor = cursor;
+    }, 1500);
+  }
+
+  function watchEditorChanges() {
+    const editor = document.querySelector(".ql-editor");
+    if (!editor) return;
+    new MutationObserver(() => {
+      // 自己打字造成的變動不算「別人的更新有顯示出來」。
+      if (Date.now() - state.lastUserInputAt < 1000) return;
+      stale.lastDomAt = Date.now();
+      stale.count = 0;
+      stale.since = 0;
+    }).observe(editor, { childList: true, subtree: true, characterData: true });
+  }
+  watchEditorChanges();
+
+  function isReceiveStalled() {
+    return (
+      stale.count >= CONFIG.staleMinUpdates &&
+      stale.since > 0 &&
+      Date.now() - stale.since >= CONFIG.staleSeconds * 1000
+    );
+  }
+
+  function recordStale(reloaded) {
+    try {
+      const list = JSON.parse(localStorage.getItem(STALE_LOG_KEY) || "[]");
+      list.push({
+        at: new Date().toISOString(),
+        updates: stale.count,
+        seconds: Math.round((Date.now() - stale.since) / 1000),
+        cursor: stale.cursor,
+        reloaded,
+      });
+      localStorage.setItem(STALE_LOG_KEY, JSON.stringify(list.slice(-20)));
+    } catch (e) {
+      /* 存不進去只少一筆紀錄 */
+    }
+  }
+
+  let staleLogged = false;
+  function maybeReloadForStale(pageStatus) {
+    const canReload =
+      CONFIG.staleReload &&
+      pageStatus.startsWith("已同步") && // 有待上傳的東西時不重整，免得掉資料
+      Date.now() - state.lastUserInputAt > 30_000 &&
+      Date.now() - readReloadMark(STALE_RELOAD_KEY) > CONFIG.staleReloadCooldownMinutes * 60_000;
+    if (!canReload) {
+      if (!staleLogged) {
+        staleLogged = true;
+        console.warn(`[守門員] 接收停擺：收到 ${stale.count} 筆更新，畫面沒變`);
+        recordStale(false);
+      }
+      return;
+    }
+    console.warn(`[守門員] 接收停擺：收到 ${stale.count} 筆更新，畫面沒變，自動重整`);
+    recordStale(true);
+    writeReloadMark(STALE_RELOAD_KEY, Date.now());
+    try {
+      if (scroller) sessionStorage.setItem(SCROLL_MARK_KEY, String(scroller.scrollTop));
+    } catch (e) {
+      /* 存不進去只是重整後回到頁首 */
+    }
+    location.reload();
+  }
 
   // ---- 4. 重複行螢光限流 --------------------------------------------------
   //
