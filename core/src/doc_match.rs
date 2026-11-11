@@ -122,6 +122,34 @@ fn is_refresh_prefix(prefix: &str, refresh_keywords: &[String]) -> bool {
     }) || BRACKET.captures_iter(prefix).any(|c| SHORT_NUMBER.is_match(&c[1]))
 }
 
+/// 時間換成「播出日裡的第幾分鐘」：02:00 是一天的開始（0100 那節收棚，留到 02:00 是
+/// 給延棚用的），所以 00:30 排在 23:00 後面。`25` 點＝隔天 01:00 也照算。
+fn broadcast_minute(hour: i64, minute: i64) -> i64 {
+    (hour * 60 + minute - 120).rem_euclid(24 * 60)
+}
+
+/// 抓新標記帶的時間（v0.3.20）：`(抓18)`、`抓 18後`、`抓新 20後`、`(抓1830)`、不寫抓的
+/// `(19)`／`(X/19)`／`(25)`。回傳播出日裡的第幾分鐘；沒有時間（`(抓新)`、`(BS)`）回 None。
+///
+/// 1～2 位數是整點（25＝隔天 01:00），3～4 位數是 HHMM（`抓1830`＝18:30）。不寫「抓」的
+/// 只認括號裡 1～2 位數 —— `(2100)` 本來就不是抓新標記，這裡不改。
+fn refresh_marker_minute(prefix: &str) -> Option<i64> {
+    static GRAB: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"抓\s*新?\s*(\d{1,4})(?:\D|$)").unwrap());
+    static BRACKET: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\(([^()]*)\)").unwrap());
+    static SHORT_NUMBER: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"(?:^|\D)(\d{1,2})(?:\D|$)").unwrap());
+    let digits = GRAB.captures(prefix).map(|c| c[1].to_string()).or_else(|| {
+        BRACKET
+            .captures_iter(prefix)
+            .find_map(|b| SHORT_NUMBER.captures(&b[1]).map(|c| c[1].to_string()))
+    })?;
+    let n: i64 = digits.parse().ok()?;
+    let (hour, minute) = if digits.len() <= 2 { (n, 0) } else { (n / 100, n % 100) };
+    (hour <= 30 && minute < 60).then(|| broadcast_minute(hour, minute))
+}
+
 /// How one doc line reads for the slug `needle` (already normalized), or None when
 /// the slug is not on it.
 fn line_status(line: &str, needle: &str, entry_time: Option<&str>, refresh_keywords: &[String]) -> Option<MatchResult> {
@@ -131,8 +159,19 @@ fn line_status(line: &str, needle: &str, entry_time: Option<&str>, refresh_keywo
     let status = if prefix.is_empty() {
         MatchStatus::InDoc
     } else if is_refresh_prefix(prefix, refresh_keywords) {
+        // 標記帶時間（抓18）：這則在 rundown 上的時間還沒到 18:00，就先當作已在文件、
+        // 等它排進 1800 以後的節次再抓（v0.3.20）。rundown 時間算不出來的照舊直接抓。
+        let not_yet = match (refresh_marker_minute(prefix), entry_time) {
+            (Some(mark), Some(e)) => {
+                let h: i64 = e[0..2].parse().unwrap_or(0);
+                let m: i64 = e[3..5].parse().unwrap_or(0);
+                broadcast_minute(h, m) < mark
+            }
+            _ => false,
+        };
         match (entry_time, time_after(&hay[idx + needle.len()..])) {
             (Some(e), Some(l)) if e == l => MatchStatus::InDoc,
+            _ if not_yet => MatchStatus::InDoc,
             _ => MatchStatus::KeepRefresh,
         }
     } else {
@@ -593,6 +632,55 @@ YH 合成氣象 06：24：02
             let r = match_slug("合成抓節次1800", line, &refresh());
             assert_eq!(r.status, MatchStatus::Removed, "{line}");
         }
+    }
+
+    #[test]
+    fn a_grab_mark_with_an_hour_waits_until_the_story_airs_at_or_after_that_hour() {
+        // v0.3.20：(抓18) 輝達打異議1200 —— 排在 18:00 以前的節次先不抓。
+        let kw = crate::config::MarkersConfig::default().refresh_keywords;
+        let doc = "(抓18)輝達打異議1200 SOT 12:47:58 國\n";
+        let at = |time: &str| match_entry("輝達打異議1200", time, doc, &kw).status;
+        assert_eq!(at("12:47:58"), MatchStatus::InDoc, "同時間＝就是那一版");
+        assert_eq!(at("14:20:00"), MatchStatus::InDoc, "還沒到 18 點，先等");
+        assert_eq!(at("17:59:59"), MatchStatus::InDoc);
+        assert_eq!(at("18:00:00"), MatchStatus::KeepRefresh, "18 點整就抓");
+        assert_eq!(at("18:44:00"), MatchStatus::KeepRefresh);
+        assert_eq!(at("00:30:00"), MatchStatus::KeepRefresh, "0100 那節在 23 點之後");
+        // rundown 時間算不出來（手動載入的卡片）：照舊直接抓。
+        assert_eq!(match_entry("輝達打異議1200", "", doc, &kw).status, MatchStatus::KeepRefresh);
+    }
+
+    #[test]
+    fn every_way_of_writing_a_grab_hour_is_understood() {
+        let kw = crate::config::MarkersConfig::default().refresh_keywords;
+        // (寫法, 剛好沒到, 剛好到)
+        let cases = [
+            ("(抓18)", "17:59:00", "18:00:00"),
+            ("抓18 ", "17:59:00", "18:00:00"),
+            ("(抓 18)", "17:59:00", "18:00:00"),
+            ("抓18後 ", "17:59:00", "18:00:00"),
+            ("（抓１８）", "17:59:00", "18:00:00"),
+            ("(19)", "18:59:00", "19:00:00"),
+            ("(X/19)", "18:59:00", "19:00:00"),
+            ("抓新 20後(合成事務所YT) ", "19:59:00", "20:00:00"),
+            ("(抓1830)", "18:29:00", "18:30:00"),
+            ("(抓23)", "22:59:00", "00:30:00"),
+            ("(25)", "00:59:00", "01:00:00"),
+            ("(抓0)", "23:59:00", "00:00:00"),
+        ];
+        for (mark, before, after) in cases {
+            let doc = format!("{mark}合成抓節次1200 SOT 12:00:00\n");
+            assert_eq!(match_entry("合成抓節次1200", before, &doc, &kw).status, MatchStatus::InDoc, "{mark} {before}");
+            assert_eq!(match_entry("合成抓節次1200", after, &doc, &kw).status, MatchStatus::KeepRefresh, "{mark} {after}");
+        }
+        // 沒有時間的標記：時間不同就抓（不變）。
+        for mark in ["(抓新)", "(BS)", "抓新 "] {
+            let doc = format!("{mark}合成抓節次1200 SOT 12:00:00\n");
+            assert_eq!(match_entry("合成抓節次1200", "12:30:00", &doc, &kw).status, MatchStatus::KeepRefresh, "{mark}");
+        }
+        // (2100) 沒有「抓」：本來就不是抓新標記，不變。
+        let doc = "(2100)合成抓節次1200 SOT 12:00:00\n";
+        assert_eq!(match_entry("合成抓節次1200", "22:00:00", doc, &kw).status, MatchStatus::Removed);
     }
 
     #[test]
