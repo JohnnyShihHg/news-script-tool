@@ -975,7 +975,14 @@ async function inewsRound() {
     noteInewsRound(closedShows, programDividers, meta);
     // Restarted mid-show: the backend picked up the show it was following, so the
     // divider for it is not written a second time (v0.3.5).
-    if (meta.resumed_show && !lastWrittenShow) lastWrittenShow = meta.resumed_show;
+    //
+    // 分隔線放在節次開始前（before）時不能這樣假設（v0.3.24）：11/13 07:48 換到 0800、
+    // 還沒寫第一則（分隔線跟第一則一起寫）就更新重啟，接續時當成 0800 的分隔線已經寫過，
+    // 結果 0800 的稿直接接在 0700 後面、沒有 ==== 08 ====。before 的分隔線照常跟第一則
+    // 一起送，已經在文件裡的話寫入前比對會濾掉（v0.3.12 起），不會重複。
+    if (meta.resumed_show && !lastWrittenShow && inewsCfg.divider_position !== "before") {
+      lastWrittenShow = meta.resumed_show;
+    }
     const { added, changed } = diffInewsVersions(inewsVersions, meta.stories);
     const hadCards = items.some((i) => i.inews);
     const before = items;
