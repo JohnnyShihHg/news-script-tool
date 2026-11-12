@@ -623,6 +623,50 @@ impl InewsState {
         }
     }
 
+    /// 預列清單（v0.3.23）：讀一個 queue 最上面那一段 —— 從第一列往下、遇到第一個空白列
+    /// （沒有 slug）就停 —— 回傳 (slug, 樣式)。最多看 30 列，免得 queue 最上面沒有空白列時
+    /// 整個 queue 都讀。連線斷了重連再試一次，跟 `fetch_story` 一樣。
+    pub fn read_top_block(&mut self, cfg: &InewsConfig, creds: &Credentials, path: &str) -> Result<Vec<(String, String)>, String> {
+        match self.read_top_block_once(cfg, creds, path) {
+            Ok(r) => Ok(r),
+            Err(FtpError::Io(_)) | Err(FtpError::Protocol(_)) if self.session.is_some() => {
+                self.drop_session();
+                self.read_top_block_once(cfg, creds, path).map_err(|e| e.to_string())
+            }
+            Err(FtpError::Reply { ref reply, .. }) if self.session.is_some() && matches!(reply.code, 421 | 530) => {
+                self.drop_session();
+                self.read_top_block_once(cfg, creds, path).map_err(|e| e.to_string())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn read_top_block_once(&mut self, cfg: &InewsConfig, creds: &Credentials, path: &str) -> FtpResult<Vec<(String, String)>> {
+        let entries: Vec<ListEntry> =
+            self.list_dir(cfg, creds, path)?.into_iter().filter(|e| e.kind == ListKind::Story).take(30).collect();
+        let mut out = Vec::new();
+        for entry in entries {
+            let story = match self.cache.get(&entry.name) {
+                Some(c) => c.story.clone(),
+                None => {
+                    let text = self.session(cfg, creds)?.retr(&entry.name)?;
+                    let story = inews::parse_nsml(&text);
+                    self.cache.insert(entry.name.clone(), CachedStory { story: story.clone(), raw: text });
+                    story
+                }
+            };
+            let slug = match story.title().trim() {
+                "" => entry.slug().trim().to_string(),
+                t => t.to_string(),
+            };
+            if slug.is_empty() {
+                break;
+            }
+            out.push((slug, story.raw("v-style").trim().to_string()));
+        }
+        Ok(out)
+    }
+
     fn fetch_story_once(
         &mut self,
         cfg: &InewsConfig,

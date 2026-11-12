@@ -15,6 +15,10 @@ pub enum MatchStatus {
     KeepRefresh,
     /// Found with some other non-empty prefix before it — already handled, drop it.
     Removed,
+    /// 今天段落最前面的預列區（日期分隔線到第一條節次分隔線之間）裡，slug 前面是 `(X)`
+    /// 的稿（v0.3.23）：早班不上網的稿先列在這裡。播出時照常完整寫入一次，寫的時候 slug
+    /// 前面加 `(X)`；寫過之後最後一行就是那行有時間的 `(X)`，自然變成 `Removed`。
+    PreListed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -301,6 +305,9 @@ pub fn match_in_days(
         return match_entry_in_show(q.slug, q.time, q.show, whole_doc, refresh_keywords);
     }
     let today = match_entry_in_show(q.slug, q.time, q.show, days.today.as_deref().unwrap_or(""), refresh_keywords);
+    if today.status == MatchStatus::Removed && is_prelisted(q.slug, today.matched_line.as_deref(), days.today.as_deref()) {
+        return MatchResult { status: MatchStatus::PreListed, ..today };
+    }
     if today.matched_line.is_some() {
         return today;
     }
@@ -328,6 +335,37 @@ pub fn match_in_days(
             _ => today.clone(),
         })
         .unwrap_or(today)
+}
+
+/// 節次分隔線：`==== 07 ====`、`==== 22 關鍵時刻 ====`（等號中間是 1～2 位數的小時）。
+fn is_show_divider(line: &str) -> bool {
+    static RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^=+\s*\d{1,2}(?:\s.*?)?\s*=+$").unwrap());
+    RE.is_match(&normalize_for_match(line))
+}
+
+/// 今天段落的預列區（v0.3.23）：日期分隔線之後、第一條節次分隔線之前的行。
+pub fn prelist_lines(today_section: &str) -> Vec<&str> {
+    today_section.lines().take_while(|l| !is_show_divider(l)).collect()
+}
+
+/// `matched_line` 是不是預列區裡、slug 前面剛好是 `(X)` 的那一行。
+fn is_prelisted(slug: &str, matched_line: Option<&str>, today_section: Option<&str>) -> bool {
+    let (Some(line), Some(section)) = (matched_line, today_section) else { return false };
+    if !prelist_lines(section).iter().any(|l| l.trim() == line) {
+        return false;
+    }
+    let hay = normalize_for_match(line);
+    let needle = normalize_for_match(slug);
+    let Some(idx) = hay.find(&needle) else { return false };
+    hay[..idx].trim().eq_ignore_ascii_case("(x)")
+}
+
+/// 今天的段落還不存在或是空的：第一次寫入時可以補預列清單（v0.3.23）。文件裡完全沒有
+/// 日期分隔線就不補（沒有段落可言）。
+pub fn prelist_wanted(doc_text: &str, today: &str, previous: &str) -> bool {
+    let days = day_sections(doc_text, today, previous);
+    days.has_dividers && days.today.as_deref().map_or(true, |t| t.trim().is_empty())
 }
 
 /// 決策紀錄用：前一天段落裡出現這個 slug 的每一行，和它下面那一行標題（正規化後）。
@@ -369,7 +407,7 @@ pub fn previous_day_lines(slug: &str, days: &DaySections, strip: &[String]) -> V
 /// The real doc mixes spaces, tabs and fullwidth `＝`, so the line is normalized first.
 fn date_divider(line: &str) -> Option<String> {
     static RE: once_cell::sync::Lazy<regex::Regex> =
-        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^=+[=\s]*(\d{4})\s*=[=\s]*$").unwrap());
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^=+[=\s]*(\d{4})\s*(?:=[=\s]*)?$").unwrap());
     let norm = normalize_for_match(line);
     let mmdd = RE.captures(&norm)?[1].to_string();
     // 節次分隔線只標整點（0900、1800、2400），日期是 MMDD（1028、1030）。
@@ -1652,6 +1690,21 @@ pub fn filter_write_parts(
     previous: &str,
     refresh_keywords: &[String],
 ) -> WriteFilter {
+    filter_write_parts_with_prelist(parts, header, &[], doc_text, today, previous, refresh_keywords)
+}
+
+/// `filter_write_parts`，另外帶預列清單（v0.3.23，`(X)slug<Tab>樣式` 一行一則）：寫入當下
+/// 今天的段落還是空的（或還沒有）才放，放在日期分隔線和第一則內容之間。不是空的就表示
+/// 有人手補了、或別台先寫了，整份不放。
+pub fn filter_write_parts_with_prelist(
+    parts: &[WritePart],
+    header: Option<&str>,
+    prelist: &[String],
+    doc_text: &str,
+    today: &str,
+    previous: &str,
+    refresh_keywords: &[String],
+) -> WriteFilter {
     let days = day_sections(doc_text, today, previous);
     let scope: &str = if days.has_dividers { days.today.as_deref().unwrap_or("") } else { doc_text };
     let scope_lines: Vec<&str> = scope.lines().map(str::trim).collect();
@@ -1697,7 +1750,12 @@ pub fn filter_write_parts(
     if kept.is_empty() {
         return WriteFilter { text: String::new(), dropped };
     }
-    let body = kept.join("\n\n");
+    let prelist: Vec<&str> = prelist.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let body = if !prelist.is_empty() && prelist_wanted(doc_text, today, previous) {
+        format!("{}\n\n{}", prelist.join("\n"), kept.join("\n\n"))
+    } else {
+        kept.join("\n\n")
+    };
     let header = header.map(str::trim).filter(|h| !h.is_empty());
     let header_needed = header.is_some() && !(days.has_dividers && days.today.is_some());
     let text = match header {
@@ -1848,5 +1906,79 @@ mod write_filter_tests {
         let out = filter(&parts, DAY);
         assert_eq!(out.text, parts[1].text);
         assert!(out.dropped.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod prelist_tests {
+    use super::*;
+
+    fn kw() -> Vec<String> {
+        crate::config::MarkersConfig::default().refresh_keywords
+    }
+
+    fn q<'a>(slug: &'a str, time: &'a str) -> EntryQuery<'a> {
+        EntryQuery { slug, time, title: "標題", show: "0700" }
+    }
+
+    /// 11/13 實際的文件：手打的日期分隔線後面沒有等號，下面是早班預列的 (X) 稿。
+    const DOC: &str = "==========1112\n昨天的稿1800 SOT 18:00:00\n\n==========1113\n（X）高雄兩撞車0600\t短sot\n（X）亂搞調味料0630\t短sot\n\n==== 07 ====\n(x)餐廳蹭仁勳0700 短sot 07:02:00\n";
+
+    #[test]
+    fn a_date_divider_without_trailing_equals_is_still_a_date_divider() {
+        let days = day_sections(DOC, "1113", "1112");
+        assert!(days.today.as_deref().unwrap().contains("高雄兩撞車0600"));
+        assert!(!days.previous.as_deref().unwrap().contains("高雄兩撞車0600"), "預列稿不能被算成前一天的");
+        // 原本的寫法照樣認得；節次分隔線、不像日期的不算。
+        assert_eq!(date_divider("＝＝＝＝＝1113＝＝＝＝＝").as_deref(), Some("1113"));
+        assert_eq!(date_divider("========0807========").as_deref(), Some("0807"));
+        assert_eq!(date_divider("==== 07 ===="), None);
+        assert_eq!(date_divider("=====1800"), None);
+    }
+
+    #[test]
+    fn a_prelisted_x_story_is_written_once_with_x_then_counts_as_handled() {
+        let days = day_sections(DOC, "1113", "1112");
+        let r = match_in_days(q("高雄兩撞車0600", "07:09:45"), &days, DOC, &kw(), None);
+        assert_eq!(r.status, MatchStatus::PreListed);
+        // 寫進去之後（07 那節，前面 (X)、有時間），最後一行是它：已處理，不再寫。
+        let after = format!("{DOC}\n(X)高雄兩撞車0600 短sot 07:09:45\n危險！未禮讓直行\n");
+        let days = day_sections(&after, "1113", "1112");
+        let r = match_in_days(q("高雄兩撞車0600", "08:15:00"), &days, &after, &kw(), None);
+        assert_eq!(r.status, MatchStatus::Removed);
+    }
+
+    #[test]
+    fn only_the_prelist_area_and_only_an_x_prefix_count() {
+        let days = day_sections(DOC, "1113", "1112");
+        // 節次裡的 (x) 照舊是已剔除。
+        let r = match_in_days(q("餐廳蹭仁勳0700", "07:30:00"), &days, DOC, &kw(), None);
+        assert_eq!(r.status, MatchStatus::Removed);
+        // 預列區裡沒有 (X) 的乾淨行＝已在文件；其他標記照舊已剔除。
+        let doc = "==========1113\n高雄兩撞車0600\t短sot\n(勿上網)亂搞調味料0630\t短sot\n==== 07 ====\n";
+        let days = day_sections(doc, "1113", "1112");
+        assert_eq!(match_in_days(q("高雄兩撞車0600", "07:09:45"), &days, doc, &kw(), None).status, MatchStatus::InDoc);
+        assert_eq!(match_in_days(q("亂搞調味料0630", "07:29:07"), &days, doc, &kw(), None).status, MatchStatus::Removed);
+    }
+
+    #[test]
+    fn the_prelist_goes_in_only_when_todays_section_is_still_empty() {
+        let parts = vec![WritePart { text: "(X)高雄兩撞車0600 短sot 07:09:45\n標題".into(), slug: Some("高雄兩撞車0600".into()) }];
+        let prelist = vec!["(X)高雄兩撞車0600\t短sot".to_string(), "(X)女亂竄馬路0700\t短sot".to_string()];
+        let header = Some("＝＝＝＝＝1113＝＝＝＝＝");
+        // 還沒有今天的段落：日期分隔線 → 預列清單 → 內容。
+        let doc = "==========1112\n昨天的稿1800\n";
+        let out = filter_write_parts_with_prelist(&parts, header, &prelist, doc, "1113", "1112", &kw());
+        assert_eq!(out.text, "＝＝＝＝＝1113＝＝＝＝＝\n(X)高雄兩撞車0600\t短sot\n(X)女亂竄馬路0700\t短sot\n\n(X)高雄兩撞車0600 短sot 07:09:45\n標題");
+        // 今天的段落有分隔線但還是空的：一樣補。
+        let doc = "==========1112\n昨天的稿1800\n==========1113\n\n";
+        let out = filter_write_parts_with_prelist(&parts, header, &prelist, doc, "1113", "1112", &kw());
+        assert!(out.text.starts_with("(X)高雄兩撞車0600\t短sot\n(X)女亂竄馬路0700"), "{}", out.text);
+        // 已經有人手補（今天的段落有內容）：不放。
+        let out = filter_write_parts_with_prelist(&parts, header, &prelist, DOC, "1113", "1112", &kw());
+        assert!(!out.text.contains("女亂竄馬路"), "{}", out.text);
+        // 文件完全沒有日期分隔線：不放。
+        let out = filter_write_parts_with_prelist(&parts, None, &prelist, "隨便的內容\n", "1113", "1112", &kw());
+        assert!(!out.text.contains("女亂竄馬路"));
     }
 }

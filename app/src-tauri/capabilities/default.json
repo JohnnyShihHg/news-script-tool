@@ -46,6 +46,7 @@
     "core:window:allow-request-user-attention",
     "allow-collab-idle-seconds",
     "allow-search-rundown-slugs",
-    "allow-load-rundown-story"
+    "allow-load-rundown-story",
+    "allow-fetch-prelist"
   ]
 }

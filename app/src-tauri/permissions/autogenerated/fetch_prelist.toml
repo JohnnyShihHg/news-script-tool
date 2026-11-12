@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fetch-prelist"
+description = "Enables the fetch_prelist command without any pre-configured scope."
+commands.allow = ["fetch_prelist"]
+
+[[permission]]
+identifier = "deny-fetch-prelist"
+description = "Denies the fetch_prelist command without any pre-configured scope."
+commands.deny = ["fetch_prelist"]

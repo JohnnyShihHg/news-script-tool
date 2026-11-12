@@ -360,7 +360,9 @@ function cardHtml(item) {
   const hasDiff = !!(fields.raw_title || fields.raw_body);
   const matchLabel = item.alreadyInDoc
     ? "已在文件中"
-    : { to_cut: "待處理", keep_refresh: "要重貼", removed: "已剔除" }[item.matchStatus];
+    : item.prelisted
+      ? "預列(X)"
+      : { to_cut: "待處理", keep_refresh: "要重貼", removed: "已剔除" }[item.matchStatus];
   const matchClass = item.alreadyInDoc ? "removed" : item.matchStatus;
   // The 編輯備註 marker only ever showed up in the output text, so a 勿上網 story was
   // indistinguishable from any other card on screen. Show it where the call is made.
@@ -706,7 +708,8 @@ function outputFieldsOf(i) {
     bucket: i.bucket,
     included: i.included,
     slug: fields.slug,
-    slug_marker: fields.slug_marker ?? "",
+    // 預列區的 (X) 稿（v0.3.23）：寫入時 slug 前面加 (X)，跟早班手打的一樣。
+    slug_marker: (i.prelisted ? "(X)" : "") + (fields.slug_marker ?? ""),
     style: fields.style,
     time: fields.time,
     group: fields.group,
@@ -714,6 +717,27 @@ function outputFieldsOf(i) {
     body: i.body,
     keywords: i.keywords,
   };
+}
+
+// --- 預列清單（v0.3.23）---
+// 今天的段落還沒有或是空的時候，第一次寫入前讀 iNEWS 的預列 queue（預設 STORIES.LOCAL.APPR）
+// 最上面那一段，寫成 `(X)slug<Tab>樣式`，放在日期分隔線下面。同一批裡剛好是預列稿的，
+// 寫入時也加 (X)。後端寫入當下會再確認一次段落是不是還空著，不是就不放。
+let prelistWanted = false;
+let prelistDoneFor = "";
+
+async function prelistForWrite(outgoing) {
+  if (!prelistWanted || !compareDay || prelistDoneFor === compareDay) return [];
+  try {
+    const list = await invoke("fetch_prelist");
+    prelistDoneFor = compareDay;
+    const slugs = new Set(list.map((p) => p.slug.trim()));
+    for (const i of outgoing) if (slugs.has(slugOf(i).trim())) i.prelisted = true;
+    return list.map((p) => `(X)${p.slug}${p.style ? `\t${p.style}` : ""}`);
+  } catch (err) {
+    logDecision(`[預列] 讀不到預列清單，這次先不補：${err}`);
+    return [];
+  }
 }
 
 function buildOutput() {
@@ -794,11 +818,13 @@ async function writeBackToCollab() {
   status.textContent = "寫入中…";
   btn.disabled = true;
   try {
+    const prelist = await prelistForWrite(outgoing);
     const res = await invoke("append_to_collab_doc_checked", {
       parts: outgoing
         .map((i) => ({ slug: slugOf(i), text: buildOutputText([outputFieldsOf(i)]) }))
         .filter((p) => p.text.trim() !== ""),
       header: dateHeaderOwed || null,
+      prelist,
       // 手動寫入也留紀錄：以前只有自動流程會寫「成功」，手動的在紀錄裡看不出來。
       logNote: `手動寫入 ${writeLogNote(outgoing, [])}`,
     });
@@ -1175,9 +1201,11 @@ async function writeInewsItems(ready) {
     // 兩台同時開自動寫入時，比對跟寫入之間隔著產生關鍵字的那幾十秒，對方寫了什麼
     // 這邊看不到 —— 把確認挪到動手前一刻，重複寫入的窗口就從幾十秒縮到零點幾秒。
     // 每則稿分開傳（v0.3.14）：後端逐則判斷，不再從整串文字反推哪幾行是同一則。
+    const prelist = await prelistForWrite(written);
     const res = await invoke("append_to_collab_doc_checked", {
       parts: writeParts(pieces, slugOf, (list) => buildOutputText(list.map(outputFieldsOf))),
       header: dateHeaderOwed || null,
+      prelist,
       logNote: writeLogNote(written, dividers),
     });
     const msg = res.message ?? "整批都已經在文件裡了，這次沒有寫入。";
@@ -1517,6 +1545,7 @@ function cardStateOf(slug) {
   const card = items.find((i) => slugOf(i) === slug);
   if (!card) return "—";
   if (card.alreadyInDoc) return "已在文件中";
+  if (card.prelisted) return "預列(X)";
   return { to_cut: "待處理", keep_refresh: "要重貼", removed: "已剔除" }[card.matchStatus] ?? "有卡片（還沒比對）";
 }
 
@@ -1660,6 +1689,7 @@ async function compareWithCollabDoc({ silent = false } = {}) {
     compareDay = day.today;
     compareHoldsAutoWrite = !!day.hold_auto_write;
     dateHeaderOwed = day.header_to_add && dateHeaderWrittenFor !== day.today ? day.header_to_add : "";
+    prelistWanted = !!day.prelist_wanted;
     const matched = [];
     // Paired by position, not slug: two versions of one slug can now differ.
     for (const [n, item] of targets.entries()) {
@@ -1668,6 +1698,7 @@ async function compareWithCollabDoc({ silent = false } = {}) {
       item.matchStatus = r.status;
       item.matchedLine = r.matched_line;
       item.crossDay = !!r.cross_day;
+      item.prelisted = !!r.prelisted;
       item.alreadyInDoc = isAlreadyInDoc(r);
       item.included = decideInclusion(r, item.defaultIncluded, item.userIncluded);
       // 已濾除 entries are matched so their badge and the duplicate guard are right,
@@ -1912,6 +1943,8 @@ ${sec("inews", "iNEWS 連線", `
             ${text("節次所在路徑（點號串接）", "inews.root", s.root)}
             ${text("Queue", "inews.queue", s.queue)}
             ${num("自動刷新間隔（秒）", "inews.poll_seconds", s.poll_seconds, 3)}
+            ${text("預列清單 queue（空白＝不補）", "inews.prelist_queue", s.prelist_queue ?? "51新聞台.STORIES.LOCAL.APPR")}
+            <div class="muted">今天段落還空著時，第一次寫入前把它最上面那段寫成 <code>(X)slug</code>。</div>
             <div class="field">
               <label>決策紀錄（保留 14 天）</label>
               <div class="keywords-row"><button id="openInewsLogBtn" type="button">開啟紀錄資料夾</button><span id="inewsLogStatus" class="muted"></span></div>

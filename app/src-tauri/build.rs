@@ -44,6 +44,7 @@ fn main() {
             "collab_idle_seconds",
             "search_rundown_slugs",
             "load_rundown_story",
+            "fetch_prelist",
         ])),
     )
     .expect("failed to run tauri-build");

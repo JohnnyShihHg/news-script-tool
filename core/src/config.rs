@@ -502,6 +502,9 @@ pub struct InewsConfig {
     pub unknown_review_sound_kind: String,
     /// 提示音音量 0～100（v0.3.22）。
     pub unknown_review_volume: u32,
+    /// 預列清單從哪個 queue 讀（v0.3.23）：今天的段落還是空的時候，第一次寫入前讀它最上面
+    /// 那一段，寫成 `(X)slug<Tab>樣式`。空字串＝不補。
+    pub prelist_queue: String,
 }
 
 impl Default for InewsConfig {
@@ -546,6 +549,7 @@ impl Default for InewsConfig {
             unknown_review_sound: true,
             unknown_review_sound_kind: "double".into(),
             unknown_review_volume: 60,
+            prelist_queue: "51新聞台.STORIES.LOCAL.APPR".into(),
         }
     }
 }

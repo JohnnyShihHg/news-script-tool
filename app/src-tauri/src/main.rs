@@ -479,6 +479,43 @@ async fn load_rundown_story(
     Ok(LoadedStoryDto { summary, key, version: story_version, show, source: source.to_string() })
 }
 
+/// 預列清單（v0.3.23）：`inews.prelist_queue`（預設 51新聞台.STORIES.LOCAL.APPR）最上面
+/// 那一段 —— 從第一列往下、遇到第一個空白列就停 —— 裡 slug 以 4 碼時間結尾的稿。
+#[derive(Serialize)]
+struct PrelistDto {
+    slug: String,
+    style: String,
+}
+
+#[tauri::command]
+async fn fetch_prelist(window: tauri::Window, state: tauri::State<'_, AppState>) -> Result<Vec<PrelistDto>, String> {
+    require_main_window(&window)?;
+    let cfg = lock_or_recover(&state.config).clone();
+    let path = cfg.inews.prelist_queue.trim().to_string();
+    if path.is_empty() {
+        return Ok(Vec::new());
+    }
+    let creds = inews_credentials()?;
+    let shared = state.inews.clone();
+    let inews_cfg = cfg.inews.clone();
+    let rows = tauri::async_runtime::spawn_blocking(move || {
+        let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
+        st.read_top_block(&inews_cfg, &creds, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let list: Vec<PrelistDto> = rows
+        .into_iter()
+        .filter(|(slug, _)| news_script_core::clean::slug_timecode(slug).is_some())
+        .map(|(slug, style)| PrelistDto { slug, style })
+        .collect();
+    if let Some(dir) = inews_log_dir() {
+        let names: Vec<&str> = list.iter().map(|p| p.slug.as_str()).collect();
+        inews::append_log(&dir, &format!("[預列] 讀 {}：{} 則（{}）", cfg.inews.prelist_queue, list.len(), names.join("、")));
+    }
+    Ok(list)
+}
+
 /// 前端的決策寫進決策紀錄（v0.3.15：未知樣式審查）。只收一行，太長就截斷。
 #[tauri::command]
 fn append_decision_log(window: tauri::Window, line: String) -> Result<(), String> {
@@ -897,6 +934,8 @@ struct MatchResultDto {
     matched_line: Option<String>,
     /// 前一天段落裡 slug 和標題都相同：前一天已上傳的重播。
     cross_day: bool,
+    /// 預列區的 (X) 稿（v0.3.23）：status 照 keep_refresh 寫入，slug 前面加 (X)。
+    prelisted: bool,
 }
 
 /// 比對時用的日期段落。
@@ -913,6 +952,8 @@ struct CompareDayDto {
     /// 有開跨天比對、卻找不到前一天的日期段落：前一天的重播會被當新稿，
     /// 這一輪不自動寫入，改成等確認（v0.3.5）。
     hold_auto_write: bool,
+    /// 今天的段落還沒有或是空的：第一次寫入時要補預列清單（v0.3.23）。
+    prelist_wanted: bool,
 }
 
 #[derive(Serialize)]
@@ -1342,6 +1383,7 @@ async fn append_to_collab_doc_checked(
     parts: Vec<news_script_core::doc_match::WritePart>,
     header: Option<String>,
     log_note: Option<String>,
+    prelist: Option<Vec<String>>,
 ) -> Result<CheckedAppendDto, String> {
     require_main_window(&window)?;
     if parts.iter().all(|p| p.text.trim().is_empty()) {
@@ -1352,9 +1394,11 @@ async fn append_to_collab_doc_checked(
 
     let _turn = collab_turn(&state).await?;
     let doc_text = eval_in_collab_locked(&app, &state, SCRAPE_SCRIPT).await?;
-    let filtered = news_script_core::doc_match::filter_write_parts(
+    let prelist = prelist.unwrap_or_default();
+    let filtered = news_script_core::doc_match::filter_write_parts_with_prelist(
         &parts,
         header.as_deref(),
+        &prelist,
         &doc_text,
         &today,
         &previous,
@@ -1610,7 +1654,7 @@ async fn compare_with_collab_doc(
             counts[match r.status {
                 MatchStatus::ToCut => 0,
                 MatchStatus::InDoc => 1,
-                MatchStatus::KeepRefresh => 2,
+                MatchStatus::KeepRefresh | MatchStatus::PreListed => 2,
                 MatchStatus::Removed => 3,
             }] += 1;
             counts[4] += r.cross_day as usize;
@@ -1633,10 +1677,11 @@ async fn compare_with_collab_doc(
                 status: match r.status {
                     MatchStatus::ToCut => "to_cut",
                     MatchStatus::InDoc => "in_doc",
-                    MatchStatus::KeepRefresh => "keep_refresh",
+                    MatchStatus::KeepRefresh | MatchStatus::PreListed => "keep_refresh",
                     MatchStatus::Removed => "removed",
                 }
                 .to_string(),
+                prelisted: r.status == MatchStatus::PreListed,
                 matched_line: r.matched_line,
                 cross_day: r.cross_day,
             }
@@ -1675,7 +1720,15 @@ async fn compare_with_collab_doc(
 
     Ok(CompareDto {
         results,
-        day: CompareDayDto { today, today_found: days.today.is_some(), header_to_add, warning, hold_auto_write },
+        day: CompareDayDto {
+            today: today.clone(),
+            today_found: days.today.is_some(),
+            header_to_add,
+            warning,
+            hold_auto_write,
+            prelist_wanted: !cfg.inews.prelist_queue.trim().is_empty()
+                && news_script_core::doc_match::prelist_wanted(&doc_text, &today, &previous),
+        },
     })
 }
 
@@ -1799,7 +1852,8 @@ fn main() {
             append_decision_log,
             collab_idle_seconds,
             search_rundown_slugs,
-            load_rundown_story
+            load_rundown_story,
+            fetch_prelist
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
