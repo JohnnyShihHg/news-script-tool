@@ -123,10 +123,23 @@ fn parse_outlook(script: &str) -> Result<Outlook, String> {
     let day = cap[3].parse::<u32>().map_err(|_| "發布日期錯誤")?;
     let date = format!("{year:04}-{month:02}-{day:02}");
     let contents = js_strings(script, "W01_Content")?;
+    // 天氣概況那一段的開頭有兩種寫法（v0.3.25，對照 2025～2026 網路典藏的快照）：
+    // 「今、明(13日、14日)兩天…」，和早上 5 時版最常見的「今(13)日…明(14)日…」。
+    // 後者括號裡的日期要等於發布日，免得拿到別天的段落。「海上濃霧描述：今(13)日」這種
+    // 前面有別的字的、只講明天的「明(14)日…」都不收。
+    let today_re = Regex::new(r"^今\s*[（(]\s*(\d{1,2})\s*日?\s*[)）]\s*日?").unwrap();
     let candidates: Vec<String> = contents
         .into_iter()
         .map(|s| plain_text(&s))
-        .filter(|s| s.starts_with("今、明") || s.starts_with("今，明") || s.starts_with("今,明"))
+        .filter(|s| {
+            s.starts_with("今、明")
+                || s.starts_with("今，明")
+                || s.starts_with("今,明")
+                || today_re
+                    .captures(s)
+                    .and_then(|c| c[1].parse::<u32>().ok())
+                    .is_some_and(|d| d == day)
+        })
         .collect();
     if candidates.len() != 1 {
         return Err(format!(
@@ -285,6 +298,41 @@ var W01_Content = ["颱風資訊", "今、明(21日、22日)兩天臺灣各地�
                 body: "今、明(21日、22日)兩天臺灣各地多雲到晴，午後有雨。".into()
             })
         );
+    }
+
+    /// 2026/11/13 5 時版的原樣（只截短）：天氣概況寫成「今(13)日…明(14)日…」。
+    const W01_20261113: &str = r#"var W01_TIME=["中央氣象署氣象報告","115年11月13日5時發布","11月13日2時天氣概況："];
+var W01_Content=[
+  "高氣壓1026百帕，在北緯33度，東經127度，即在韓國南方海面，中心近似滯留。",
+  "今(13)日臺灣各地及澎湖、金門、馬祖大多為多雲到晴，僅基隆北海岸有零星短暫雨。明(14)日東部有零星短暫雨，其他地區為多雲。",
+  "海上濃霧描述：今(13)日花鳥山海面及浙江海面有局部霧，請注意。",
+  "海上強風特報：<br />1、今(13日)下午起臺灣北部海面平均風力將增強至6級。"
+];
+"#;
+
+    #[test]
+    fn the_today_bracket_wording_is_the_outlook_too() {
+        let o = parse_outlook(W01_20261113).unwrap();
+        assert_eq!(o.date, "2026-11-13");
+        assert!(o.body.starts_with("今(13)日臺灣各地"), "{}", o.body);
+        // 全形括號、「今(13日)」也算。
+        for head in ["今（13）日臺灣各地多雲", "今(13日)臺灣各地多雲"] {
+            let js = format!("var W01_TIME=['115年11月13日5時發布']; var W01_Content=['高氣壓','{head}','海上濃霧描述：今(13)日有霧'];");
+            assert_eq!(parse_outlook(&js).unwrap().body, head);
+        }
+    }
+
+    #[test]
+    fn other_days_and_tomorrow_only_paragraphs_are_not_taken() {
+        // 日期對不上發布日：不收。
+        let js = "var W01_TIME=['115年11月13日5時發布']; var W01_Content=['今(12)日臺灣各地多雲'];";
+        assert!(parse_outlook(js).unwrap_err().contains("0 則"));
+        // 晚上版只講明天：不收（早上用不到）。
+        let js = "var W01_TIME=['115年6月18日17時發布']; var W01_Content=['明(19)日臺灣各地及澎湖多雲'];";
+        assert!(parse_outlook(js).unwrap_err().contains("0 則"));
+        // 颱風時開頭沒有「今」：不收，留給人工。
+        let js = "var W01_TIME=['115年6月26日11時發布']; var W01_Content=['第7號颱風北上，鋒面接近'];";
+        assert!(parse_outlook(js).unwrap_err().contains("0 則"));
     }
 
     #[test]
