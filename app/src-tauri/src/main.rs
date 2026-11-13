@@ -498,7 +498,7 @@ async fn fetch_prelist(window: tauri::Window, state: tauri::State<'_, AppState>)
     let creds = inews_credentials()?;
     let shared = state.inews.clone();
     let inews_cfg = cfg.inews.clone();
-    let rows = tauri::async_runtime::spawn_blocking(move || {
+    let (rows, trace) = tauri::async_runtime::spawn_blocking(move || {
         let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
         st.read_top_block(&inews_cfg, &creds, &path)
     })
@@ -512,6 +512,7 @@ async fn fetch_prelist(window: tauri::Window, state: tauri::State<'_, AppState>)
     if let Some(dir) = inews_log_dir() {
         let names: Vec<&str> = list.iter().map(|p| p.slug.as_str()).collect();
         inews::append_log(&dir, &format!("[預列] 讀 {}：{} 則（{}）", cfg.inews.prelist_queue, list.len(), names.join("、")));
+        inews::append_log(&dir, &format!("[預列] 讀取過程：{trace}"));
     }
     Ok(list)
 }

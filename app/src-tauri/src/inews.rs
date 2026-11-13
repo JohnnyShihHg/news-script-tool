@@ -248,6 +248,43 @@ pub fn test_connection(cfg: &InewsConfig, creds: &Credentials) -> Result<String,
     Ok(format!("登入成功（{banner}）。{} 底下有 {n} 個節次。", cfg.root))
 }
 
+/// 預列清單一列一列看的時候怎麼處理（v0.3.26）：還沒拿到任何一則時空白列跳過，
+/// 拿到之後遇到空白列就停。
+#[derive(Debug, PartialEq)]
+enum TopBlockStep {
+    Skip,
+    Stop,
+    Take,
+}
+
+fn top_block_step(collected: usize, slug: &str) -> TopBlockStep {
+    match (slug.trim().is_empty(), collected) {
+        (true, 0) => TopBlockStep::Skip,
+        (true, _) => TopBlockStep::Stop,
+        (false, _) => TopBlockStep::Take,
+    }
+}
+
+#[cfg(test)]
+mod top_block_tests {
+    use super::*;
+
+    /// 11/14 APPR 的樣子：第一列留空，接著五則早班稿，再來空白列和別的稿。
+    #[test]
+    fn leading_blank_rows_are_skipped_and_the_next_blank_ends_the_block() {
+        let rows = ["", "閃狗撞噴泉0600", "怪女鬧超商0630", "掃黑查酒妹0700", "毒駕阻扣車0730", "網紅狐狸毛0800", "", "", "XX九合一快報"];
+        let mut taken = Vec::new();
+        for slug in rows {
+            match top_block_step(taken.len(), slug) {
+                TopBlockStep::Skip => continue,
+                TopBlockStep::Stop => break,
+                TopBlockStep::Take => taken.push(slug),
+            }
+        }
+        assert_eq!(taken, ["閃狗撞噴泉0600", "怪女鬧超商0630", "掃黑查酒妹0700", "毒駕阻扣車0730", "網紅狐狸毛0800"]);
+    }
+}
+
 struct CachedStory {
     story: NsmlStory,
     /// RETR 回來的原文（v0.3.15）：存進搜尋用的本地紀錄，之後載入成卡片不用再連 iNEWS。
@@ -623,10 +660,12 @@ impl InewsState {
         }
     }
 
-    /// 預列清單（v0.3.23）：讀一個 queue 最上面那一段 —— 從第一列往下、遇到第一個空白列
-    /// （沒有 slug）就停 —— 回傳 (slug, 樣式)。最多看 30 列，免得 queue 最上面沒有空白列時
-    /// 整個 queue 都讀。連線斷了重連再試一次，跟 `fetch_story` 一樣。
-    pub fn read_top_block(&mut self, cfg: &InewsConfig, creds: &Credentials, path: &str) -> Result<Vec<(String, String)>, String> {
+    /// 預列清單（v0.3.23）：讀一個 queue 最上面那一段，回傳 (slug, 樣式) 和一行讀取過程
+    /// （寫進決策紀錄）。最多看 30 列。連線斷了重連再試一次，跟 `fetch_story` 一樣。
+    ///
+    /// 「那一段」＝最上面的空白列先跳過，從第一則有 slug 的稿開始，到下一個空白列為止
+    /// （v0.3.26）：APPR 第一列固定留空，11/14 照「遇到空白列就停」一開始就停下，讀到 0 則。
+    pub fn read_top_block(&mut self, cfg: &InewsConfig, creds: &Credentials, path: &str) -> Result<(Vec<(String, String)>, String), String> {
         match self.read_top_block_once(cfg, creds, path) {
             Ok(r) => Ok(r),
             Err(FtpError::Io(_)) | Err(FtpError::Protocol(_)) if self.session.is_some() => {
@@ -641,11 +680,12 @@ impl InewsState {
         }
     }
 
-    fn read_top_block_once(&mut self, cfg: &InewsConfig, creds: &Credentials, path: &str) -> FtpResult<Vec<(String, String)>> {
+    fn read_top_block_once(&mut self, cfg: &InewsConfig, creds: &Credentials, path: &str) -> FtpResult<(Vec<(String, String)>, String)> {
         let entries: Vec<ListEntry> =
             self.list_dir(cfg, creds, path)?.into_iter().filter(|e| e.kind == ListKind::Story).take(30).collect();
         let mut out = Vec::new();
-        for entry in entries {
+        let mut trace = Vec::new();
+        for (n, entry) in entries.into_iter().enumerate() {
             let story = match self.cache.get(&entry.name) {
                 Some(c) => c.story.clone(),
                 None => {
@@ -659,12 +699,20 @@ impl InewsState {
                 "" => entry.slug().trim().to_string(),
                 t => t.to_string(),
             };
-            if slug.is_empty() {
-                break;
+            match top_block_step(out.len(), &slug) {
+                TopBlockStep::Skip => trace.push(format!("第{}列空白（跳過）", n + 1)),
+                TopBlockStep::Stop => {
+                    trace.push(format!("第{}列空白（停）", n + 1));
+                    break;
+                }
+                TopBlockStep::Take => {
+                    let style = story.raw("v-style").trim().to_string();
+                    trace.push(format!("第{}列 {slug} {style}", n + 1));
+                    out.push((slug, style));
+                }
             }
-            out.push((slug, story.raw("v-style").trim().to_string()));
         }
-        Ok(out)
+        Ok((out, trace.join("、")))
     }
 
     fn fetch_story_once(

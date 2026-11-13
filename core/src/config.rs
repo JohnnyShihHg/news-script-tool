@@ -505,6 +505,9 @@ pub struct InewsConfig {
     /// 預列清單從哪個 queue 讀（v0.3.23）：今天的段落還是空的時候，第一次寫入前讀它最上面
     /// 那一段，寫成 `(X)slug<Tab>樣式`。空字串＝不補。
     pub prelist_queue: String,
+    /// 每天開始寫入的時間（v0.3.26，`HH:MM`）：播出日分界到這個時間之前，自動流程只讀
+    /// 不寫；時間到了只寫這個時間之後的節次。空字串＝不限制。
+    pub write_start: String,
 }
 
 impl Default for InewsConfig {
@@ -550,6 +553,7 @@ impl Default for InewsConfig {
             unknown_review_sound_kind: "double".into(),
             unknown_review_volume: 60,
             prelist_queue: "51新聞台.STORIES.LOCAL.APPR".into(),
+            write_start: "07:00".into(),
         }
     }
 }

@@ -270,7 +270,42 @@ async function runAutoPipeline() {
 }
 
 function keywordTargets() {
-  return selectKeywordTargets(items, noUploadLabel);
+  // 每天開始寫入以前的節次（例：0600）永遠不會自動寫，也就不花額度產生關鍵字。
+  return selectKeywordTargets(items, noUploadLabel).filter((i) => !beforeWriteStartShow(i));
+}
+
+// --- 每天開始寫入的時間（v0.3.26）---
+// 設定 inews.write_start（預設 07:00）：播出日開始（02:00）到這個時間之前，自動流程照常讀 iNEWS、
+// 比對、產生關鍵字，但不寫入協作文件；時間到了才開始寫，而且只寫這個時間之後的節次 ——
+// 跟 07:00 才打開工具一樣。早上 06:00 到班就可以先開著。空白＝不限制。
+function hhmmToMinutes(text) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(text ?? "").trim());
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+/** 播出日裡的第幾分鐘（播出日從 broadcast_day_start 開始）。 */
+function broadcastMinute(minutes) {
+  const dayStart = hhmmToMinutes(inewsCfg.broadcast_day_start ?? "02:00") ?? 120;
+  return (((minutes - dayStart) % 1440) + 1440) % 1440;
+}
+
+function writeStartMinute() {
+  const start = hhmmToMinutes(inewsCfg.write_start);
+  return start === null ? null : broadcastMinute(start);
+}
+
+/** 現在還沒到每天開始寫入的時間。 */
+function beforeWriteStart(now = new Date()) {
+  const start = writeStartMinute();
+  return start !== null && broadcastMinute(now.getHours() * 60 + now.getMinutes()) < start;
+}
+
+/** 這張 iNEWS 卡片屬於開始寫入時間以前的節次（例：開始時間 07:00，0600 節的稿）。 */
+function beforeWriteStartShow(item) {
+  const start = writeStartMinute();
+  const show = item.inews?.show ?? "";
+  if (start === null || !/^\d{4}$/.test(show) || item.inews?.manual) return false;
+  return broadcastMinute(Number(show.slice(0, 2)) * 60 + Number(show.slice(2))) < start;
 }
 
 function loadSummary(summary) {
@@ -1117,7 +1152,12 @@ async function runInewsPipeline() {
   }
 
   // 3. 寫入（或等確認）。分隔線要等上一節補掃完才寫，新一節的稿也先等著。
-  const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel);
+  if (beforeWriteStart()) {
+    hideInewsConfirm();
+    inewsStatus(`⏳ 每天 ${inewsCfg.write_start} 才開始寫入協作文件；在那之前照常讀 iNEWS、比對、產生關鍵字。`, "warn");
+    return;
+  }
+  const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel).filter((i) => !beforeWriteStartShow(i));
   const plan = inewsWriteText(ready);
   if (plan.written.length === 0 && !plan.text.trim()) {
     hideInewsConfirm();
@@ -1569,7 +1609,7 @@ async function confirmInewsWrite() {
   btn.disabled = true;
   try {
     // 用按下去這一刻的狀態重算，不用顯示時那份：中間可能比對過或改過勾選。
-    const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel);
+    const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel).filter((i) => !beforeWriteStartShow(i));
     if (ready.length === 0 && !dividerOwed()) {
       hideInewsConfirm();
       return;
@@ -1967,6 +2007,8 @@ ${sec("slots", "節次判定", `
             ${check("inews.hold_after_open_live", s.hold_after_open_live !== false, "0:00 的直進／LIVE 播出後，後面的稿等新的硬時間")}
             ${num("直進暫緩上限（分鐘）", "inews.open_live_max_minutes", s.open_live_max_minutes ?? 30, 1)}
             ${text("播出日分界（HH:MM）", "inews.broadcast_day_start", s.broadcast_day_start ?? "02:00")}
+            ${text("每天開始寫入（HH:MM，空白＝不限制）", "inews.write_start", s.write_start ?? "07:00")}
+            <div class="muted">播出日分界到這個時間之前只讀不寫；時間到了從當時的節次開始寫，跟那時才打開工具一樣。</div>
             ${text("節次分隔線（{hh} 小時、{show} 節次）", "inews.divider_format", s.divider_format)}
             <div class="field">
               <label>分隔線位置</label>
