@@ -23,8 +23,8 @@ pub const NO_BODY_PASS_NOTE: &str = "，沒有稿頭內文也寫入";
 fn needs_manual(mut entry: NewsEntry, force: bool, cfg: &Config) -> Outcome {
     let class = clean::classify_style(&entry.style, &cfg.filter);
     // 氣象稿沒有稿頭內文也寫入（v0.3.11）。這裡先留在待補稿、只做記號：0822 氣象稿要
-    // 先給 App 補氣象署的天氣概況（補進去的要人工核對），之後才由
-    // `pass_weather_without_body` 把還是空的移到通過。樣式被擋（BS）的照樣濾除；
+    // 先給 App 補氣象署的天氣概況，之後才由 `pass_weather_without_body` 移到通過
+    // （v0.3.27 起補到內文的也一起通過、自動寫入）。樣式被擋（BS）的照樣濾除；
     // 樣式不認得的仍留給人判斷。`force`（「專」開頭不論樣式一律通過、樣式空白依
     // slug 時間標／含氣象判定為新聞）優先：「專」開頭的 BS 氣象稿也照樣寫。
     if let Some(term) = clean::no_body_pass_term(&entry.slug, &cfg.filter) {
@@ -41,16 +41,18 @@ fn needs_manual(mut entry: NewsEntry, force: bool, cfg: &Config) -> Outcome {
     }
 }
 
-/// 待補稿裡做了 `NO_BODY_PASS_NOTE` 記號、內文仍然是空的氣象稿移到通過（v0.3.11）。
-/// App 要在補完 0822 的氣象署內文之後才呼叫：補進內文的留在待補稿給人核對。
+/// 待補稿裡做了 `NO_BODY_PASS_NOTE` 記號的氣象稿移到通過（v0.3.11）。App 要在補完
+/// 0822 的氣象署內文之後才呼叫。
+///
+/// v0.3.27：補進氣象署內文的也一起通過、自動寫入（使用者 11/16 決定，不再留在待補稿等人
+/// 核對）；這時「沒有稿頭內文也寫入」的記號已經不對，拿掉。
 pub fn pass_weather_without_body(summary: &mut ImportSummary) {
     let manual = std::mem::take(&mut summary.needs_manual);
     for o in manual {
         match o {
-            Outcome::NeedsManualContent(mut e)
-                if e.body.trim().is_empty() && e.warnings.iter().any(|w| w.ends_with(NO_BODY_PASS_NOTE)) =>
-            {
-                e.warnings.retain(|w| !w.contains("需人工補"));
+            Outcome::NeedsManualContent(mut e) if e.warnings.iter().any(|w| w.ends_with(NO_BODY_PASS_NOTE)) => {
+                let filled = !e.body.trim().is_empty();
+                e.warnings.retain(|w| !w.contains("需人工補") && !(filled && w.ends_with(NO_BODY_PASS_NOTE)));
                 summary.passed.push(e);
             }
             other => summary.needs_manual.push(other),

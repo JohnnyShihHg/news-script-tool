@@ -173,12 +173,11 @@ fn apply_outlook(entry: &mut NewsEntry, response: &Result<Outlook, String>, toda
         Ok(outlook) => match modified_date(entry) {
             Some(date) if date == outlook.date => {
                 entry.body = outlook.body.clone();
-                // 補進內文就留在待補稿給人核對，不再當「沒內文也寫入」（v0.3.11）。
-                entry.warnings.retain(|w| {
-                    w != "找到標題但無稿頭內文，需人工補稿" && !w.ends_with(news_script_core::NO_BODY_PASS_NOTE)
-                });
+                // 補進內文後照樣自動寫入（v0.3.27，使用者 11/16 決定）：留著「沒內文也寫入」的
+                // 記號，讓 `pass_weather_without_body` 移到通過；記號本身在那裡拿掉。
+                entry.warnings.retain(|w| w != "找到標題但無稿頭內文，需人工補稿");
                 entry.warnings.push(format!(
-                    "已用中央氣象署 {date} 的「今、明」天氣概況補入內文，請人工核對"
+                    "已用中央氣象署 {date} 的天氣概況補入內文並自動寫入，有問題請在文件裡改"
                 ));
             }
             Some(date) => entry.warnings.push(format!(
@@ -356,7 +355,7 @@ var W01_Content=[
         });
         apply_outlook(entry, &fetched, "2026-09-21");
         assert_eq!(entry.body, "今、明兩天多雲到晴。");
-        assert!(entry.warnings.iter().any(|w| w.contains("請人工核對")));
+        assert!(entry.warnings.iter().any(|w| w.contains("天氣概況補入內文")));
         assert!(!entry.warnings.iter().any(|w| w.contains("無稿頭內文")));
     }
 

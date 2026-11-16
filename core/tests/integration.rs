@@ -764,8 +764,9 @@ fn a_weather_slug_like_the_1109_0900_one_is_written_without_a_body() {
 }
 
 #[test]
-fn a_weather_entry_whose_body_was_filled_in_stays_for_a_human_to_check() {
-    // 0822 氣象稿被 App 補上氣象署內文之後就不是「沒內文」了：留在待補稿給人核對。
+fn a_weather_entry_whose_body_was_filled_in_is_written_too() {
+    // 0822 氣象稿被 App 補上氣象署內文之後也自動寫入（v0.3.27，以前留在待補稿給人核對），
+    // 「沒有稿頭內文也寫入」的記號拿掉。
     let text = "新聞名稱(標題): 淑麗報氣象0822\n樣式: LIVE\n累積時間: 08:22:00\n\
                 _______________________________________________________________\n\
                 [<\n[BAR_最新大]\nT2合成天氣標題\n>]\n";
@@ -774,7 +775,10 @@ fn a_weather_entry_whose_body_was_filled_in_stays_for_a_human_to_check() {
         e.body = "今、明合成天氣概況。".into();
     }
     pass_weather_without_body(&mut summary);
-    assert_eq!((summary.passed.len(), summary.needs_manual.len()), (0, 1));
+    assert_eq!((summary.passed.len(), summary.needs_manual.len()), (1, 0));
+    let e = &summary.passed[0];
+    assert_eq!(e.body, "今、明合成天氣概況。");
+    assert!(!e.warnings.iter().any(|w| w.contains("沒有稿頭內文也寫入") || w.contains("需人工補")), "{:?}", e.warnings);
 }
 
 /// 匯入一個檔案、跑完「氣象稿沒內文也寫入」，它應該在通過。
