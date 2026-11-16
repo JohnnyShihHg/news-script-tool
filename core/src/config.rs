@@ -514,6 +514,11 @@ pub struct InewsConfig {
     /// 每天開始寫入的時間（v0.3.26，`HH:MM`）：播出日分界到這個時間之前，自動流程只讀
     /// 不寫；時間到了只寫這個時間之後的節次。空字串＝不限制。
     pub write_start: String,
+    /// 協作文件大量變動（v0.3.29）：兩次讀文件之間，今天段落扣掉工具自己寫的還增減這麼多行
+    /// 以上，就暫停寫入和時間校正 `bulk_change_wait_seconds` 秒。
+    pub bulk_change_lines: u32,
+    /// 0 = 不偵測。
+    pub bulk_change_wait_seconds: u64,
 }
 
 impl Default for InewsConfig {
@@ -560,6 +565,8 @@ impl Default for InewsConfig {
             unknown_review_volume: 60,
             prelist_queue: "51新聞台.STORIES.LOCAL.APPR".into(),
             write_start: "07:00".into(),
+            bulk_change_lines: 20,
+            bulk_change_wait_seconds: 60,
         }
     }
 }

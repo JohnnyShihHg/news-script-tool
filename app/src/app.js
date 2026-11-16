@@ -760,6 +760,8 @@ function outputFieldsOf(i) {
 // 最上面那一段，寫成 `(X)slug<Tab>樣式`，放在日期分隔線下面。同一批裡剛好是預列稿的，
 // 寫入時也加 (X)。後端寫入當下會再確認一次段落是不是還空著，不是就不放。
 let prelistWanted = false;
+/// 協作文件剛大量變動、還要等幾秒才寫入（v0.3.29，比對時後端告訴我們）。
+let bulkHoldSeconds = 0;
 let prelistDoneFor = "";
 
 async function prelistForWrite(outgoing) {
@@ -1113,6 +1115,7 @@ async function correctCollabTimes(rows) {
     if (r.corrected.length) lines.push(`✏ 時間校正 ${r.corrected.length} 則：${r.corrected.join("、")}`);
     if (r.failed.length) lines.push(`⚠ 時間校正 ${r.failed.length} 則內容不符，下一輪重新判斷：${r.failed.join("、")}`);
     if (r.waiting) lines.push(`⏳ ${r.waiting} 則時間有變，等下一輪確認後再改`);
+    if (r.held_seconds) lines.push(`⏸ 協作文件剛有大量變動，時間校正等 ${r.held_seconds} 秒後再做`);
     if (lines.length) node.textContent += `\n${lines.join("\n")}`;
   } catch (err) {
     node.textContent += `\n⚠ 時間校正失敗（下一輪會再試）：${err}`;
@@ -1153,6 +1156,11 @@ async function runInewsPipeline() {
   }
 
   // 3. 寫入（或等確認）。分隔線要等上一節補掃完才寫，新一節的稿也先等著。
+  if (bulkHoldSeconds > 0) {
+    hideInewsConfirm();
+    inewsStatus(`⏸ 協作文件剛有大量變動（有人整段貼上或刪除），等 ${bulkHoldSeconds} 秒文件穩定再寫入。`, "warn");
+    return;
+  }
   if (beforeWriteStart()) {
     hideInewsConfirm();
     inewsStatus(`⏳ 每天 ${inewsCfg.write_start} 才開始寫入協作文件；在那之前照常讀 iNEWS、比對、產生關鍵字。`, "warn");
@@ -1748,6 +1756,7 @@ async function compareWithCollabDoc({ silent = false } = {}) {
     compareHoldsAutoWrite = !!day.hold_auto_write;
     dateHeaderOwed = day.header_to_add && dateHeaderWrittenFor !== day.today ? day.header_to_add : "";
     prelistWanted = !!day.prelist_wanted;
+    bulkHoldSeconds = day.bulk_hold_seconds ?? 0;
     const matched = [];
     // Paired by position, not slug: two versions of one slug can now differ.
     for (const [n, item] of targets.entries()) {
@@ -2043,6 +2052,8 @@ ${sec("write", "寫入與比對", `
             ${num("異常冷卻上限（分鐘）", "inews.anomaly_max_cooldown_minutes", s.anomaly_max_cooldown_minutes ?? 15, 1)}
             ${num("定時複查已結束節次（分鐘，0 = 關閉）", "inews.recheck_interval_minutes", s.recheck_interval_minutes ?? 30)}
             ${check("inews.correct_time", s.correct_time !== false, "時間校正：已寫入的稿時間跟著 rundown 改")}
+            ${num("文件大量變動：兩次讀取之間增減幾行以上算大量", "inews.bulk_change_lines", s.bulk_change_lines ?? 20, 1)}
+            ${num("文件大量變動後暫停寫入與校正幾秒（0 = 不偵測）", "inews.bulk_change_wait_seconds", s.bulk_change_wait_seconds ?? 60)}
             ${num("時間校正：連續幾輪一樣才改", "inews.correct_time_stable_rounds", s.correct_time_stable_rounds ?? 2, 1)}
             ${num("時間校正：差超過幾分鐘不改（疑似挪稿）", "inews.correct_time_max_delta_minutes", s.correct_time_max_delta_minutes ?? 10, 1)}`)}
 ${sec("review", "審查與提示音", `

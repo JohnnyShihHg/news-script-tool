@@ -55,6 +55,98 @@ struct AppState {
     last_compare_log: Mutex<String>,
     /// 時間校正跨輪要記得的東西（連續幾輪同一個新時間、已經記過的略過原因）。
     time_fix: Mutex<TimeFixState>,
+    /// 協作文件大量變動偵測（v0.3.29）。
+    bulk: Mutex<BulkWatch>,
+}
+
+/// 協作文件大量變動（v0.3.29）：每次讀文件記下今天段落有幾行，跟上一次比，扣掉工具自己
+/// 寫進去的行數，還差 `bulk_change_lines` 行以上（有人整段貼上或刪掉，不管是在 App 的
+/// 協作視窗還是別人的瀏覽器）就暫停寫入和時間校正 `bulk_change_wait_seconds` 秒，等文件
+/// 穩定再動。11/15 16:42 有人貼上約 100 行、之後又兩次刪掉約 47 行，那段時間的時間校正
+/// 跟人工編輯撞在一起，有幾則時間不見。
+#[derive(Default)]
+struct BulkWatch {
+    day: String,
+    lines: Option<usize>,
+    /// 上次讀文件之後，工具自己寫進去的行數。
+    own: usize,
+    hold_until: Option<std::time::Instant>,
+}
+
+/// 讀到文件後呼叫：更新紀錄，正在等待的話回傳還要等幾秒。
+fn bulk_check(state: &AppState, doc_text: &str, today: &str, cfg: &news_script_core::config::Config) -> Option<u64> {
+    let wait = cfg.inews.bulk_change_wait_seconds;
+    if wait == 0 {
+        return None;
+    }
+    let n = news_script_core::doc_match::date_section(doc_text, today)
+        .map_or_else(|| doc_text.lines().count(), |s| s.lines().count());
+    let mut w = lock_or_recover(&state.bulk);
+    let (left, log) = bulk_step(&mut w, today, n, cfg.inews.bulk_change_lines, wait, std::time::Instant::now());
+    if let (Some(line), Some(dir)) = (log, inews_log_dir()) {
+        inews::append_log(&dir, &line);
+    }
+    left
+}
+
+/// `bulk_check` 的判斷本身（不碰 App 狀態、不寫紀錄，方便測）：回傳（還要等幾秒，要寫的紀錄）。
+fn bulk_step(
+    w: &mut BulkWatch,
+    today: &str,
+    n: usize,
+    threshold: u32,
+    wait: u64,
+    now: std::time::Instant,
+) -> (Option<u64>, Option<String>) {
+    if w.day != today {
+        *w = BulkWatch { day: today.to_string(), lines: Some(n), ..Default::default() };
+        return (None, None);
+    }
+    let mut log = None;
+    if let Some(prev) = w.lines {
+        let delta = n as i64 - prev as i64 - w.own as i64;
+        if delta.unsigned_abs() >= u64::from(threshold.max(1)) {
+            w.hold_until = Some(now + std::time::Duration::from_secs(wait));
+            log = Some(format!(
+                "[大量變動] 今天段落 {prev} → {n} 行（扣掉工具寫的 {} 行，變動 {delta:+} 行），暫停寫入與時間校正 {wait} 秒",
+                w.own
+            ));
+        }
+    }
+    w.lines = Some(n);
+    w.own = 0;
+    (w.hold_until.and_then(|t| t.checked_duration_since(now)).map(|d| d.as_secs().max(1)), log)
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_big_paste_or_delete_holds_for_a_minute_but_the_tools_own_writes_do_not() {
+        let t0 = Instant::now();
+        let mut w = BulkWatch::default();
+        assert_eq!(bulk_step(&mut w, "1115", 629, 20, 60, t0).0, None, "第一次只記下來");
+        // 工具自己寫了 7 行：不算。
+        w.own = 7;
+        assert_eq!(bulk_step(&mut w, "1115", 636, 20, 60, t0).0, None);
+        // 有人一次貼上 90 行（11/15 16:42 的樣子）：暫停 60 秒。
+        let (left, log) = bulk_step(&mut w, "1115", 726, 20, 60, t0);
+        assert_eq!(left, Some(60));
+        assert!(log.unwrap().contains("+90"));
+        // 30 秒後還在等；這段時間文件沒再大動，60 秒到了就恢復。
+        assert_eq!(bulk_step(&mut w, "1115", 726, 20, 60, t0 + Duration::from_secs(30)).0, Some(30));
+        assert_eq!(bulk_step(&mut w, "1115", 727, 20, 60, t0 + Duration::from_secs(61)).0, None);
+        // 刪掉 47 行也算；等待中又大動就重新計時。
+        assert_eq!(bulk_step(&mut w, "1115", 680, 20, 60, t0 + Duration::from_secs(70)).0, Some(60));
+        // 同事一般打一則稿（幾行）不算。
+        let mut w = BulkWatch::default();
+        bulk_step(&mut w, "1115", 700, 20, 60, t0);
+        assert_eq!(bulk_step(&mut w, "1115", 706, 20, 60, t0).0, None);
+        // 換日重新開始，不跟前一天比。
+        assert_eq!(bulk_step(&mut w, "1116", 5, 20, 60, t0).0, None);
+    }
 }
 
 #[derive(Default)]
@@ -1011,6 +1103,8 @@ struct CompareDayDto {
     hold_auto_write: bool,
     /// 今天的段落還沒有或是空的：第一次寫入時要補預列清單（v0.3.23）。
     prelist_wanted: bool,
+    /// 協作文件剛大量變動，還要等幾秒才寫入（v0.3.29）；0 = 不用等。
+    bulk_hold_seconds: u64,
 }
 
 #[derive(Serialize)]
@@ -1451,6 +1545,10 @@ async fn append_to_collab_doc_checked(
 
     let _turn = collab_turn(&state).await?;
     let doc_text = eval_in_collab_locked(&app, &state, SCRAPE_SCRIPT).await?;
+    // 協作文件剛大量變動：這次不寫，回 [未就緒]，前端把稿留著、下一輪再試（v0.3.29）。
+    if let Some(left) = bulk_check(&state, &doc_text, &today, &cfg) {
+        return Err(format!("[未就緒] 協作文件剛有大量變動（有人整段貼上或刪除），等 {left} 秒文件穩定再寫入。"));
+    }
     let prelist = prelist.unwrap_or_default();
     let filtered = news_script_core::doc_match::filter_write_parts_with_prelist(
         &parts,
@@ -1478,6 +1576,10 @@ async fn append_to_collab_doc_checked(
     }
 
     let r = eval_in_collab_locked(&app, &state, &build_append_script(&filtered.text)).await;
+    if r.is_ok() {
+        // 自己寫進去的行數（加上前面那一行空行），下一次讀文件時不算成「大量變動」。
+        lock_or_recover(&state.bulk).own += filtered.text.lines().count() + 1;
+    }
     if let Some(note) = &log_note {
         match &r {
             Ok(_) => log(format!("[寫入] 成功：{note}")),
@@ -1584,6 +1686,8 @@ struct CorrectDto {
     failed: Vec<String>,
     /// 新時間還沒連續出現夠多輪，先等。
     waiting: usize,
+    /// 協作文件剛大量變動，這一輪不校正，還要等幾秒（v0.3.29）。
+    held_seconds: u64,
 }
 
 /// 時間校正（v0.3.9）：rundown 已播出的列（`InewsMeta::time_rows`）對今天段落，時間
@@ -1605,7 +1709,11 @@ async fn correct_collab_times(
     let plan = if rows.is_empty() {
         Default::default()
     } else {
-        plan_time_corrections(&scrape_collab_text(&app, &state).await?, &today, &rows, &cfg.markers.refresh_keywords, cfg.inews.correct_time_max_delta_minutes)
+        let doc = scrape_collab_text(&app, &state).await?;
+        if let Some(left) = bulk_check(&state, &doc, &today, &cfg) {
+            return Ok(CorrectDto { held_seconds: left, ..Default::default() });
+        }
+        plan_time_corrections(&doc, &today, &rows, &cfg.markers.refresh_keywords, cfg.inews.correct_time_max_delta_minutes)
     };
     let log_dir = inews_log_dir();
     let log = |line: String| {
@@ -1677,6 +1785,7 @@ async fn compare_with_collab_doc(
 
     let cfg = lock_or_recover(&state.config).clone();
     let (today, previous) = inews::broadcast_days(inews::taipei_now(), &cfg.inews.broadcast_day_start);
+    let bulk_hold_seconds = bulk_check(&state, &doc_text, &today, &cfg).unwrap_or(0);
     let days = day_sections(&doc_text, &today, &previous);
     // 工具自己加在標題前面的前綴和 slug 標記，跨天比對標題時不算。
     let a = &cfg.annotations;
@@ -1785,6 +1894,7 @@ async fn compare_with_collab_doc(
             hold_auto_write,
             prelist_wanted: !cfg.inews.prelist_queue.trim().is_empty()
                 && news_script_core::doc_match::prelist_wanted(&doc_text, &today, &previous),
+            bulk_hold_seconds,
         },
     })
 }
@@ -1873,6 +1983,7 @@ fn main() {
             inews: Default::default(),
             last_compare_log: Mutex::new(String::new()),
             time_fix: Default::default(),
+            bulk: Default::default(),
         })
         .invoke_handler(tauri::generate_handler![
             import_folder,
