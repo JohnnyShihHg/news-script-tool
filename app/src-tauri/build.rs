@@ -45,6 +45,8 @@ fn main() {
             "search_rundown_slugs",
             "load_rundown_story",
             "fetch_prelist",
+            "get_autostart",
+            "set_autostart",
         ])),
     )
     .expect("failed to run tauri-build");

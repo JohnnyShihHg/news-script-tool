@@ -517,6 +517,62 @@ async fn fetch_prelist(window: tauri::Window, state: tauri::State<'_, AppState>)
     Ok(list)
 }
 
+// --- 開機自動啟動（v0.3.28）---
+// 寫在目前使用者的 HKCU\...\Run，不需要系統管理員權限；更新安裝在同一個路徑，不用重設。
+// 用 Windows 內建的 reg.exe，不另外加套件。
+#[cfg(windows)]
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
+const AUTOSTART_NAME: &str = "NewsScriptTool";
+
+#[cfg(windows)]
+fn reg(args: &[&str]) -> std::io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("reg").args(args).creation_flags(CREATE_NO_WINDOW).output()
+}
+
+#[tauri::command]
+fn get_autostart(window: tauri::Window) -> Result<bool, String> {
+    require_main_window(&window)?;
+    #[cfg(windows)]
+    {
+        let out = reg(&["query", AUTOSTART_KEY, "/v", AUTOSTART_NAME]).map_err(|e| e.to_string())?;
+        Ok(out.status.success())
+    }
+    #[cfg(not(windows))]
+    Ok(false)
+}
+
+#[tauri::command]
+fn set_autostart(window: tauri::Window, enabled: bool) -> Result<(), String> {
+    require_main_window(&window)?;
+    #[cfg(windows)]
+    {
+        let out = if enabled {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let value = format!("\"{}\"", exe.display());
+            reg(&["add", AUTOSTART_KEY, "/v", AUTOSTART_NAME, "/t", "REG_SZ", "/d", &value, "/f"])
+        } else {
+            reg(&["delete", AUTOSTART_KEY, "/v", AUTOSTART_NAME, "/f"])
+        }
+        .map_err(|e| e.to_string())?;
+        // 本來就沒有的時候刪除會失敗，當成功（結果一樣）。
+        if !out.status.success() && enabled {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        if let Some(dir) = inews_log_dir() {
+            inews::append_log(&dir, if enabled { "[設定] 開機自動啟動：開" } else { "[設定] 開機自動啟動：關" });
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("只支援 Windows".to_string())
+    }
+}
+
 /// 前端的決策寫進決策紀錄（v0.3.15：未知樣式審查）。只收一行，太長就截斷。
 #[tauri::command]
 fn append_decision_log(window: tauri::Window, line: String) -> Result<(), String> {
@@ -1854,7 +1910,9 @@ fn main() {
             collab_idle_seconds,
             search_rundown_slugs,
             load_rundown_story,
-            fetch_prelist
+            fetch_prelist,
+            get_autostart,
+            set_autostart
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

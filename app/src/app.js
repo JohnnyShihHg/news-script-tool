@@ -207,6 +207,7 @@ async function initFromConfig() {
   if (Number.isFinite(config.gemini?.max_per_run)) keywordMaxPerRun = config.gemini.max_per_run;
   noUploadLabel = config.annotations?.no_upload_label ?? noUploadLabel;
   applyInewsConfig(config);
+  startupActions(config.ui);
   const folder = config.import?.default_folder ?? "";
   if (!folder) return;
 
@@ -1700,6 +1701,16 @@ async function diagnoseCollab() {
   }
 }
 
+/// 開啟 App 時要自動做的事（v0.3.28，設定 › 開機與啟動）：打開協作工具視窗、打開自動刷新。
+/// 協作工具還在載入時第一輪比對會說「未就緒」、下一輪再試，所以不用等它載完。
+async function startupActions(ui) {
+  if (ui?.open_collab_on_start || ui?.auto_refresh_on_start) await openCollab();
+  if (ui?.auto_refresh_on_start && !el("inewsAutoToggle").checked) {
+    el("inewsAutoToggle").checked = true;
+    toggleInewsAuto();
+  }
+}
+
 async function openCollab(status = el("compareStatus")) {
   try {
     await invoke("open_collab_window");
@@ -1887,7 +1898,7 @@ checkForUpdate({ silent: true });
 
 const PUNCT_LABELS = { ",": "， (逗號)", ":": "： (冒號)", ";": "； (分號)", "?": "？ (問號)", "!": "！ (驚嘆號)", "(": "（ (左括號)", ")": "） (右括號)" };
 
-function settingsModalHtml(config, apiStatus, inewsCred) {
+function settingsModalHtml(config, apiStatus, inewsCred, autostart = false) {
   const inewsSettings = config.inews ?? {};
   const styleField = (label, key, value) => `
     <div class="field">
@@ -2050,6 +2061,12 @@ ${sec("review", "審查與提示音", `
               <label>音量 <span id="volumeLabel">${volume}</span></label>
               <input type="range" id="soundVolumeInput" min="0" max="100" step="5" data-cfg-num="inews.unknown_review_volume" value="${volume}" />
             </div>`)}
+${sec("startup", "開機與啟動", `
+            <label class="checkbox-row"><input type="checkbox" id="autostartToggle" ${autostart ? "checked" : ""} /> 開機後自動啟動 App（勾選後立即生效）</label>
+            ${check("ui.open_collab_on_start", config.ui.open_collab_on_start, "啟動時自動開啟協作工具")}
+            ${check("ui.auto_refresh_on_start", config.ui.auto_refresh_on_start, "啟動時自動打開「自動刷新」（會一併開啟協作工具）")}
+            <div class="muted">三個都勾：開機就開著，搭配「每天開始寫入」時間，到點自動開始寫。</div>
+            <div id="autostartStatus" class="muted"></div>`)}
 ${sec("theme", "外觀主題", `
             <div class="field">
               <select id="themeSelect" data-cfg="ui.theme">
@@ -2229,12 +2246,23 @@ function wireSettingsAccordion() {
 }
 
 async function openSettings() {
-  const [config, apiStatus, inewsCred] = await Promise.all([
+  const [config, apiStatus, inewsCred, autostart] = await Promise.all([
     invoke("get_config"),
     invoke("get_api_key_status"),
     invoke("get_inews_credential_status").catch(() => ({ has_credentials: false, username: "" })),
+    invoke("get_autostart").catch(() => false),
   ]);
-  document.body.insertAdjacentHTML("beforeend", settingsModalHtml(config, apiStatus, inewsCred));
+  document.body.insertAdjacentHTML("beforeend", settingsModalHtml(config, apiStatus, inewsCred, autostart));
+  el("autostartToggle")?.addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    try {
+      await invoke("set_autostart", { enabled: on });
+      el("autostartStatus").textContent = on ? "✅ 已設定開機自動啟動" : "已取消開機自動啟動";
+    } catch (err) {
+      e.target.checked = !on;
+      el("autostartStatus").textContent = `⚠ 設定失敗：${err}`;
+    }
+  });
 
   // Dismissing without saving must not leave an un-persisted theme applied.
   const close = () => {

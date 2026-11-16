@@ -332,11 +332,17 @@ pub struct UiConfig {
     /// (not in browser storage) so a chosen theme survives restarts and stays put
     /// until someone explicitly saves a different one.
     pub theme: String,
+    /// 開啟 App 時自動打開協作工具視窗（v0.3.28）。配合「開機自動啟動」，開機就準備好。
+    #[serde(default)]
+    pub open_collab_on_start: bool,
+    /// 開啟 App 時自動打開「自動刷新」（v0.3.28）；會一併打開協作工具視窗。
+    #[serde(default)]
+    pub auto_refresh_on_start: bool,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { theme: "light".into() }
+        Self { theme: "light".into(), open_collab_on_start: false, auto_refresh_on_start: false }
     }
 }
 

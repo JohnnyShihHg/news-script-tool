@@ -339,9 +339,31 @@ pub fn match_in_days(
 
 /// 節次分隔線：`==== 07 ====`、`==== 22 關鍵時刻 ====`（等號中間是 1～2 位數的小時）。
 fn is_show_divider(line: &str) -> bool {
-    static RE: once_cell::sync::Lazy<regex::Regex> =
-        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^=+\s*\d{1,2}(?:\s.*?)?\s*=+$").unwrap());
-    RE.is_match(&normalize_for_match(line))
+    show_divider_key(line).is_some()
+}
+
+/// 節次／節目分隔線的「身分」：小時＋節目名稱（v0.3.28）。寫法不同但指同一節的都算同一條：
+/// 工具寫的 `==== 17 ====`、同事手打的 `===17===`、`=======0900`、`======1500`、全形等號。
+/// 節目分隔線 `==== 22 關鍵時刻 ====` 和 `===22===` 不同（名稱不同）。日期分隔線不算。
+///
+/// 11/15 17:48 App 重開後補 1700 收尾，文件裡的 17 是同事手打的 `===17===`，以前只認一模
+/// 一樣的一行，於是又寫了一條 `==== 17 ====`。
+pub fn show_divider_key(line: &str) -> Option<String> {
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"^=+\s*(\d{4}|\d{1,2})(?:\s+(.*?))?\s*=*$").unwrap()
+    });
+    if date_divider(line).is_some() {
+        return None;
+    }
+    let norm = normalize_for_match(line);
+    let c = RE.captures(&norm)?;
+    let digits = &c[1];
+    let hour: u32 = if digits.len() == 4 { digits[..2].parse().ok()? } else { digits.parse().ok()? };
+    if hour > 24 {
+        return None;
+    }
+    let name = c.get(2).map_or("", |m| m.as_str()).trim_matches(|ch: char| ch == '=' || ch.is_whitespace());
+    Some(format!("{hour:02}|{name}"))
 }
 
 /// 今天段落的預列區（v0.3.23）：日期分隔線之後、第一條節次分隔線之前的行。
@@ -1732,7 +1754,11 @@ pub fn filter_write_parts_with_prelist(
                     .filter(|b| {
                         let line = b.trim();
                         let single = b.lines().filter(|l| !l.trim().is_empty()).count() == 1;
-                        if single && scope_lines.iter().any(|l| *l == line) {
+                        let key = show_divider_key(line);
+                        let present = scope_lines
+                            .iter()
+                            .any(|l| *l == line || (key.is_some() && show_divider_key(l) == key));
+                        if single && present {
                             dropped.push(line.to_string());
                             false
                         } else {
@@ -1789,6 +1815,27 @@ mod write_filter_tests {
     }
 
     const DAY: &str = "==========1109==========\n";
+
+    #[test]
+    fn a_hand_typed_divider_for_the_same_hour_counts_as_already_there() {
+        // 11/15 17:48：文件裡是同事手打的 ===17===，工具又補了一條 ==== 17 ====。
+        let parts = [divider("==== 17 ===="), entry("台南樹壓車1700", "標題", "內文。", "#k")];
+        for existing in ["===17===", "==== 17 ====", "=====1700", "＝＝＝17＝＝＝", "=== 17"] {
+            let doc = format!("{DAY}{existing}\n別的稿1700 SOT 17:00:00\n");
+            let out = filter(&parts, &doc);
+            assert!(!out.text.contains("==== 17 ===="), "{existing}: {:?}", out.text);
+            assert!(out.text.contains("台南樹壓車1700"), "{existing}");
+        }
+        // 別的小時、節目名稱不同、日期分隔線都不算同一條。
+        for other in ["===16===", "==== 17 關鍵時刻 ====", "==========1109"] {
+            let doc = format!("{DAY}{other}\n");
+            assert!(filter(&parts, &doc).text.starts_with("==== 17 ===="), "{other}");
+        }
+        assert_eq!(show_divider_key("=======0900").as_deref(), Some("09|"));
+        assert_eq!(show_divider_key("==== 22 關鍵時刻 ====").as_deref(), Some("22|關鍵時刻"));
+        assert_eq!(show_divider_key("==========1115"), None, "日期分隔線");
+        assert_eq!(show_divider_key("===== 報時 ====="), None);
+    }
 
     #[test]
     fn an_entry_the_other_machine_already_wrote_is_dropped_whole() {
