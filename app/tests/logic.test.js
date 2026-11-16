@@ -1037,6 +1037,46 @@ test("only new unknown-style iNEWS cards are queued for review, once per version
   assert.deepEqual(L.unknownReviewTargets([{ bucket: "unknown", id: "entry-0" }], new Set()), []);
 });
 
+test("a 重播-style card waits for the compare, then is skipped when today's doc already has the slug", () => {
+  // v0.3.31：11/11 竹山抓通緝1200 樣式「重播」，同 slug 12:01 已經寫過，不該跳審查。
+  const cards = L.inewsItemsFromSummary(inewsSummary("1200", [
+    { slug: "竹山抓通緝1200", key: "R:1", version: "v1" },
+    { slug: "沒寫過的1200", key: "R:2", version: "v1" },
+    { slug: "昨天的稿1200", key: "R:3", version: "v1" },
+    { slug: "一般未知1200", key: "R:4", version: "v1" },
+  ]));
+  for (const c of cards) c.bucket = "unknown";
+  for (const c of cards.slice(0, 3)) c.dto[c.kind].style = "重播";
+  assert.equal(L.isRerunStyle(cards[0]), true);
+  assert.equal(L.isRerunStyle(cards[3]), false);
+  // 還沒比對：重播先不排，其他未知樣式照舊。
+  assert.deepEqual(L.unknownReviewTargets(cards, new Set()).map((t) => t.key), ["R:4|v1"]);
+  // 比對後：今天有 → 略過；今天沒有 → 審查；只有前一天有 → 審查。
+  cards[0].matchStatus = "to_cut";
+  cards[0].matchedLine = "竹山抓通緝1200 sot 11:59:53";
+  cards[1].matchStatus = "to_cut";
+  cards[1].matchedLine = null;
+  cards[2].matchStatus = "removed";
+  cards[2].matchedLine = "03 昨天的稿1200";
+  cards[2].crossDay = true;
+  assert.deepEqual(L.unknownReviewTargets(cards, new Set(["R:4|v1"])), [
+    { key: "R:1|v1", id: "inews-R:1", skip: true },
+    { key: "R:2|v1", id: "inews-R:2" },
+    { key: "R:3|v1", id: "inews-R:3" },
+  ]);
+  // 邏輯同一般 SOT：文件是抓新行、要重抓（不同節）→ 照抓新寫入，不審查。
+  cards[0].matchStatus = "keep_refresh";
+  cards[0].matchedLine = "(抓新)竹山抓通緝1200 sot 09:59:53";
+  assert.deepEqual(L.unknownReviewTargets([cards[0]], new Set()), [{ key: "R:1|v1", id: "inews-R:1", skip: true, write: true }]);
+  // 抓新但同一節（後端判成 in_doc）、或有其他標記 → 略過。
+  cards[0].matchStatus = "in_doc";
+  cards[0].matchedLine = "(抓新)竹山抓通緝1200 sot 11:59:53";
+  assert.deepEqual(L.unknownReviewTargets([cards[0]], new Set()), [{ key: "R:1|v1", id: "inews-R:1", skip: true }]);
+  cards[0].matchStatus = "removed";
+  cards[0].matchedLine = "03 竹山抓通緝1200 sot 11:59:53";
+  assert.deepEqual(L.unknownReviewTargets([cards[0]], new Set()), [{ key: "R:1|v1", id: "inews-R:1", skip: true }]);
+});
+
 // --- 手動勾選記憶（v0.3.15）---
 
 test("a manual tick survives the next compare, even on 已剔除 and 已在文件中 cards", () => {

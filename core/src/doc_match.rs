@@ -37,6 +37,40 @@ impl MatchResult {
     }
 }
 
+/// 一節的範圍，判斷沒帶時間的抓新行是不是「同一次播出」用（v0.3.31）。
+///
+/// 11/16 `拒外食狂嗆1200`：工具寫了 12:13:00，同事在那行前面加 `(抓新)`，製作人之後把
+/// rundown 時間改成 12:12:19 —— 原本時間不完全相同就重抓，同一次播出又寫了一行。現在
+/// 文件那行的時間跟 rundown 時間落在同一節就算已在文件。
+///
+/// 節次照換節的時間（硬時間）切；合併時段（1300 併入 1200，11:40～13:55）裡面再看
+/// 小時切開：合併播出時 SOT 可能 12 點播一次、13 點又播一次，13 點那次要重抓。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShowRange {
+    pub show: String,
+    /// 節次整點（當天第幾秒），把時間拉到同一條時間軸用。
+    pub nominal: u32,
+    /// 範圍（節次時間軸上的秒數）：開始 ～ 結束（不含）。
+    pub start: i64,
+    pub end: i64,
+    /// 合併進來的節次整點（時間軸上的秒數，由小到大）：範圍在這些地方再切開。
+    pub splits: Vec<i64>,
+}
+
+impl ShowRange {
+    /// 時間落在範圍裡的第幾段；範圍外回 None。
+    fn piece(&self, secs: i64) -> Option<usize> {
+        let t = crate::inews::unwrap_near(secs, self.nominal as i64);
+        (self.start..self.end).contains(&t).then(|| self.splits.iter().filter(|&&s| t >= s).count())
+    }
+
+    /// 兩個時間（當天秒數）是不是同一節的同一段。
+    pub fn same_airing(&self, a: i64, b: i64) -> bool {
+        matches!((self.piece(a), self.piece(b)), (Some(x), Some(y)) if x == y)
+    }
+}
+
+
 /// Fold fullwidth ASCII (｜FF01–FF5E) and the fullwidth space (U+3000) down to their
 /// halfwidth equivalents, and collapse/trim whitespace, so slug text copied from
 /// iNews compares equal to the same text as typed/pasted in the work doc.
@@ -102,6 +136,19 @@ pub fn match_entry(slug: &str, time: &str, doc_text: &str, refresh_keywords: &[S
 /// `match_entry`，另外帶這則所在的節次（`1800`）：卡片沒有累積時間時，`(抓18)` 改看
 /// 節次有沒有到 1800（v0.3.20）。
 pub fn match_entry_in_show(slug: &str, time: &str, show: &str, doc_text: &str, refresh_keywords: &[String]) -> MatchResult {
+    match_entry_in_range(slug, time, show, None, doc_text, refresh_keywords)
+}
+
+/// `match_entry_in_show`，另外帶這則所在節次的範圍（v0.3.31）：沒帶時間的抓新行，時間跟
+/// rundown 落在同一節（合併時段再看小時）就算已在文件。
+pub fn match_entry_in_range(
+    slug: &str,
+    time: &str,
+    show: &str,
+    range: Option<&ShowRange>,
+    doc_text: &str,
+    refresh_keywords: &[String],
+) -> MatchResult {
     let needle = normalize_for_match(slug);
     if needle.is_empty() {
         return MatchResult::miss();
@@ -111,7 +158,7 @@ pub fn match_entry_in_show(slug: &str, time: &str, show: &str, doc_text: &str, r
     doc_text
         .lines()
         .rev()
-        .find_map(|line| line_status(line, &needle, entry_time.as_deref(), show, refresh_keywords))
+        .find_map(|line| line_status(line, &needle, entry_time.as_deref(), show, range, refresh_keywords))
         .unwrap_or_else(MatchResult::miss)
 }
 
@@ -178,6 +225,7 @@ fn line_status(
     needle: &str,
     entry_time: Option<&str>,
     show_minute: Option<i64>,
+    range: Option<&ShowRange>,
     refresh_keywords: &[String],
 ) -> Option<MatchResult> {
     let hay = normalize_for_match(line);
@@ -198,8 +246,15 @@ fn line_status(
             (Some(mark), None, Some(show)) => show < mark,
             _ => false,
         };
+        // 沒帶時間的抓新行：文件那行的時間跟 rundown 落在同一節，是同一次播出被製作人
+        // 微調了時間，不是又播了一次（v0.3.31）。帶時間的照上面「時間到了沒」判斷。
+        let same_airing = |e: &str, l: &str| {
+            refresh_marker_minute(prefix).is_none()
+                && range.zip(clock_secs(e)).zip(clock_secs(l)).is_some_and(|((r, e), l)| r.same_airing(e, l))
+        };
         match (entry_time, time_after(&hay[idx + needle.len()..])) {
             (Some(e), Some(l)) if e == l => MatchStatus::InDoc,
+            (Some(e), Some(l)) if same_airing(e, &l) => MatchStatus::InDoc,
             _ if not_yet => MatchStatus::InDoc,
             _ => MatchStatus::KeepRefresh,
         }
@@ -284,6 +339,8 @@ pub struct EntryQuery<'a> {
     pub title: &'a str,
     /// 這則所在的節次（`1800`），沒有累積時間時判斷 (抓18) 用；不知道給空字串。
     pub show: &'a str,
+    /// 這則所在節次的範圍（v0.3.31）：沒帶時間的抓新行同一節不重抓。不知道給 None。
+    pub range: Option<&'a ShowRange>,
 }
 
 /// 以日期段落為範圍比對一則稿件。
@@ -302,9 +359,9 @@ pub fn match_in_days(
     title_strip: Option<&[String]>,
 ) -> MatchResult {
     if !days.has_dividers {
-        return match_entry_in_show(q.slug, q.time, q.show, whole_doc, refresh_keywords);
+        return match_entry_in_range(q.slug, q.time, q.show, q.range, whole_doc, refresh_keywords);
     }
-    let today = match_entry_in_show(q.slug, q.time, q.show, days.today.as_deref().unwrap_or(""), refresh_keywords);
+    let today = match_entry_in_range(q.slug, q.time, q.show, q.range, days.today.as_deref().unwrap_or(""), refresh_keywords);
     if today.status == MatchStatus::Removed && is_prelisted(q.slug, today.matched_line.as_deref(), days.today.as_deref()) {
         return MatchResult { status: MatchStatus::PreListed, ..today };
     }
@@ -324,7 +381,7 @@ pub fn match_in_days(
     (0..lines.len())
         .rev()
         .find_map(|i| {
-            let r = line_status(lines[i], &needle, entry_time.as_deref(), show_minute(q.show), refresh_keywords)?;
+            let r = line_status(lines[i], &needle, entry_time.as_deref(), show_minute(q.show), None, refresh_keywords)?;
             let doc_title = lines[i + 1..].iter().find(|l| !l.trim().is_empty())?;
             (normalize_title(doc_title, strip) == wanted).then_some(r)
         })
@@ -722,6 +779,50 @@ YH 合成氣象 06：24：02
     }
 
     #[test]
+    fn an_untimed_grab_line_in_the_same_show_is_the_same_airing() {
+        // v0.3.31，11/16 拒外食狂嗆1200：工具寫 12:13:00，同事加 (抓新)，製作人把時間改成
+        // 12:12:19 —— 同一節，不重寫。
+        let kw = crate::config::MarkersConfig::default().refresh_keywords;
+        let hm = |h: i64, m: i64| h * 3600 + m * 60;
+        // 1300 併入 1200：11:40 ～ 13:55，13:00 再切開。
+        let merged = ShowRange { show: "1200".into(), nominal: 12 * 3600, start: hm(11, 40), end: hm(13, 55), splits: vec![hm(13, 0)] };
+        let at = |doc: &str, time: &str, r: Option<&ShowRange>| {
+            match_entry_in_range("拒外食狂嗆1200", time, "1200", r, doc, &kw).status
+        };
+        let doc = "(抓新)(X/threads)拒外食狂嗆1200 sot 12：13：00  南
+";
+        assert_eq!(at(doc, "12:12:19", Some(&merged)), MatchStatus::InDoc, "同一節只是時間微調");
+        assert_eq!(at(doc, "12:12:19", None), MatchStatus::KeepRefresh, "不知道節次範圍照舊");
+        assert_eq!(at(doc, "13:20:00", Some(&merged)), MatchStatus::KeepRefresh, "合併時段裡 13 點又播一次");
+        assert_eq!(at(doc, "12:59:59", Some(&merged)), MatchStatus::InDoc);
+        // 硬時間之後、整點之前也算 1200。
+        assert_eq!(at("(抓新)拒外食狂嗆1200 sot 11:50:00
+", "12:30:00", Some(&merged)), MatchStatus::InDoc);
+        // 文件那行在範圍外（上一節播的）照舊重抓。
+        assert_eq!(at("(抓新)拒外食狂嗆1200 sot 11:20:00
+", "12:10:00", Some(&merged)), MatchStatus::KeepRefresh);
+        // (BS) 跟 (抓新) 同一套。
+        assert_eq!(at("(BS)拒外食狂嗆1200 sot 12:13:00
+", "12:12:19", Some(&merged)), MatchStatus::InDoc);
+        // 帶時間的標記照舊看時間到了沒，不看同一節。
+        assert_eq!(at("(抓12)拒外食狂嗆1200 sot 12:13:00
+", "12:12:19", Some(&merged)), MatchStatus::KeepRefresh);
+        // 抓新行沒寫時間：照舊直接抓。
+        assert_eq!(at("(抓新)拒外食狂嗆1200
+", "12:12:19", Some(&merged)), MatchStatus::KeepRefresh);
+        // 沒合併的節次：1200 是 11:40 ～ 12:55，12:58 已經是 1300。
+        let plain = ShowRange { show: "1200".into(), nominal: 12 * 3600, start: hm(11, 40), end: hm(12, 55), splits: vec![] };
+        assert_eq!(at("(抓新)拒外食狂嗆1200 sot 12:58:00
+", "12:12:19", Some(&plain)), MatchStatus::KeepRefresh);
+        assert_eq!(at("(抓新)拒外食狂嗆1200 sot 11:45:00
+", "12:50:00", Some(&plain)), MatchStatus::InDoc);
+        // 跨午夜：2400 節 23:55 ～ 00:55，23:58 和 00:20 是同一節。
+        let late = ShowRange { show: "2400".into(), nominal: 0, start: -hm(0, 5), end: hm(0, 55), splits: vec![] };
+        assert_eq!(at("(抓新)拒外食狂嗆1200 sot 23:58:00
+", "00:20:00", Some(&late)), MatchStatus::InDoc);
+    }
+
+    #[test]
     fn a_grab_mark_with_an_hour_waits_until_the_story_airs_at_or_after_that_hour() {
         // v0.3.20：(抓18) 輝達打異議1200 —— 排在 18:00 以前的節次先不抓。
         let kw = crate::config::MarkersConfig::default().refresh_keywords;
@@ -936,7 +1037,7 @@ UP 北投強風垮1800 SOT 18:10:00 社會
     }
 
     fn q<'a>(slug: &'a str, title: &'a str) -> EntryQuery<'a> {
-        EntryQuery { slug, time: "", title, show: "" }
+        EntryQuery { slug, time: "", title, show: "", range: None }
     }
 
     fn check(slug: &str, title: &str) -> MatchResult {
@@ -1965,7 +2066,7 @@ mod prelist_tests {
     }
 
     fn q<'a>(slug: &'a str, time: &'a str) -> EntryQuery<'a> {
-        EntryQuery { slug, time, title: "標題", show: "0700" }
+        EntryQuery { slug, time, title: "標題", show: "0700", range: None }
     }
 
     /// 11/13 實際的文件：手打的日期分隔線後面沒有等號，下面是早班預列的 (X) 稿。

@@ -809,9 +809,22 @@
     return parts;
   }
 
+  /** 重播樣式（v0.3.31）：比對後今天文件已有同 slug 就略過，不跳審查。 */
+  const RERUN_STYLES = ["重播"];
+
+  function isRerunStyle(item) {
+    const fields = item?.dto ? item.dto[item.kind] ?? item.dto : item;
+    return RERUN_STYLES.includes(String(fields?.style ?? item?.style ?? "").trim());
+  }
+
   /**
    * 未知樣式強制審查（v0.3.15）：還沒審查、也還沒排進佇列的未知樣式 iNEWS 卡片，依畫面
    * 順序。key 是 story key＋版本：稿子內容改過（新版本）要重新審查。
+   *
+   * 重播樣式（v0.3.31）要等比對完才決定，邏輯同一般 SOT：今天的段落有同 slug，是抓新行
+   * 而且要重抓（不同節）→ `skip: true, write: true`，照抓新寫入；其他（乾淨一行、有標記、
+   * 抓新但同一節）→ `skip: true`，略過不寫。都不審查。今天找不到（包括只有前一天有）→
+   * 照舊審查；還沒比對 → 先不排。
    */
   function unknownReviewTargets(items, seen) {
     const out = [];
@@ -819,6 +832,13 @@
       if (i.bucket !== "unknown" || !i.inews) continue;
       const key = `${i.inews.key}|${i.inews.version}`;
       if (seen?.has(key) || out.some((o) => o.key === key)) continue;
+      if (isRerunStyle(i)) {
+        if (i.matchStatus == null) continue;
+        if (i.matchedLine && !i.crossDay) {
+          out.push(i.matchStatus === "keep_refresh" ? { key, id: i.id, skip: true, write: true } : { key, id: i.id, skip: true });
+          continue;
+        }
+      }
       out.push({ key, id: i.id });
     }
     return out;
@@ -851,6 +871,7 @@
   return {
     writeParts,
     unknownReviewTargets,
+    isRerunStyle,
     isTelStyle,
     keepManualCards,
     holdLabel,

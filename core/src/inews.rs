@@ -568,6 +568,31 @@ impl Window {
             None => self.slot.nominal as i64 + DAY,
         }
     }
+
+    /// 抓新判斷「同一次播出」用的範圍（v0.3.31）。`shows` 是 iNEWS 上全部的節次資料夾：
+    /// 這一節到下一個有效節次的整點之間還有別的節次（1200 → 1400 中間的 1300），就是被
+    /// 合併進來的，範圍在它的整點再切開。只看整點、不看下一節的硬時間，所以平常
+    /// 1200 → 1300 就算 1300 的硬時間晚於 13:00 也不會多切一刀。
+    pub fn show_range(&self, shows: &[String]) -> crate::doc_match::ShowRange {
+        let len = self.next.as_ref().map(|n| forward_gap(self.slot.nominal, n.nominal)).unwrap_or(DAY);
+        let base = self.slot.nominal as i64;
+        let mut splits: Vec<i64> = shows
+            .iter()
+            .filter_map(|s| show_start(s))
+            .map(|n| forward_gap(self.slot.nominal, n))
+            .filter(|&g| g > 0 && g < len)
+            .map(|g| base + g)
+            .collect();
+        splits.sort_unstable();
+        splits.dedup();
+        crate::doc_match::ShowRange {
+            show: self.slot.show.clone(),
+            nominal: self.slot.nominal,
+            start: self.start(),
+            end: self.end(),
+            splits,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1367,6 +1392,10 @@ mod tests {
             assert_eq!(next.source, StartSource::Fallback);
             assert_eq!(p.current.end(), clock(13, 55, 0) as i64);
             assert!(p.skipped.contains(&("1300".to_string(), SkipReason::Spanned("1200".into()))));
+            // 抓新判斷用的範圍（v0.3.31）：合併進來的 1300 在 13:00 再切開。
+            let names: Vec<String> = d.keys().cloned().collect();
+            let r = p.current.show_range(&names);
+            assert_eq!((r.start, r.end, r.splits.clone()), (p.current.start(), clock(13, 55, 0) as i64, vec![clock(13, 0, 0) as i64]));
         }
         // 13:40：中間的 CM 和 ====13:00==== 都不會切斷，13:56 的預備稿不納入。
         let p = plan_at(&d, clock(13, 40, 0), &spans());

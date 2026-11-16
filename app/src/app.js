@@ -1319,12 +1319,23 @@ function queueUnknownReviews() {
   if (inewsCfg.unknown_review === false) return;
   for (const t of unknownReviewTargets(items, unknownSeen)) {
     unknownSeen.add(t.key);
-    unknownQueue.push(t);
     const item = items.find((x) => x.id === t.id);
-    if (item) {
-      const f = item.dto[item.kind] ?? item.dto;
-      logDecision(`[未知樣式] ${f.slug} 樣式「${f.style || "空白"}」`);
+    const f = item ? item.dto[item.kind] ?? item.dto : null;
+    if (t.skip) {
+      // 重播樣式、今天文件已有這則（v0.3.31）：邏輯同一般 SOT，不審查。抓新行要重抓就寫，
+      // 其他略過。跟審查按「寫入」一樣把勾選定下來，比對每輪重算勾選時才不會被洗掉。
+      if (item && t.write) {
+        item.included = item.defaultIncluded = item.userIncluded = true;
+        logDecision(`[重播抓新] ${f.slug}：文件是抓新行「${item.matchedLine ?? ""}」，照抓新寫入`);
+        renderFunnel();
+        render();
+      } else if (f) {
+        logDecision(`[重播略過] ${f.slug}：今天文件已有「${item.matchedLine ?? ""}」，不審查、不寫入`);
+      }
+      continue;
     }
+    unknownQueue.push(t);
+    if (f) logDecision(`[未知樣式] ${f.slug} 樣式「${f.style || "空白"}」`);
   }
   showNextUnknownReview();
 }
@@ -1786,6 +1797,8 @@ async function compareWithCollabDoc({ silent = false } = {}) {
       (day.warning ? `\n⚠ ${day.warning}` : "");
     renderFunnel();
     render();
+    // 重播樣式的卡片等比對完才決定要不要審查（v0.3.31）。
+    queueUnknownReviews();
   } catch (err) {
     status.className = "compare-status error";
     status.textContent = `⚠ 比對失敗：${err}`;

@@ -57,6 +57,9 @@ struct AppState {
     time_fix: Mutex<TimeFixState>,
     /// 協作文件大量變動偵測（v0.3.29）。
     bulk: Mutex<BulkWatch>,
+    /// 今天看過的節次範圍（播出日, 節次 → 範圍）：比對時判斷沒帶時間的抓新行是不是同一次
+    /// 播出（v0.3.31）。每輪讀 rundown 後更新，換播出日清掉。
+    show_ranges: Mutex<(String, std::collections::HashMap<String, news_script_core::doc_match::ShowRange>)>,
 }
 
 /// 協作文件大量變動（v0.3.29）：每次讀文件記下今天段落有幾行，跟上一次比，扣掉工具自己
@@ -399,6 +402,7 @@ async fn import_inews(
     let rundown_dir = inews_rundown_dir();
     let search_dir = inews_search_dir();
     let (day, _) = inews::broadcast_days(inews::taipei_now(), &inews_cfg.broadcast_day_start);
+    let ranges_day = day.clone();
     let fetched = tauri::async_runtime::spawn_blocking(move || {
         let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
         if let inews::FetchMode::Auto { session_start } = mode {
@@ -463,6 +467,15 @@ async fn import_inews(
     })
     .await
     .map_err(|e| e.to_string())??;
+    {
+        let mut ranges = lock_or_recover(&state.show_ranges);
+        if ranges.0 != ranges_day {
+            *ranges = (ranges_day, Default::default());
+        }
+        for r in fetched.ranges {
+            ranges.1.insert(r.show.clone(), r);
+        }
+    }
     let mut dto = import_texts(&fetched.files, &cfg).await;
     dto.inews = Some(fetched.meta);
     Ok(dto)
@@ -1869,12 +1882,16 @@ async fn compare_with_collab_doc(
 
     // Results come back in the order sent: the UI pairs them by position, since two
     // versions of one slug (different 累積時間) can get different answers.
+    let ranges = {
+        let r = lock_or_recover(&state.show_ranges);
+        if r.0 == today { r.1.clone() } else { Default::default() }
+    };
     let mut counts = [0usize; 5]; // 待處理、已在文件、要重貼、已剔除、其中跨天
     let mut suspects = Vec::new();
     let results: Vec<MatchResultDto> = entries
         .iter()
         .map(|e| {
-            let q = EntryQuery { slug: &e.slug, time: &e.time, title: &e.title, show: &e.show };
+            let q = EntryQuery { slug: &e.slug, time: &e.time, title: &e.title, show: &e.show, range: ranges.get(&e.show) };
             let r = match_in_days(q, &days, &doc_text, &cfg.markers.refresh_keywords, title_strip);
             counts[match r.status {
                 MatchStatus::ToCut => 0,
@@ -2043,6 +2060,7 @@ fn main() {
             last_compare_log: Mutex::new(String::new()),
             time_fix: Default::default(),
             bulk: Default::default(),
+            show_ranges: Default::default(),
         })
         .invoke_handler(tauri::generate_handler![
             import_folder,

@@ -453,6 +453,9 @@ pub struct FetchResult {
     pub extra_logs: Vec<String>,
     /// 判定異常那一輪的前後兩輪 rundown（JSON），存到紀錄資料夾。
     pub anomaly_dump: Option<String>,
+    /// 這一輪看過的節次範圍（目前節次、上一節、複查的節次；停播不算）：比對時判斷沒帶
+    /// 時間的抓新行是不是同一次播出（v0.3.31）。
+    pub ranges: Vec<news_script_core::doc_match::ShowRange>,
 }
 
 /// 手動按「從 iNEWS 匯入」只讀目前節次；自動刷新才做換節最後同步與延遲補掃。
@@ -1221,7 +1224,17 @@ impl InewsState {
             if events.is_empty() { String::new() } else { format!("｜{}", events.join("；")) },
         );
 
+        let ranges: Vec<news_script_core::doc_match::ShowRange> = plan
+            .previous
+            .iter()
+            .chain(std::iter::once(&cur))
+            .chain(recheck_sels.iter().map(|(w, _)| w))
+            .filter(|w| !w.slot.off_air)
+            .map(|w| w.show_range(&names))
+            .collect();
+
         Ok(FetchResult {
+            ranges,
             files,
             log_line,
             rundown: snapshots,
