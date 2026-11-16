@@ -88,6 +88,29 @@ impl SearchDay {
     }
 }
 
+/// 晚報用（v0.3.30）：這一天播出時間落在 `from`～`to`（`HH:MM`，兩端都算）的稿，照播出時間
+/// 排。同一節同 slug（搬過位置、換過 ID）只取 iNEWS 修改時間最新的一筆，跟搜尋一致。沒有
+/// 播出時間的不算。
+pub fn stories_in_window(day: &SearchDay, from: &str, to: &str) -> Vec<(String, SearchEntry)> {
+    let mut out: Vec<(String, SearchEntry)> = Vec::new();
+    for (show, stories) in &day.shows {
+        for s in stories {
+            let minute = s.air_time.get(..5).unwrap_or("");
+            if minute.len() != 5 || minute < from || minute > to {
+                continue;
+            }
+            let key = fold_for_search(&s.slug);
+            let newer = stories.iter().any(|o| fold_for_search(&o.slug) == key && o.updated > s.updated);
+            let dup = out.iter().any(|(sh, o)| sh == show && fold_for_search(&o.slug) == key);
+            if !newer && !dup {
+                out.push((show.clone(), s.clone()));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.1.air_time.cmp(&b.1.air_time));
+    out
+}
+
 /// 稿件原文的檔名：`<ID>_<版本>.nsml`，ID 裡的 `:` 換成 `_`。ID 或版本是空的回 None
 /// （認不出是哪個版本，就不存，載入時改連 iNEWS）。只留英數字和 `_`，避免怪字元。
 pub fn story_file_name(id: &str, version: &str) -> Option<String> {
@@ -283,6 +306,34 @@ mod tests {
         let hits = search_slugs(&d, "同時間", order);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "A:2", "時間一樣留後面那筆");
+    }
+
+    #[test]
+    fn the_evening_window_includes_both_ends_and_only_the_latest_version() {
+        let mut d = SearchDay { date: "2026-11-15".into(), ..Default::default() };
+        let at = |slug: &str, id: &str, air: &str, updated: &str| SearchEntry {
+            updated: updated.into(),
+            ..entry(slug, id, air)
+        };
+        d.merge(
+            "1800",
+            vec![
+                at("早一點1800", "A:1", "18:29:59", "2026-11-15 18:00:00"),
+                at("剛好開始1800", "A:2", "18:30:00", "2026-11-15 18:00:00"),
+                at("中間1800", "A:3", "19:00:10", "2026-11-15 18:00:00"),
+                at("搬過1800", "A:4", "18:45:00", "2026-11-15 18:00:00"),
+                at("搬過1800", "A:5", "18:50:00", "2026-11-15 18:20:00"),
+                at("剛好結束1800", "A:6", "19:30:59", "2026-11-15 18:00:00"),
+                at("晚一點1800", "A:7", "19:31:00", "2026-11-15 18:00:00"),
+                at("沒有時間1800", "A:8", "", "2026-11-15 18:00:00"),
+            ],
+        );
+        let picked = stories_in_window(&d, "18:30", "19:30");
+        let got: Vec<(&str, &str)> = picked.iter().map(|(_, s)| (s.slug.as_str(), s.air_time.as_str())).collect();
+        assert_eq!(
+            got,
+            [("剛好開始1800", "18:30:00"), ("搬過1800", "18:50:00"), ("中間1800", "19:00:10"), ("剛好結束1800", "19:30:59")]
+        );
     }
 
     #[test]

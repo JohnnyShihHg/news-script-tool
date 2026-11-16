@@ -371,6 +371,20 @@ pub struct EveningConfig {
     /// everyday compare is untouched.
     #[serde(default = "default_evening_excluded_terms")]
     pub excluded_terms: Vec<String>,
+    /// 「從紀錄抓」的播出時段（v0.3.30，`HH:MM`，兩端都算）：從 App 的本地紀錄挑這段時間
+    /// 播出的稿當晚報候選，再照原本的規則比對。
+    #[serde(default = "default_evening_window_start")]
+    pub window_start: String,
+    #[serde(default = "default_evening_window_end")]
+    pub window_end: String,
+}
+
+fn default_evening_window_start() -> String {
+    "18:30".into()
+}
+
+fn default_evening_window_end() -> String {
+    "19:30".into()
 }
 
 fn default_evening_anchors() -> Vec<String> {
@@ -400,6 +414,8 @@ impl Default for EveningConfig {
             no_online_markers: default_no_online_markers(),
             blocked_styles: default_evening_blocked_styles(),
             excluded_terms: default_evening_excluded_terms(),
+            window_start: default_evening_window_start(),
+            window_end: default_evening_window_end(),
         }
     }
 }

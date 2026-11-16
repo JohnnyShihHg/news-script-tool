@@ -59,7 +59,8 @@
       <span class="toolbar-sep"></span>
 
       <span class="toolbar-group">
-        <button id="evImportBtn">匯入資料夾</button>
+        <button id="evRecordsBtn" class="primary" title="從 App 的本地紀錄挑晚報時段（預設 18:30～19:30）播出的稿，再比對協作文件">從紀錄抓</button>
+        <button id="evImportBtn" title="從資料夾匯入手動匯出的晚報稿（備用）">匯入資料夾</button>
         <button id="evClearBtn" disabled title="只清掉晚報卡片，不會刪除任何檔案">清空卡片</button>
       </span>
 
@@ -134,7 +135,7 @@
     <main id="evList"></main>
 
     <footer id="evEmptyState" class="empty-state">
-      尚未匯入晚報稿件。選好日期與主播，按「匯入資料夾」，再開啟協作工具按「比對當天」。
+      尚未匯入晚報稿件。開啟協作工具、選好日期與主播，按「從紀錄抓」（那天 App 沒開著就改用「匯入資料夾」）。
     </footer>
   </div>
 

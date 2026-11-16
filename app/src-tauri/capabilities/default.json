@@ -49,6 +49,7 @@
     "allow-load-rundown-story",
     "allow-fetch-prelist",
     "allow-get-autostart",
-    "allow-set-autostart"
+    "allow-set-autostart",
+    "allow-load-evening-from-records"
   ]
 }

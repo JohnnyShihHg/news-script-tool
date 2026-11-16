@@ -515,6 +515,65 @@ fn search_rundown_slugs(
 
 
 #[derive(Serialize)]
+struct EveningRecordsDto {
+    summary: ImportSummaryDto,
+    /// 時段內挑到幾則（含之後被當成非新聞濾掉的列）。
+    picked: usize,
+    /// 時段內有、但本地沒有原文的 slug（舊紀錄或從 rundown 檔補的）。
+    missing: Vec<String>,
+    from: String,
+    to: String,
+}
+
+/// 晚報「從紀錄抓」（v0.3.30）：讀那一天的本地搜尋紀錄，挑播出時間在晚報時段內的稿，用存下
+/// 來的原文走跟「匯入資料夾」一模一樣的匯入流程，回傳一樣的匯入結果。前端接著照原本的規則
+/// 比對協作文件。那天 App 沒開著跟 1800 就沒有紀錄，前端會請使用者改用匯入資料夾。
+#[tauri::command]
+async fn load_evening_from_records(
+    window: tauri::Window,
+    state: tauri::State<'_, AppState>,
+    date: String,
+) -> Result<EveningRecordsDto, String> {
+    require_main_window(&window)?;
+    let cfg = lock_or_recover(&state.config).clone();
+    let day = chrono::NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").map_err(|_| format!("日期格式不對：{date}"))?;
+    let dir = inews_search_dir().ok_or_else(|| "找不到搜尋紀錄資料夾路徑".to_string())?;
+    let path = dir.join(day.format("%Y%m%d").to_string()).join("index.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| format!("{date} 沒有本地紀錄（那天 App 沒開著，或已超過保留天數），請改用「匯入資料夾」。"))?;
+    let search_day = news_script_core::search::SearchDay::from_json(&text).map_err(|e| format!("讀不懂 {}：{e}", path.display()))?;
+    let (from, to) = (cfg.evening.window_start.trim().to_string(), cfg.evening.window_end.trim().to_string());
+    let picked = news_script_core::search::stories_in_window(&search_day, &from, &to);
+    if picked.is_empty() {
+        return Err(format!("{date} 的本地紀錄裡沒有 {from}～{to} 播出的稿（那段時間 App 可能沒開著），請改用「匯入資料夾」。"));
+    }
+    let mut files = Vec::new();
+    let mut missing = Vec::new();
+    let mut names = Vec::new();
+    for (_, s) in &picked {
+        match inews::read_search_story(&dir, day, &s.id, &s.version) {
+            Some(raw) => {
+                let story = news_script_core::inews::parse_nsml(&raw);
+                let fill = (cfg.inews.fill_computed_time && !s.air_time.is_empty()).then_some(s.air_time.as_str());
+                files.push(news_script_core::inews::story_to_text(&story, fill));
+                names.push(story.title().to_string());
+            }
+            None => missing.push(s.slug.clone()),
+        }
+    }
+    let file_names = news_script_core::inews::unique_file_names(&names);
+    let files: Vec<(String, String)> = file_names.into_iter().zip(files).collect();
+    let summary = import_texts(&files, &cfg).await;
+    if let Some(log_dir) = inews_log_dir() {
+        inews::append_log(
+            &log_dir,
+            &format!("[晚報] 從紀錄抓 {date} {from}～{to}：{} 則，缺原文 {} 則", picked.len(), missing.len()),
+        );
+    }
+    Ok(EveningRecordsDto { summary, picked: picked.len(), missing, from, to })
+}
+
+#[derive(Serialize)]
 struct LoadedStoryDto {
     summary: ImportSummaryDto,
     /// 卡片用的 iNEWS 識別：story key、版本、所屬節次。
@@ -2023,7 +2082,8 @@ fn main() {
             load_rundown_story,
             fetch_prelist,
             get_autostart,
-            set_autostart
+            set_autostart,
+            load_evening_from_records
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1959,7 +1959,39 @@ function settingsModalHtml(config, apiStatus, inewsCred, autostart = false) {
               <div id="updateStatus" class="muted"></div>
             </div>
           </section>
-${sec("gemini", "Gemini API Key", `
+${sec("flow", "每天的流程", `
+            <h4 class="settings-sub">開機與啟動</h4>
+            <label class="checkbox-row"><input type="checkbox" id="autostartToggle" ${autostart ? "checked" : ""} /> 開機後自動啟動 App（勾選後立即生效）</label>
+            ${check("ui.open_collab_on_start", config.ui.open_collab_on_start, "啟動時自動開啟協作工具")}
+            ${check("ui.auto_refresh_on_start", config.ui.auto_refresh_on_start, "啟動時自動打開「自動刷新」（會一併開啟協作工具）")}
+            <div class="muted">三個都勾：開機就開著，搭配「每天開始寫入」時間，到點自動開始寫。</div>
+            <div id="autostartStatus" class="muted"></div>
+            <h4 class="settings-sub">節次與時間</h4>
+            ${num("沒有可信硬時間時，整點前幾分鐘換節", "inews.lead_minutes", s.lead_minutes)}
+            <div class="muted">節次從第一個硬時間開始（整點前 30 分～後 15 分內才採用）。</div>
+            <div class="field"><label>跨節合併（例：1200=1400, 1800=2000）</label><input type="text" data-cfg-spans="inews.slot_spans" value="${escapeHtml(formatSlotSpans(s.slot_spans))}" /></div>
+            ${check("inews.off_air_on_empty", s.off_air_on_empty !== false, "空節次當停播（2200 關鍵時刻、0100 收播）")}
+            <div class="field"><label>停播節目（slug 開頭=名稱，例：關鍵KS=關鍵時刻）</label><input type="text" data-cfg-programs="inews.programs" value="${escapeHtml(Object.entries(s.programs ?? {}).map(([a, b]) => `${a}=${b}`).join(", "))}" /></div>
+            ${text("節目分隔線（{hh} 小時、{name} 名稱）", "inews.program_divider_format", s.program_divider_format ?? "==== {hh} {name} ====")}
+            ${num("換節後幾分鐘補掃上一節", "inews.sweep_delay_minutes", s.sweep_delay_minutes ?? 10)}
+            ${check("inews.hold_after_open_live", s.hold_after_open_live !== false, "0:00 的直進／LIVE 播出後，後面的稿等新的硬時間")}
+            ${num("直進暫緩上限（分鐘）", "inews.open_live_max_minutes", s.open_live_max_minutes ?? 30, 1)}
+            ${text("播出日分界（HH:MM）", "inews.broadcast_day_start", s.broadcast_day_start ?? "02:00")}
+            ${text("每天開始寫入（HH:MM，空白＝不限制）", "inews.write_start", s.write_start ?? "07:00")}
+            <div class="muted">播出日分界到這個時間之前只讀不寫；時間到了從當時的節次開始寫，跟那時才打開工具一樣。</div>
+            ${text("節次分隔線（{hh} 小時、{show} 節次）", "inews.divider_format", s.divider_format)}
+            <div class="field">
+              <label>分隔線位置</label>
+              <select data-cfg="inews.divider_position">
+                <option value="after" ${s.divider_position === "after" ? "selected" : ""}>節次結束後</option>
+                <option value="before" ${s.divider_position === "before" ? "selected" : ""}>節次開始前</option>
+              </select>
+            </div>
+            ${check("inews.cutoff_by_marker", s.cutoff_by_marker, "標記式截止（舊規則，建議關閉）")}
+            ${text("標記式截止：預告關鍵字", "inews.cutoff_preview_keyword", s.cutoff_preview_keyword)}
+            ${text("標記式截止：廣告列序號開頭", "inews.cutoff_page_prefix", s.cutoff_page_prefix)}`)}
+${sec("sources", "帳號與來源", `
+            <h4 class="settings-sub">Gemini</h4>
             <div class="field">
               <label>
                 狀態：
@@ -1977,17 +2009,8 @@ ${sec("gemini", "Gemini API Key", `
             </div>
             ${text("模型", "gemini.model", config.gemini.model)}
             ${num("單次產生上限（則，0 = 不限）", "gemini.max_per_run", config.gemini.max_per_run)}
-            <div class="muted">免費方案每分鐘有上限，超過的等一分鐘再按一次接續。</div>`)}
-${sec("import", "匯入資料夾", `
-            <div class="field">
-              <label>預設匯入資料夾</label>
-              <div class="keywords-row">
-                <input type="text" id="defaultFolderInput" data-cfg="import.default_folder" value="${escapeHtml(config.import.default_folder)}" placeholder="（未設定）" />
-                <button id="browseDefaultFolderBtn" type="button">瀏覽</button>
-              </div>
-              <div class="muted">「匯入資料夾」和開啟時的自動匯入都用這裡。</div>
-            </div>`)}
-${sec("inews", "iNEWS 連線", `
+            <div class="muted">免費方案每分鐘有上限，超過的等一分鐘再按一次接續。</div>
+            <h4 class="settings-sub">iNEWS</h4>
             <div class="field">
               <label>
                 帳號密碼：
@@ -2012,34 +2035,15 @@ ${sec("inews", "iNEWS 連線", `
             ${num("自動刷新間隔（秒）", "inews.poll_seconds", s.poll_seconds, 3)}
             ${text("預列清單 queue（空白＝不補）", "inews.prelist_queue", s.prelist_queue ?? "51新聞台.STORIES.LOCAL.APPR")}
             <div class="muted">今天段落還空著時，第一次寫入前把它最上面那段寫成 <code>(X)slug</code>。</div>
+            <h4 class="settings-sub">匯入資料夾</h4>
             <div class="field">
-              <label>決策紀錄（保留 14 天）</label>
-              <div class="keywords-row"><button id="openInewsLogBtn" type="button">開啟紀錄資料夾</button><span id="inewsLogStatus" class="muted"></span></div>
+              <label>預設匯入資料夾</label>
+              <div class="keywords-row">
+                <input type="text" id="defaultFolderInput" data-cfg="import.default_folder" value="${escapeHtml(config.import.default_folder)}" placeholder="（未設定）" />
+                <button id="browseDefaultFolderBtn" type="button">瀏覽</button>
+              </div>
+              <div class="muted">「匯入資料夾」和開啟時的自動匯入都用這裡。</div>
             </div>`)}
-${sec("slots", "節次判定", `
-            ${num("沒有可信硬時間時，整點前幾分鐘換節", "inews.lead_minutes", s.lead_minutes)}
-            <div class="muted">節次從第一個硬時間開始（整點前 30 分～後 15 分內才採用）。</div>
-            <div class="field"><label>跨節合併（例：1200=1400, 1800=2000）</label><input type="text" data-cfg-spans="inews.slot_spans" value="${escapeHtml(formatSlotSpans(s.slot_spans))}" /></div>
-            ${check("inews.off_air_on_empty", s.off_air_on_empty !== false, "空節次當停播（2200 關鍵時刻、0100 收播）")}
-            <div class="field"><label>停播節目（slug 開頭=名稱，例：關鍵KS=關鍵時刻）</label><input type="text" data-cfg-programs="inews.programs" value="${escapeHtml(Object.entries(s.programs ?? {}).map(([a, b]) => `${a}=${b}`).join(", "))}" /></div>
-            ${text("節目分隔線（{hh} 小時、{name} 名稱）", "inews.program_divider_format", s.program_divider_format ?? "==== {hh} {name} ====")}
-            ${num("換節後幾分鐘補掃上一節", "inews.sweep_delay_minutes", s.sweep_delay_minutes ?? 10)}
-            ${check("inews.hold_after_open_live", s.hold_after_open_live !== false, "0:00 的直進／LIVE 播出後，後面的稿等新的硬時間")}
-            ${num("直進暫緩上限（分鐘）", "inews.open_live_max_minutes", s.open_live_max_minutes ?? 30, 1)}
-            ${text("播出日分界（HH:MM）", "inews.broadcast_day_start", s.broadcast_day_start ?? "02:00")}
-            ${text("每天開始寫入（HH:MM，空白＝不限制）", "inews.write_start", s.write_start ?? "07:00")}
-            <div class="muted">播出日分界到這個時間之前只讀不寫；時間到了從當時的節次開始寫，跟那時才打開工具一樣。</div>
-            ${text("節次分隔線（{hh} 小時、{show} 節次）", "inews.divider_format", s.divider_format)}
-            <div class="field">
-              <label>分隔線位置</label>
-              <select data-cfg="inews.divider_position">
-                <option value="after" ${s.divider_position === "after" ? "selected" : ""}>節次結束後</option>
-                <option value="before" ${s.divider_position === "before" ? "selected" : ""}>節次開始前</option>
-              </select>
-            </div>
-            ${check("inews.cutoff_by_marker", s.cutoff_by_marker, "標記式截止（舊規則，建議關閉）")}
-            ${text("標記式截止：預告關鍵字", "inews.cutoff_preview_keyword", s.cutoff_preview_keyword)}
-            ${text("標記式截止：廣告列序號開頭", "inews.cutoff_page_prefix", s.cutoff_page_prefix)}`)}
 ${sec("write", "寫入與比對", `
             ${check("inews.auto_write", s.auto_write, "全自動寫入協作文件（不勾＝等你按「確認寫入」）")}
             ${check("inews.auto_date_header", s.auto_date_header !== false, "沒有今天的日期分隔線時自動補上")}
@@ -2055,8 +2059,69 @@ ${sec("write", "寫入與比對", `
             ${num("文件大量變動：兩次讀取之間增減幾行以上算大量", "inews.bulk_change_lines", s.bulk_change_lines ?? 20, 1)}
             ${num("文件大量變動後暫停寫入與校正幾秒（0 = 不偵測）", "inews.bulk_change_wait_seconds", s.bulk_change_wait_seconds ?? 60)}
             ${num("時間校正：連續幾輪一樣才改", "inews.correct_time_stable_rounds", s.correct_time_stable_rounds ?? 2, 1)}
-            ${num("時間校正：差超過幾分鐘不改（疑似挪稿）", "inews.correct_time_max_delta_minutes", s.correct_time_max_delta_minutes ?? 10, 1)}`)}
-${sec("review", "審查與提示音", `
+            ${num("時間校正：差超過幾分鐘不改（疑似挪稿）", "inews.correct_time_max_delta_minutes", s.correct_time_max_delta_minutes ?? 10, 1)}
+            <h4 class="settings-sub">抓新標記</h4>
+            ${styleField("代表「要重抓」的關鍵字", "markers.refresh_keywords", config.markers.refresh_keywords)}
+            <div class="muted">帶時間的（抓18、(19)）要等播出時間到了才抓。</div>`)}
+${sec("rules", "收稿規則", `
+            <h4 class="settings-sub">樣式篩選</h4>
+            ${styleField("保留白名單", "filter.allowed_styles", config.filter.allowed_styles)}
+            ${styleField("排除黑名單", "filter.blocked_styles", config.filter.blocked_styles)}
+            ${styleField("排除的 slug 結尾", "filter.excluded_slug_suffixes", config.filter.excluded_slug_suffixes)}
+            ${styleField("可寫入但要標記", "filter.flag_styles", config.filter.flag_styles)}
+            ${text("標題標記（regex）", "filter.title_tag_pattern", config.filter.title_tag_pattern)}
+            ${text("標題標記備援（regex，上面找不到才用）", "filter.title_tag_fallback_pattern", config.filter.title_tag_fallback_pattern)}
+            ${styleField("樣式空白時看 slug（可寫「詞=樣式」）", "filter.slug_style_terms", config.filter.slug_style_terms)}
+            ${styleField("樣式空白時看影像編號尾碼（尾碼=樣式）", "filter.video_id_styles", config.filter.video_id_styles)}
+            ${styleField("slug 以這些字開頭一律通過（例：專）", "filter.force_pass_slug_prefixes", config.filter.force_pass_slug_prefixes ?? ["專"])}
+            ${check("filter.blank_style_timecode_pass", config.filter.blank_style_timecode_pass !== false, "樣式空白、slug 以時間標結尾的當新聞通過")}
+            ${styleField("樣式空白、slug 含這些詞且有內文就通過", "filter.blank_style_body_pass_terms", config.filter.blank_style_body_pass_terms ?? ["氣象"])}
+            ${styleField("slug 含這些詞沒有內文也寫入", "filter.no_body_pass_terms", config.filter.no_body_pass_terms ?? ["氣象"])}
+            ${styleField("編輯備註含這些詞就濾除", "filter.blocked_note_terms", config.filter.blocked_note_terms)}
+            <h4 class="settings-sub">備註標記</h4>
+            ${styleField("勿上網 同義詞", "annotations.no_upload_terms", config.annotations.no_upload_terms)}
+            ${text("顯示標籤", "annotations.no_upload_label", config.annotations.no_upload_label)}
+            ${styleField("版權問題 同義詞", "annotations.copyright_terms", config.annotations.copyright_terms)}
+            ${text("顯示標籤", "annotations.copyright_label", config.annotations.copyright_label)}
+            ${styleField("可上網 同義詞", "annotations.allowed_upload_terms", config.annotations.allowed_upload_terms)}
+            ${text("顯示標籤", "annotations.allowed_upload_label", config.annotations.allowed_upload_label)}
+            <div class="muted">只比對完整詞，不看單一個字。</div>
+            <h4 class="settings-sub">標題前綴</h4>
+            ${styleField("判定獨家的備註關鍵字", "annotations.exclusive_terms", config.annotations.exclusive_terms)}
+            ${text("獨家前綴", "annotations.exclusive_prefix", config.annotations.exclusive_prefix)}
+            ${styleField("判定最新的樣式", "annotations.latest_styles", config.annotations.latest_styles)}
+            ${text("最新前綴", "annotations.latest_prefix", config.annotations.latest_prefix)}
+            <div class="muted">兩者都成立時只加獨家。</div>`)}
+${sec("text", "文字處理", `
+            <h4 class="settings-sub">內文雜訊清除</h4>
+            ${check("clean.strip_marker_symbols", config.clean.strip_marker_symbols, "移除行首雜訊符號（<code>..早安</code> → <code>早安</code>）")}
+            ${check("clean.drop_non_cjk_lines", config.clean.drop_non_cjk_lines, "刪除整行沒有中文的備註行")}
+            ${check("clean.strip_trailing_symbols", config.clean.strip_trailing_symbols, "移除內文結尾符號（<code>。##</code> → <code>。</code>）")}
+            <h4 class="settings-sub">標點轉換</h4>
+            ${check("punctuation.quotes_to_corner", config.punctuation.quotes_to_corner, "直引號轉「」")}
+            ${check("punctuation.title_dot_to_enumeration", config.punctuation.title_dot_to_enumeration, "標題 . 轉頓號")}
+            ${check("punctuation.dot_to_enumeration", config.punctuation.dot_to_enumeration, "內文 . 轉頓號（數字間除外）")}
+            ${check("punctuation.protect_urls", config.punctuation.protect_urls, "網址不轉換")}
+            ${check("punctuation.preserve_halfwidth_space", config.punctuation.preserve_halfwidth_space, "保留半形空格")}
+            <div class="field">
+              <label>半形 → 全形</label>
+              ${punctRows}
+            </div>
+            <h4 class="settings-sub">輸出格式</h4>
+            ${num("關鍵字數量", "output.keyword_count", config.output.keyword_count, 1)}
+            ${text("關鍵字分隔符號", "output.keyword_separator", config.output.keyword_separator)}
+            ${num("則與則之間空白行數", "output.entry_blank_lines", config.output.entry_blank_lines)}`)}
+${sec("evening", "晚報", `
+            ${styleField("主播名單", "evening.anchors", config.evening.anchors)}
+            ${styleField("代表「不上網」的標記", "evening.no_online_markers", config.evening.no_online_markers)}
+            ${styleField("不上晚報的樣式", "evening.blocked_styles", config.evening.blocked_styles ?? ["SL"])}
+            ${styleField("不上晚報的專題標記", "evening.excluded_terms", config.evening.excluded_terms ?? ["專"])}
+            <div class="muted">只收今天段落裡有上網的稿；只影響晚報。</div>
+            ${text("從紀錄抓的時段：開始（HH:MM）", "evening.window_start", config.evening.window_start ?? "18:30")}
+            ${text("從紀錄抓的時段：結束（HH:MM，兩端都算）", "evening.window_end", config.evening.window_end ?? "19:30")}
+            <div class="muted">晚報按「從紀錄抓」時，從 App 的本地紀錄挑這段時間播出的稿（保留 14 天）。</div>`)}
+${sec("misc", "提醒、外觀與維護", `
+            <h4 class="settings-sub">審查與提示音</h4>
             ${check("inews.unknown_review", s.unknown_review !== false, "未知樣式跳出審查視窗（寫入或略過）")}
             ${check("inews.unknown_review_sound", s.unknown_review_sound !== false, "審查視窗開著時每 30 秒響一次")}
             <div class="field">
@@ -2071,21 +2136,15 @@ ${sec("review", "審查與提示音", `
             <div class="field">
               <label>音量 <span id="volumeLabel">${volume}</span></label>
               <input type="range" id="soundVolumeInput" min="0" max="100" step="5" data-cfg-num="inews.unknown_review_volume" value="${volume}" />
-            </div>`)}
-${sec("startup", "開機與啟動", `
-            <label class="checkbox-row"><input type="checkbox" id="autostartToggle" ${autostart ? "checked" : ""} /> 開機後自動啟動 App（勾選後立即生效）</label>
-            ${check("ui.open_collab_on_start", config.ui.open_collab_on_start, "啟動時自動開啟協作工具")}
-            ${check("ui.auto_refresh_on_start", config.ui.auto_refresh_on_start, "啟動時自動打開「自動刷新」（會一併開啟協作工具）")}
-            <div class="muted">三個都勾：開機就開著，搭配「每天開始寫入」時間，到點自動開始寫。</div>
-            <div id="autostartStatus" class="muted"></div>`)}
-${sec("theme", "外觀主題", `
+            </div>
+            <h4 class="settings-sub">外觀主題</h4>
             <div class="field">
               <select id="themeSelect" data-cfg="ui.theme">
                 ${THEMES.map((t) => `<option value="${t.id}" ${config.ui.theme === t.id ? "selected" : ""}>${t.name}</option>`).join("")}
               </select>
               <div class="muted">立即預覽，按「儲存設定」才固定。</div>
-            </div>`)}
-${sec("collab", "協作工具維護", `
+            </div>
+            <h4 class="settings-sub">協作工具與紀錄</h4>
             <div class="field">
               <div class="keywords-row">
                 <button id="diagnoseCollabBtn" type="button">診斷協作連線</button>
@@ -2093,62 +2152,11 @@ ${sec("collab", "協作工具維護", `
               </div>
               <div class="muted">比對或寫入出問題時用；匯出可在寫入前留一份 txt 備份。</div>
               <div id="collabToolStatus" class="muted"></div>
-            </div>`)}
-${sec("filter", "樣式篩選", `
-            ${styleField("保留白名單", "filter.allowed_styles", config.filter.allowed_styles)}
-            ${styleField("排除黑名單", "filter.blocked_styles", config.filter.blocked_styles)}
-            ${styleField("排除的 slug 結尾", "filter.excluded_slug_suffixes", config.filter.excluded_slug_suffixes)}
-            ${styleField("可寫入但要標記", "filter.flag_styles", config.filter.flag_styles)}
-            ${text("標題標記（regex）", "filter.title_tag_pattern", config.filter.title_tag_pattern)}
-            ${text("標題標記備援（regex，上面找不到才用）", "filter.title_tag_fallback_pattern", config.filter.title_tag_fallback_pattern)}
-            ${styleField("樣式空白時看 slug（可寫「詞=樣式」）", "filter.slug_style_terms", config.filter.slug_style_terms)}
-            ${styleField("樣式空白時看影像編號尾碼（尾碼=樣式）", "filter.video_id_styles", config.filter.video_id_styles)}
-            ${styleField("slug 以這些字開頭一律通過（例：專）", "filter.force_pass_slug_prefixes", config.filter.force_pass_slug_prefixes ?? ["專"])}
-            ${check("filter.blank_style_timecode_pass", config.filter.blank_style_timecode_pass !== false, "樣式空白、slug 以時間標結尾的當新聞通過")}
-            ${styleField("樣式空白、slug 含這些詞且有內文就通過", "filter.blank_style_body_pass_terms", config.filter.blank_style_body_pass_terms ?? ["氣象"])}
-            ${styleField("slug 含這些詞沒有內文也寫入", "filter.no_body_pass_terms", config.filter.no_body_pass_terms ?? ["氣象"])}
-            ${styleField("編輯備註含這些詞就濾除", "filter.blocked_note_terms", config.filter.blocked_note_terms)}`)}
-${sec("annotations", "備註標記", `
-            ${styleField("勿上網 同義詞", "annotations.no_upload_terms", config.annotations.no_upload_terms)}
-            ${text("顯示標籤", "annotations.no_upload_label", config.annotations.no_upload_label)}
-            ${styleField("版權問題 同義詞", "annotations.copyright_terms", config.annotations.copyright_terms)}
-            ${text("顯示標籤", "annotations.copyright_label", config.annotations.copyright_label)}
-            ${styleField("可上網 同義詞", "annotations.allowed_upload_terms", config.annotations.allowed_upload_terms)}
-            ${text("顯示標籤", "annotations.allowed_upload_label", config.annotations.allowed_upload_label)}
-            <div class="muted">只比對完整詞，不看單一個字。</div>`)}
-${sec("prefix", "標題前綴", `
-            ${styleField("判定獨家的備註關鍵字", "annotations.exclusive_terms", config.annotations.exclusive_terms)}
-            ${text("獨家前綴", "annotations.exclusive_prefix", config.annotations.exclusive_prefix)}
-            ${styleField("判定最新的樣式", "annotations.latest_styles", config.annotations.latest_styles)}
-            ${text("最新前綴", "annotations.latest_prefix", config.annotations.latest_prefix)}
-            <div class="muted">兩者都成立時只加獨家。</div>`)}
-${sec("evening", "晚報", `
-            ${styleField("主播名單", "evening.anchors", config.evening.anchors)}
-            ${styleField("代表「不上網」的標記", "evening.no_online_markers", config.evening.no_online_markers)}
-            ${styleField("不上晚報的樣式", "evening.blocked_styles", config.evening.blocked_styles ?? ["SL"])}
-            ${styleField("不上晚報的專題標記", "evening.excluded_terms", config.evening.excluded_terms ?? ["專"])}
-            <div class="muted">只收今天段落裡有上網的稿；只影響晚報。</div>`)}
-${sec("clean", "內文雜訊清除", `
-            ${check("clean.strip_marker_symbols", config.clean.strip_marker_symbols, "移除行首雜訊符號（<code>..早安</code> → <code>早安</code>）")}
-            ${check("clean.drop_non_cjk_lines", config.clean.drop_non_cjk_lines, "刪除整行沒有中文的備註行")}
-            ${check("clean.strip_trailing_symbols", config.clean.strip_trailing_symbols, "移除內文結尾符號（<code>。##</code> → <code>。</code>）")}`)}
-${sec("markers", "抓新標記", `
-            ${styleField("代表「要重抓」的關鍵字", "markers.refresh_keywords", config.markers.refresh_keywords)}
-            <div class="muted">帶時間的（抓18、(19)）要等播出時間到了才抓。</div>`)}
-${sec("punct", "標點轉換", `
-            ${check("punctuation.quotes_to_corner", config.punctuation.quotes_to_corner, "直引號轉「」")}
-            ${check("punctuation.title_dot_to_enumeration", config.punctuation.title_dot_to_enumeration, "標題 . 轉頓號")}
-            ${check("punctuation.dot_to_enumeration", config.punctuation.dot_to_enumeration, "內文 . 轉頓號（數字間除外）")}
-            ${check("punctuation.protect_urls", config.punctuation.protect_urls, "網址不轉換")}
-            ${check("punctuation.preserve_halfwidth_space", config.punctuation.preserve_halfwidth_space, "保留半形空格")}
+            </div>
             <div class="field">
-              <label>半形 → 全形</label>
-              ${punctRows}
+              <label>決策紀錄（保留 14 天）</label>
+              <div class="keywords-row"><button id="openInewsLogBtn" type="button">開啟紀錄資料夾</button><span id="inewsLogStatus" class="muted"></span></div>
             </div>`)}
-${sec("output", "輸出格式", `
-            ${num("關鍵字數量", "output.keyword_count", config.output.keyword_count, 1)}
-            ${text("關鍵字分隔符號", "output.keyword_separator", config.output.keyword_separator)}
-            ${num("則與則之間空白行數", "output.entry_blank_lines", config.output.entry_blank_lines)}`)}
         </div>
         <div class="modal-foot">
           <button id="resetConfigBtn">還原預設值</button>
@@ -2535,6 +2543,33 @@ async function importEvening() {
     evStatus(`⚠ 匯入失敗：${err}`, true);
     return;
   }
+  await applyEveningSummary(summary, date, "");
+}
+
+/// 晚報「從紀錄抓」（v0.3.30，預設）：App 的本地紀錄裡，那天晚報時段播出的稿，用存下來的
+/// 原文產生卡片，接著照原本的規則比對。「匯入資料夾」保留當備用。
+async function importEveningFromRecords() {
+  const date = el("evDate").value;
+  if (!date) {
+    evStatus("⚠ 請先選擇日期。", true);
+    return;
+  }
+  evStatus("從本地紀錄抓晚報時段的稿…");
+  let res;
+  try {
+    res = await invoke("load_evening_from_records", { date });
+  } catch (err) {
+    evStatus(`⚠ ${err}`, true);
+    return;
+  }
+  const note =
+    `從紀錄抓 ${res.from}～${res.to}：${res.picked} 列` +
+    (res.missing.length ? `（${res.missing.length} 則本地沒有原文：${res.missing.join("、")}）` : "") +
+    "。";
+  await applyEveningSummary(res.summary, date, note);
+}
+
+async function applyEveningSummary(summary, date, note) {
   const fresh = sortEvening(summary.entries.map(eveningItemFromDto).filter(Boolean));
   // Same day: keep titles and hashtag lines already edited. Another day: start clean.
   const sameDay = evItemsDate === date;
@@ -2543,7 +2578,7 @@ async function importEvening() {
   evItemsDate = date;
   renderEvening();
   saveEveningSoon();
-  evStatus(`已匯入 ${evItems.length} 則。比對中…`);
+  evStatus(`${note}已匯入 ${evItems.length} 則。比對中…`);
   await compareEvening({ silent: true });
 }
 
@@ -2824,6 +2859,7 @@ function renderEvening() {
 el("modeScriptBtn").addEventListener("click", () => setMode("script"));
 el("modeEveningBtn").addEventListener("click", () => setMode("evening"));
 el("evImportBtn").addEventListener("click", importEvening);
+el("evRecordsBtn").addEventListener("click", importEveningFromRecords);
 el("evOpenCollabBtn").addEventListener("click", () => openCollab(el("evStatus")));
 el("evCompareBtn").addEventListener("click", () => compareEvening());
 el("evGenKeywordsBtn").addEventListener("click", generateEveningGroupKeywords);

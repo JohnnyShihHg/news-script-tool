@@ -47,6 +47,7 @@ fn main() {
             "fetch_prelist",
             "get_autostart",
             "set_autostart",
+            "load_evening_from_records",
         ])),
     )
     .expect("failed to run tauri-build");
