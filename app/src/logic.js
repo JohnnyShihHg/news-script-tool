@@ -558,6 +558,29 @@
   }
 
   /**
+   * 工具寫過、文件裡卻找不到的稿（v0.3.32）。11/17 淑麗報氣象0822 08:22 寫入，08:32 前後
+   * 連同下一則一起從文件消失；工具記得「這一版寫過」就再也不寫。比對結果是待處理、而且
+   * 沒有對到任何一行（真的不在今天的段落裡），連續 `rounds` 次比對都這樣才放行重寫 ——
+   * 剛寫完文件還沒同步過來的那一兩輪不算。
+   *
+   *   streaks -- 上一次的 Map key -> 連續找不到的次數
+   * 回傳 { release: 要重寫的 key, streaks: 新的 Map }。中間有一次找到就重新算。
+   */
+  function vanishedWrites(items, writtenKeys, streaks, rounds) {
+    const next = new Map();
+    const release = [];
+    for (const i of items ?? []) {
+      const key = writtenKey(i);
+      if (!key || !writtenKeys?.has(key) || next.has(key) || release.includes(key)) continue;
+      if (i.matchStatus !== "to_cut" || i.matchedLine) continue;
+      const n = (streaks?.get(key) ?? 0) + 1;
+      if (n >= rounds) release.push(key);
+      else next.set(key, n);
+    }
+    return { release, streaks: next };
+  }
+
+  /**
    * Ticked, not handled in the doc, and this exact version not yet written. Covers
    * both "waiting for keywords" and "waiting to be written".
    */
@@ -871,6 +894,7 @@
   return {
     writeParts,
     unknownReviewTargets,
+    vanishedWrites,
     isRerunStyle,
     isTelStyle,
     keepManualCards,

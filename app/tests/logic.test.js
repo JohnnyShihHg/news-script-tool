@@ -1037,6 +1037,40 @@ test("only new unknown-style iNEWS cards are queued for review, once per version
   assert.deepEqual(L.unknownReviewTargets([{ bucket: "unknown", id: "entry-0" }], new Set()), []);
 });
 
+test("a written story missing from the doc for 3 compares in a row is released for a rewrite", () => {
+  // v0.3.32：11/17 淑麗報氣象0822 寫入後從文件消失，工具記得寫過就沒再寫。
+  const cards = L.inewsItemsFromSummary(inewsSummary("0800", [
+    { slug: "淑麗報氣象0822", key: "W:1", version: "v1" },
+    { slug: "還在文件1200", key: "W:2", version: "v1" },
+    { slug: "沒寫過0800", key: "W:3", version: "v1" },
+  ]));
+  const written = new Set(["W:1|v1", "W:2|v1"]);
+  cards[0].matchStatus = "to_cut";
+  cards[0].matchedLine = null;
+  cards[1].matchStatus = "in_doc";
+  cards[1].matchedLine = "還在文件1200 sot 08:01:00";
+  cards[2].matchStatus = "to_cut";
+  let r = L.vanishedWrites(cards, written, new Map(), 3);
+  assert.deepEqual(r.release, []);
+  assert.deepEqual([...r.streaks], [["W:1|v1", 1]]);
+  r = L.vanishedWrites(cards, written, r.streaks, 3);
+  assert.deepEqual([...r.streaks], [["W:1|v1", 2]]);
+  // 中間有一次找到就重新算。
+  cards[0].matchStatus = "in_doc";
+  cards[0].matchedLine = "淑麗報氣象0822 LIVE 08:20:41";
+  const found = L.vanishedWrites(cards, written, r.streaks, 3);
+  assert.deepEqual([...found.streaks], []);
+  cards[0].matchStatus = "to_cut";
+  cards[0].matchedLine = null;
+  r = L.vanishedWrites(cards, written, r.streaks, 3);
+  assert.deepEqual(r.release, ["W:1|v1"]);
+  assert.deepEqual([...r.streaks], []);
+  // 有對到某一行（抓新、有標記、前一天的重播）不算消失。
+  cards[0].matchStatus = "removed";
+  cards[0].matchedLine = "03 淑麗報氣象0822";
+  assert.deepEqual(L.vanishedWrites(cards, written, new Map([["W:1|v1", 2]]), 3).release, []);
+});
+
 test("a 重播-style card waits for the compare, then is skipped when today's doc already has the slug", () => {
   // v0.3.31：11/11 竹山抓通緝1200 樣式「重播」，同 slug 12:01 已經寫過，不該跳審查。
   const cards = L.inewsItemsFromSummary(inewsSummary("1200", [

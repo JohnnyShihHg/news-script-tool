@@ -38,6 +38,7 @@ const {
   findMisfires,
   writeParts,
   unknownReviewTargets,
+  vanishedWrites,
   keepManualCards,
   diffInewsVersions,
   writtenKey,
@@ -762,6 +763,16 @@ function outputFieldsOf(i) {
 let prelistWanted = false;
 /// 協作文件剛大量變動、還要等幾秒才寫入（v0.3.29，比對時後端告訴我們）。
 let bulkHoldSeconds = 0;
+/**
+ * 這一次自動刷新已經讀到今天的日期分隔線（v0.3.32）。11/17 開機後協作視窗先顯示前一晚的
+ * 快取（2240 行、沒有夜班補的 2100～2400），45 分鐘後才同步；這段時間工具把已經在文件裡
+ * 的 24 點稿當新稿寫了進去。讀到今天的日期分隔線之前不寫入、不校正時間。
+ */
+let collabDocReady = false;
+let collabWaitLogged = false;
+/** 工具寫過、文件裡連續找不到的次數（v0.3.32）：key → 次數。 */
+let vanishStreaks = new Map();
+const VANISH_ROUNDS = 3;
 let prelistDoneFor = "";
 
 async function prelistForWrite(outgoing) {
@@ -1048,7 +1059,7 @@ async function inewsRound() {
     }
 
     // 時間校正不等關鍵字、節次暫存或分隔線：已經在文件裡的稿每一輪都對一次。
-    if (inewsCfg.correct_time !== false) await correctCollabTimes(meta.time_rows ?? []);
+    if (inewsCfg.correct_time !== false && collabDocReady) await correctCollabTimes(meta.time_rows ?? []);
 
     if (meta.recheck) misfires = findMisfires(writtenStories, meta.recheck);
     if (misfires.length) {
@@ -1059,7 +1070,9 @@ async function inewsRound() {
 
     // Held cards (等確認 / 冷卻 / 可疑) cannot be written this round, so they alone do not start the pipeline.
     const pending = items.some((i) => isPendingWrite(i, writtenKeys) && !i.inews?.hold);
-    if (added.length || changed.length || pending || meta.closed_show || dividerOwed()) await runInewsPipeline();
+    // 還沒讀到今天的日期分隔線、或有寫過的稿在文件裡找不到：每一輪都要比對（v0.3.32）。
+    if (added.length || changed.length || pending || meta.closed_show || dividerOwed() || !collabDocReady || vanishStreaks.size)
+      await runInewsPipeline();
   } finally {
     inewsRoundActive = false;
     inewsBusy = false;
@@ -1143,6 +1156,17 @@ async function runInewsPipeline() {
     return;
   }
 
+  // 1b. 工具寫過、文件裡卻連續找不到的稿：放行重寫（v0.3.32）。文件還沒讀好或剛大量變動時不算。
+  if (collabDocReady && bulkHoldSeconds === 0) {
+    const v = vanishedWrites(items, writtenKeys, vanishStreaks, VANISH_ROUNDS);
+    vanishStreaks = v.streaks;
+    for (const key of v.release) {
+      writtenKeys.delete(key);
+      const item = items.find((i) => writtenKey(i) === key);
+      logDecision(`[重寫] ${item ? slugOf(item) : key}：工具寫過，但文件今天的段落連續 ${VANISH_ROUNDS} 次比對都找不到，重新寫入`);
+    }
+  }
+
   // 2. 待上傳和要重貼的稿產生關鍵字，遵守單次上限；超過的留到下一輪。
   const targets = keywordTargets();
   if (targets.length > 0) {
@@ -1156,6 +1180,19 @@ async function runInewsPipeline() {
   }
 
   // 3. 寫入（或等確認）。分隔線要等上一節補掃完才寫，新一節的稿也先等著。
+  if (!collabDocReady) {
+    hideInewsConfirm();
+    inewsStatus(
+      `⏳ 協作文件還沒讀到今天（${compareDay}）的日期分隔線，先不寫入：協作工具可能還在載入或同步。` +
+        "如果文件裡真的還沒有今天的日期分隔線，請手動加上。",
+      "warn"
+    );
+    if (!collabWaitLogged) {
+      collabWaitLogged = true;
+      logDecision(`[等待文件] 協作文件還沒讀到今天 ${compareDay} 的日期分隔線，暫停寫入與時間校正`);
+    }
+    return;
+  }
   if (bulkHoldSeconds > 0) {
     hideInewsConfirm();
     inewsStatus(`⏸ 協作文件剛有大量變動（有人整段貼上或刪除），等 ${bulkHoldSeconds} 秒文件穩定再寫入。`, "warn");
@@ -1667,6 +1704,8 @@ async function toggleInewsAuto() {
     return;
   }
   inewsSessionStart = true;
+  collabDocReady = false;
+  collabWaitLogged = false;
   inewsStatus(`自動刷新已開啟，每 ${inewsCfg.poll_seconds} 秒讀一次 iNEWS。` +
     (inewsCfg.auto_write ? "（全自動寫入）" : "（產生關鍵字後等你按「確認寫入」）"));
   scheduleInewsRound(0);
@@ -1764,6 +1803,10 @@ async function compareWithCollabDoc({ silent = false } = {}) {
   try {
     const { results, day } = await invoke("compare_with_collab_doc", { entries });
     compareDay = day.today;
+    if (day.today_found && !collabDocReady) {
+      collabDocReady = true;
+      if (collabWaitLogged) logDecision(`[等待文件] 已讀到今天 ${day.today} 的日期分隔線，開始寫入`);
+    }
     compareHoldsAutoWrite = !!day.hold_auto_write;
     dateHeaderOwed = day.header_to_add && dateHeaderWrittenFor !== day.today ? day.header_to_add : "";
     prelistWanted = !!day.prelist_wanted;

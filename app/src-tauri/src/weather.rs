@@ -1,4 +1,4 @@
-//! Import the nationwide outlook paragraph used to fill the 08:22 weather rundown.
+//! Import the nationwide outlook paragraph used to fill the 07:22 and 08:22 weather rundowns.
 //!
 //! The visible CWA page builds `#f-1` from W01_Content in this public data script;
 //! fetching the page's initial HTML does not contain the article.
@@ -11,15 +11,17 @@ use std::time::Duration;
 const CWA_W01: &str = "https://www.cwa.gov.tw/Data/js/fcst/W01_Data.js";
 
 /// Only the first two agreed name rules. A lone presenter name is not enough.
-fn weather_rank(slug: &str) -> Option<u8> {
+/// 會補內文的氣象時段（v0.3.32 加 0722：07 那節的氣象稿在 iNEWS 也只有字幕和圖卡指令）。
+const WEATHER_SLOTS: [&str; 2] = ["0722", "0822"];
+
+/// (時段, 順位)：同一個時段裡「淑麗」優先。
+fn weather_rank(slug: &str) -> Option<(&'static str, u8)> {
     let compact: String = slug.chars().filter(|c| !c.is_whitespace()).collect();
-    if compact.contains("淑麗") && compact.contains("氣象") && compact.contains("0822") {
-        Some(1)
-    } else if compact.contains("氣象") && compact.contains("0822") {
-        Some(2)
-    } else {
-        None
+    let slot = WEATHER_SLOTS.into_iter().find(|s| compact.contains(s))?;
+    if !compact.contains("氣象") {
+        return None;
     }
+    Some((slot, if compact.contains("淑麗") { 1 } else { 2 }))
 }
 
 /// Extract string elements from a JavaScript array (or `new Array(...)`) without
@@ -192,13 +194,21 @@ fn apply_outlook(entry: &mut NewsEntry, response: &Result<Outlook, String>, toda
     }
 }
 
-fn select_target(manual: &[Outcome]) -> Result<Option<usize>, Vec<usize>> {
+/// 每個時段各挑一則（v0.3.32）：0722 和 0822 同一批匯入時各補各的。
+fn select_targets(manual: &[Outcome]) -> Vec<Result<usize, Vec<usize>>> {
+    WEATHER_SLOTS
+        .into_iter()
+        .filter_map(|slot| select_target(manual, slot).transpose())
+        .collect()
+}
+
+fn select_target(manual: &[Outcome], slot: &str) -> Result<Option<usize>, Vec<usize>> {
     let ranked: Vec<(usize, u8)> = manual
         .iter()
         .enumerate()
         .filter_map(|(i, o)| {
             if let Outcome::NeedsManualContent(e) = o {
-                weather_rank(&e.slug).map(|rank| (i, rank))
+                weather_rank(&e.slug).filter(|(s, _)| *s == slot).map(|(_, rank)| (i, rank))
             } else {
                 None
             }
@@ -223,20 +233,24 @@ fn select_target(manual: &[Outcome]) -> Result<Option<usize>, Vec<usize>> {
 pub async fn fill_manual_weather(manual: &mut [Outcome]) {
     // A 1st-ranked item wins over a substitute's 2nd-ranked item if both happen
     // to be in one export. An equally ranked tie is ambiguous: never fill both.
-    let target_index = match select_target(manual) {
-        Ok(Some(i)) => i,
-        Ok(None) => return,
-        Err(ties) => {
-            for i in ties {
-                if let Outcome::NeedsManualContent(entry) = &mut manual[i] {
-                    entry
-                        .warnings
-                        .push("未補入氣象署內文：同順位氣象稿超過一則，請人工選擇".to_string());
+    let mut targets = Vec::new();
+    for pick in select_targets(manual) {
+        match pick {
+            Ok(i) => targets.push(i),
+            Err(ties) => {
+                for i in ties {
+                    if let Outcome::NeedsManualContent(entry) = &mut manual[i] {
+                        entry
+                            .warnings
+                            .push("未補入氣象署內文：同順位氣象稿超過一則，請人工選擇".to_string());
+                    }
                 }
             }
-            return;
         }
-    };
+    }
+    if targets.is_empty() {
+        return;
+    }
 
     let response = async {
         let client = reqwest::Client::builder()
@@ -262,13 +276,15 @@ pub async fn fill_manual_weather(manual: &mut [Outcome]) {
     }
     .await;
 
-    if let Outcome::NeedsManualContent(entry) = &mut manual[target_index] {
-        let taipei = FixedOffset::east_opt(8 * 3600).unwrap();
-        let today = Utc::now()
-            .with_timezone(&taipei)
-            .format("%Y-%m-%d")
-            .to_string();
-        apply_outlook(entry, &response, &today);
+    let taipei = FixedOffset::east_opt(8 * 3600).unwrap();
+    let today = Utc::now()
+        .with_timezone(&taipei)
+        .format("%Y-%m-%d")
+        .to_string();
+    for i in targets {
+        if let Outcome::NeedsManualContent(entry) = &mut manual[i] {
+            apply_outlook(entry, &response, &today);
+        }
     }
 }
 
@@ -278,10 +294,13 @@ mod tests {
 
     #[test]
     fn only_the_two_agreed_name_rules_match() {
-        assert_eq!(weather_rank("淑麗報氣象0822"), Some(1));
-        assert_eq!(weather_rank("代班報氣象0822"), Some(2));
+        assert_eq!(weather_rank("淑麗報氣象0822"), Some(("0822", 1)));
+        assert_eq!(weather_rank("代班報氣象0822"), Some(("0822", 2)));
+        assert_eq!(weather_rank("淑麗報氣象0722"), Some(("0722", 1)));
+        assert_eq!(weather_rank("代班報氣象0722"), Some(("0722", 2)));
         assert_eq!(weather_rank("淑麗報其他0822"), None);
         assert_eq!(weather_rank("淑麗報氣象1000"), None);
+        assert_eq!(weather_rank("淑麗報氣象0643"), None);
         assert_eq!(weather_rank("氣象署講雨1100"), None);
     }
 
@@ -415,11 +434,14 @@ var W01_Content=[
             news_script_core::process_text("weather.txt", &text, &Default::default())
         };
         let entries = vec![make("代班報氣象0822"), make("淑麗報氣象0822")];
-        assert_eq!(select_target(&entries), Ok(Some(1)));
-        assert_eq!(select_target(&[make("代班報氣象0822")]), Ok(Some(0)));
+        assert_eq!(select_targets(&entries), vec![Ok(1)]);
+        assert_eq!(select_targets(&[make("代班報氣象0822")]), vec![Ok(0)]);
         assert_eq!(
-            select_target(&[make("淑麗報氣象0822"), make("淑麗報氣象0822")]),
-            Err(vec![0, 1])
+            select_targets(&[make("淑麗報氣象0822"), make("淑麗報氣象0822")]),
+            vec![Err(vec![0, 1])]
         );
+        // v0.3.32：0722 和 0822 同一批各補各的，不算同順位。
+        let both = vec![make("淑麗報氣象0722"), make("淑麗報氣象0822"), make("代班報氣象0722")];
+        assert_eq!(select_targets(&both), vec![Ok(0), Ok(1)]);
     }
 }

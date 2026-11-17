@@ -1199,6 +1199,7 @@ async fn open_collab_window(window: tauri::Window, app: tauri::AppHandle) -> Res
         .inner_size(1100.0, 800.0)
         // 守門員（tools/collab-guard）每次載入都注入：App 的協作視窗是獨立的 WebView，
         // 沒有竄改猴（v0.3.15）。只內嵌同一份檔案，不另外維護一份。
+        .initialization_script(COLLAB_GUARD_CONFIG_SCRIPT)
         .initialization_script(COLLAB_GUARD_SCRIPT)
         .initialization_script(COLLAB_ACTIVITY_SCRIPT)
         .build()
@@ -1246,6 +1247,10 @@ fn receive_scraped_text(
 /// 協作工具守門員（竄改猴腳本），原封不動注入 App 的協作視窗。開頭的 `==UserScript==`
 /// 表頭只是註解；腳本自己會看頁面上有沒有編輯器才啟動。
 const COLLAB_GUARD_SCRIPT: &str = include_str!("../../../tools/collab-guard/collab-guard.user.js");
+
+/// 守門員在 App 協作視窗裡的設定（v0.3.32，守門員 1.4.0）：專用視窗縮小時也補讀 ——
+/// 「背景分頁不補」是為了 Chrome 節流的分頁，App 的協作視窗縮小了照樣要給 App 讀。
+const COLLAB_GUARD_CONFIG_SCRIPT: &str = "window.__collabGuardConfig = { backfillWhenHidden: true };";
 
 /// 協作視窗裡記下使用者最後一次操作的時間（v0.3.15，操作中暫停用）。
 const COLLAB_ACTIVITY_SCRIPT: &str = r#"
@@ -1315,6 +1320,12 @@ const SCRAPE_SCRIPT: &str = r#"
           return;
         }
       }
+    }
+    // 守門員開頁補讀還沒完成（v0.3.32）：頁面顯示的可能是本機快取的舊內容，「已同步」也
+    // 不可靠（11/17 停在前一晚的內容 45 分鐘）。跟上面一樣回 [未就緒]，這一輪先跳過。
+    if (window.__collabGuard && window.__collabGuard.coldBackfillDone === false) {
+      send({ Err: '[未就緒] 守門員還在補讀整份協作文件（開頁時顯示的可能是舊的快取），這一輪先不比對、不寫入。' });
+      return;
     }
     if (typeof Quill === 'undefined' || !Quill.find) {
       send({ Err: '協作工具頁面上找不到 Quill，無法讀取文件內容。' });
@@ -1522,6 +1533,8 @@ fn build_append_script(text: &str) -> String {
           .catch(function(e) {{ console.error('[news-script-tool] reply failed', e); }});
       }}
       try {{
+        // 告訴守門員接下來的畫面變動是 App 自己寫的，不算「別人的更新有顯示」（v0.3.32）。
+        window.__collabGuardIgnoreDomUntil = Date.now() + 3000;
         if (typeof Quill === 'undefined' || !Quill.find) {{
           send({{ Err: '協作工具頁面上找不到 Quill，無法寫入。' }});
           return;
@@ -1699,6 +1712,7 @@ fn build_correct_script(fixes: &[news_script_core::doc_match::TimeCorrection]) -
           .catch(function(e) {{ console.error('[news-script-tool] reply failed', e); }});
       }}
       try {{
+        window.__collabGuardIgnoreDomUntil = Date.now() + 3000;
         if (typeof Quill === 'undefined' || !Quill.find) {{
           send({{ Err: '協作工具頁面上找不到 Quill，無法校正時間。' }});
           return;

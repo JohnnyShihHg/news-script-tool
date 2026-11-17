@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.3.0
+// @version      1.4.0
 // @description  擋住協作工具的毛病：新分頁讀不完要手動重整、改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
@@ -38,6 +38,8 @@
     staleMinUpdates: 3,        // 而且這段時間至少收到這麼多筆（避免一兩筆不顯示的小更新誤判）
     backfillCooldownMinutes: 2, // 收不到別人的內容時「背景補讀」整份，兩次至少間隔這麼久
     backfillMaxPerHour: 10,    // 背景補讀一小時最多幾次（一次約 10 MB，別拖垮協作工具）
+    coldBackfill: true,        // 開頁讀完本機快取後，主動補讀整份一次（1.4.0）
+    backfillWhenHidden: false, // 縮小／背景時也補讀。Chrome 背景分頁不補；App 的協作視窗設 true
     staleReload: true,         // 補讀後還是收不到：你 30 秒沒打字、沒有待上傳就自動重整
     staleReloadCooldownMinutes: 10, // 這種重整兩次至少間隔這麼久
     debugScroll: false,        // 開了會在 console 印出每一次程式捲動的來源堆疊
@@ -50,6 +52,12 @@
   };
   // 測試頁用：在載入腳本前設定 window.__collabGuardTestConfig 就能把秒數調短。
   if (window.__collabGuardTestConfig) Object.assign(CONFIG, window.__collabGuardTestConfig);
+  // App 的協作視窗在載入腳本前設定（1.4.0）。
+  if (window.__collabGuardConfig) Object.assign(CONFIG, window.__collabGuardConfig);
+
+  // 給 App 看的狀態（1.4.0）：開頁補讀完成之前，App 不比對、不寫入。
+  const publicState = { version: "1.4.0", coldBackfillDone: !CONFIG.coldBackfill };
+  window.__collabGuard = publicState;
 
   const RELOAD_MARK_KEY = "collabGuardReloadedAt";
   const SCROLL_MARK_KEY = "collabGuardScrollTop";
@@ -328,6 +336,17 @@
 
   function startGuard() {
   setInterval(nudgePush, CONFIG.pushEverySeconds * 1000);
+  // 開頁補讀（1.4.0，第 7 節）：冷啟動讀到「已同步」就排；狀態文字改了或找不到時，保底
+  // 在編輯器出現 15 秒後排。
+  if (CONFIG.coldBackfill) {
+    const shownAt = Date.now();
+    const coldTimer = setInterval(() => {
+      if (cold.seconds !== null || Date.now() - shownAt > 15_000) {
+        clearInterval(coldTimer);
+        requestColdBackfill();
+      }
+    }, 500);
+  }
 
   applyLayoutFixes();
 
@@ -466,7 +485,7 @@
   //  - 背景分頁不補（等你切回來再補），補讀至少間隔 backfillCooldownMinutes，一小時最多
   //    backfillMaxPerHour 次。快照目前約 10 MB，跟重整一次讀的一樣。
   //  - 補讀失敗或補完還是卡住，才走自動重整（30 秒沒打字、沒有待上傳、10 分鐘一次）。
-  const backfill = { wanted: false, inFlight: false, lastAt: 0, lastDoneAt: 0, count: 0, recent: [] };
+  const backfill = { wanted: false, inFlight: false, cold: false, lastAt: 0, lastDoneAt: 0, count: 0, recent: [] };
 
   function logStaleEvent(kind, detail) {
     console.warn(`[守門員] ${kind}`, detail || "");
@@ -532,6 +551,9 @@
     const observer = new MutationObserver(() => {
       // 自己打字造成的變動不算「別人的更新有顯示出來」。
       if (Date.now() - state.lastUserInputAt < 1000) return;
+      // App 自己寫入、校正時間造成的也不算（1.4.0）：11/17 文件停在前一晚的快取，App 每 1～2
+      // 分鐘寫一則，每次都把偵測歸零，守門員一直以為收得到。
+      if (Date.now() < (window.__collabGuardIgnoreDomUntil || 0)) return;
       stale.lastDomAt = Date.now();
       stale.count = 0;
       stale.since = 0;
@@ -555,7 +577,7 @@
 
   // fetch 攔截呼叫：這一次拉取要不要改成補讀。背景分頁不補，等切回來。
   function takeBackfillTurn() {
-    if (!backfill.wanted || backfill.inFlight || document.hidden) return false;
+    if (!backfill.wanted || backfill.inFlight || (document.hidden && !CONFIG.backfillWhenHidden)) return false;
     backfill.wanted = false;
     backfill.inFlight = true;
     backfill.lastAt = Date.now();
@@ -564,19 +586,35 @@
     return true;
   }
 
+  // 開頁補讀（1.4.0）：頁面開啟時先顯示本機快取，再跟伺服器要「快取進度之後」的更新；
+  // 伺服器早就把那段逐筆更新併成快照刪掉了，中間缺的永遠補不回來，狀態照樣「已同步」。
+  // 11/17 06:49 App 開機，協作視窗停在前一晚 20:53 的內容 45 分鐘（夜班補的 2100～2400 都
+  // 沒有），這段時間沒有別人的更新進來可以觸發偵測。所以開頁讀完就主動補讀整份一次，跟
+  // 沒有快取時開頁一樣（約 10 MB）。不受冷卻、每小時上限限制；失敗 30 秒後再試。
+  function requestColdBackfill() {
+    if (publicState.coldBackfillDone || backfill.cold) return;
+    backfill.cold = true;
+    backfill.wanted = true;
+    logStaleEvent("開頁補讀");
+  }
+
   function finishBackfill(ok) {
     backfill.inFlight = false;
+    const wasCold = backfill.cold;
+    backfill.cold = false;
     if (!ok) {
-      logStaleEvent("背景補讀失敗");
+      logStaleEvent(wasCold ? "開頁補讀失敗，30 秒後再試" : "背景補讀失敗");
+      if (wasCold) setTimeout(requestColdBackfill, 30_000);
       return;
     }
+    if (wasCold) publicState.coldBackfillDone = true;
     backfill.lastDoneAt = Date.now();
     // 頁面接著會把快照套上去，卡住的內容一次出現。重新開始觀察。
     stale.count = 0;
     stale.since = 0;
     stale.gap = null;
     stale.gapConfirmed = false;
-    logStaleEvent("背景補讀完成", { cursor: stale.cursor });
+    logStaleEvent(wasCold ? "開頁補讀完成" : "背景補讀完成", { cursor: stale.cursor });
   }
 
   // 每秒由 refreshHud 呼叫。回傳「現在是不是收不到別人的內容」。
