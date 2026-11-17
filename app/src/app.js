@@ -753,6 +753,7 @@ function outputFieldsOf(i) {
     title: i.title,
     body: i.body,
     keywords: i.keywords,
+    keywords_csv: keywordCsvLine,
   };
 }
 
@@ -934,7 +935,10 @@ let keywordCooldownUntil = 0;
 
 function applyInewsConfig(config) {
   inewsCfg = { ...inewsCfg, ...(config.inews ?? {}) };
+  keywordCsvLine = config.output?.keyword_csv_line !== false;
 }
+/** 寫入時關鍵字下面多一行逗號分隔的版本（v0.3.34，output.keyword_csv_line）。 */
+let keywordCsvLine = true;
 
 function rememberInewsVersions(summary) {
   // Merged, not replaced: a sweep round also reports the previous show's stories, and
@@ -2176,7 +2180,8 @@ ${sec("text", "文字處理", `
             <h4 class="settings-sub">輸出格式</h4>
             ${num("關鍵字數量", "output.keyword_count", config.output.keyword_count, 1)}
             ${text("關鍵字分隔符號", "output.keyword_separator", config.output.keyword_separator)}
-            ${num("則與則之間空白行數", "output.entry_blank_lines", config.output.entry_blank_lines)}`)}
+            ${num("則與則之間空白行數", "output.entry_blank_lines", config.output.entry_blank_lines)}
+            ${check("output.keyword_csv_line", config.output.keyword_csv_line !== false, "關鍵字下面多一行逗號分隔（中和,忠孝街…，給公司另一套上傳系統）")}`)}
 ${sec("evening", "晚報", `
             ${styleField("主播名單", "evening.anchors", config.evening.anchors)}
             ${styleField("代表「不上網」的標記", "evening.no_online_markers", config.evening.no_online_markers)}

@@ -173,6 +173,23 @@ test("ticking a filtered entry lets it be written out and get keywords", () => {
   assert.ok(out.includes("內文"), out);
 });
 
+test("the keyword line gets a comma-separated copy below it", () => {
+  // v0.3.34：# 那行給手動剪輯上傳的人，逗號那行給公司另一套上傳系統。
+  const base = {
+    bucket: "passed", included: true, slug: "亮槍嚇路人16", style: "SL", time: "15:23:23", group: "",
+    title: "最新》中和男突「亮槍」嚇路人！ 警查扣瓦斯槍.氣瓶", body: "新北市中和忠孝街…",
+    keywords: "#中和 #忠孝街 #瓦斯槍 #恐嚇危害安全罪",
+  };
+  assert.equal(
+    L.buildOutputText([{ ...base, keywords_csv: true }]),
+    "亮槍嚇路人16 SL 15:23:23\n最新》中和男突「亮槍」嚇路人！ 警查扣瓦斯槍.氣瓶\n\n新北市中和忠孝街…\n#中和 #忠孝街 #瓦斯槍 #恐嚇危害安全罪\n\n中和,忠孝街,瓦斯槍,恐嚇危害安全罪"
+  );
+  // 設定關掉、或沒有關鍵字（勿上網、TEL）就不加。
+  assert.ok(!L.buildOutputText([base]).includes("中和,"));
+  assert.equal(L.buildOutputText([{ ...base, keywords: "", keywords_csv: true }]).split("\n").pop(), "");
+  assert.equal(L.keywordCsv("#a　#b,#c ＃d"), "a,b,c,d");
+});
+
 test("the funnel ignores filtered entries until one is rescued", () => {
   const base = [entry({ bucket: "passed", included: true }), entry({ bucket: "filtered", included: false })];
   assert.deepEqual(L.computeFunnel(base), { pending: 1, skipped: 0, outgoing: 1 });

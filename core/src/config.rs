@@ -288,11 +288,15 @@ pub struct OutputConfig {
     pub keyword_count: usize,
     pub keyword_separator: String,
     pub entry_blank_lines: usize,
+    /// 關鍵字下面多一行逗號分隔、不帶 # 的版本（v0.3.34）：`#` 那行給手動剪輯上傳的人，
+    /// 逗號那行給用公司另一套上傳系統的人。
+    #[serde(default = "default_true")]
+    pub keyword_csv_line: bool,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
-        Self { keyword_count: 4, keyword_separator: " ".into(), entry_blank_lines: 1 }
+        Self { keyword_count: 4, keyword_separator: " ".into(), entry_blank_lines: 1, keyword_csv_line: true }
     }
 }
 

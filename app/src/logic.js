@@ -199,9 +199,20 @@
         const head = [`${i.slug_marker ?? ""}${i.slug}`, i.style, i.time, i.group]
           .filter((f) => (f ?? "").trim() !== "");
         const body = (i.body ?? "").trim() !== "" ? ["", i.body] : [i.body];
-        return [head.join(" "), i.title, ...body, i.keywords].join("\n");
+        // 逗號分隔的關鍵字行（v0.3.34）：空一行接在 # 那行下面，給公司另一套上傳系統用。
+        const csv = i.keywords_csv ? keywordCsv(i.keywords) : "";
+        return [head.join(" "), i.title, ...body, i.keywords, ...(csv ? ["", csv] : [])].join("\n");
       })
       .join("\n\n");
+  }
+
+  /** `#中和 #忠孝街 #瓦斯槍` → `中和,忠孝街,瓦斯槍`（v0.3.34）。不管原本用什麼分隔。 */
+  function keywordCsv(keywords) {
+    return String(keywords ?? "")
+      .split(/[\s,，、]+/)
+      .map((k) => k.replace(/^[#＃]+/, "").trim())
+      .filter((k) => k !== "")
+      .join(",");
   }
 
   /**
@@ -895,6 +906,7 @@
     writeParts,
     unknownReviewTargets,
     vanishedWrites,
+    keywordCsv,
     isRerunStyle,
     isTelStyle,
     keepManualCards,
