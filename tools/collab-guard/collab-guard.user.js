@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.4.0
+// @version      1.4.1
 // @description  擋住協作工具的毛病：新分頁讀不完要手動重整、改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
@@ -40,6 +40,8 @@
     backfillMaxPerHour: 10,    // 背景補讀一小時最多幾次（一次約 10 MB，別拖垮協作工具）
     coldBackfill: true,        // 開頁讀完本機快取後，主動補讀整份一次（1.4.0）
     backfillWhenHidden: false, // 縮小／背景時也補讀。Chrome 背景分頁不補；App 的協作視窗設 true
+    backfillTimeoutSeconds: 60, // 補讀請求超過這麼久沒回來就當失敗（1.4.1）
+    coldRetrySeconds: 30,      // 開頁補讀失敗或逾時後多久再試
     staleReload: true,         // 補讀後還是收不到：你 30 秒沒打字、沒有待上傳就自動重整
     staleReloadCooldownMinutes: 10, // 這種重整兩次至少間隔這麼久
     debugScroll: false,        // 開了會在 console 印出每一次程式捲動的來源堆疊
@@ -56,7 +58,7 @@
   if (window.__collabGuardConfig) Object.assign(CONFIG, window.__collabGuardConfig);
 
   // 給 App 看的狀態（1.4.0）：開頁補讀完成之前，App 不比對、不寫入。
-  const publicState = { version: "1.4.0", coldBackfillDone: !CONFIG.coldBackfill };
+  const publicState = { version: "1.4.1", coldBackfillDone: !CONFIG.coldBackfill, coldRequestedAt: 0, coldAttempts: 0, coldLastError: "" };
   window.__collabGuard = publicState;
 
   const RELOAD_MARK_KEY = "collabGuardReloadedAt";
@@ -429,7 +431,9 @@
     // 背景補讀（第 7 節）：把頁面自己下一次的拉取改成「從頭拉」，伺服器會回整份快照，
     // 頁面照它平常的流程套上去。只改網址，不自己另外發請求。
     let callArgs = arguments;
-    const isBackfill = isSync && !isWrite && typeof input === "string" && takeBackfillTurn();
+    // 網址裡沒有 after= 就改不成「從頭拉」，這一次不算補讀（1.4.1：以前會被當成補讀成功）。
+    const turn = isSync && !isWrite && typeof input === "string" && /[?&]after=\d+/.test(url) ? takeBackfillTurn() : 0;
+    const isBackfill = turn > 0;
     if (isBackfill) callArgs = [url.replace(/([?&]after=)\d+/, "$10"), init];
     return originalFetch.apply(this, callArgs).then(
       (res) => {
@@ -439,21 +443,21 @@
             else {
               state.lastPullAt = Date.now();
               // 另外讀一份副本看收到什麼；頁面自己讀的那份不受影響。
-              res.clone().json().then((p) => noteIncoming(p, url, isBackfill)).catch(() => {
-                if (isBackfill) finishBackfill(false);
+              res.clone().json().then((p) => noteIncoming(p, url, turn)).catch(() => {
+                if (isBackfill) finishBackfill(false, turn);
               });
             }
             state.lastError = "";
           } else {
             state.lastError = `同步 HTTP ${res.status}`;
-            if (isBackfill) finishBackfill(false);
+            if (isBackfill) finishBackfill(false, turn);
           }
         }
         return res;
       },
       (err) => {
         if (isSync) state.lastError = `同步連線失敗：${err}`;
-        if (isBackfill) finishBackfill(false);
+        if (isBackfill) finishBackfill(false, turn);
         throw err;
       },
     );
@@ -485,7 +489,8 @@
   //  - 背景分頁不補（等你切回來再補），補讀至少間隔 backfillCooldownMinutes，一小時最多
   //    backfillMaxPerHour 次。快照目前約 10 MB，跟重整一次讀的一樣。
   //  - 補讀失敗或補完還是卡住，才走自動重整（30 秒沒打字、沒有待上傳、10 分鐘一次）。
-  const backfill = { wanted: false, inFlight: false, cold: false, lastAt: 0, lastDoneAt: 0, count: 0, recent: [] };
+  // turn：第幾次補讀。逾時之後才回來的回應對不上目前這一次，就不算（1.4.1）。
+  const backfill = { wanted: false, inFlight: false, cold: false, turn: 0, lastAt: 0, lastDoneAt: 0, count: 0, recent: [] };
 
   function logStaleEvent(kind, detail) {
     console.warn(`[守門員] ${kind}`, detail || "");
@@ -503,9 +508,9 @@
     return box ? box.value : "";
   }
 
-  function noteIncoming(payload, url, wasBackfill) {
-    if (wasBackfill) {
-      finishBackfill(Array.isArray(payload?.updates) && payload.updates.length > 0);
+  function noteIncoming(payload, url, turn) {
+    if (turn) {
+      finishBackfill(Array.isArray(payload?.updates) && payload.updates.length > 0, turn);
       return;
     }
     if (!payload || payload.hasMore) return;
@@ -576,14 +581,24 @@
   }
 
   // fetch 攔截呼叫：這一次拉取要不要改成補讀。背景分頁不補，等切回來。
+  // 回傳這一次補讀的編號，不補回 0。
   function takeBackfillTurn() {
-    if (!backfill.wanted || backfill.inFlight || (document.hidden && !CONFIG.backfillWhenHidden)) return false;
+    if (!backfill.wanted || backfill.inFlight || (document.hidden && !CONFIG.backfillWhenHidden)) return 0;
     backfill.wanted = false;
     backfill.inFlight = true;
     backfill.lastAt = Date.now();
     backfill.recent.push(backfill.lastAt);
     backfill.count += 1;
-    return true;
+    const turn = ++backfill.turn;
+    if (backfill.cold) publicState.coldAttempts += 1;
+    // 逾時保護（1.4.1）：請求一直沒回來，inFlight 會永遠卡住，之後再也不補讀；開頁補讀
+    // 卡住的話 App 也會一直等、一直不寫。
+    setTimeout(() => {
+      if (backfill.inFlight && backfill.turn === turn) {
+        finishBackfill(false, turn, `${CONFIG.backfillTimeoutSeconds} 秒沒回應`);
+      }
+    }, CONFIG.backfillTimeoutSeconds * 1000);
+    return turn;
   }
 
   // 開頁補讀（1.4.0）：頁面開啟時先顯示本機快取，再跟伺服器要「快取進度之後」的更新；
@@ -595,16 +610,21 @@
     if (publicState.coldBackfillDone || backfill.cold) return;
     backfill.cold = true;
     backfill.wanted = true;
+    if (!publicState.coldRequestedAt) publicState.coldRequestedAt = Date.now();
     logStaleEvent("開頁補讀");
   }
 
-  function finishBackfill(ok) {
+  function finishBackfill(ok, turn, why) {
+    // 不是目前這一次（逾時之後才回來的）就不理。頁面照樣會把它套上去，只是不算數。
+    if (!backfill.inFlight || turn !== backfill.turn) return;
     backfill.inFlight = false;
     const wasCold = backfill.cold;
     backfill.cold = false;
     if (!ok) {
-      logStaleEvent(wasCold ? "開頁補讀失敗，30 秒後再試" : "背景補讀失敗");
-      if (wasCold) setTimeout(requestColdBackfill, 30_000);
+      const reason = why || "回應不是可用的快照";
+      if (wasCold) publicState.coldLastError = reason;
+      logStaleEvent(wasCold ? `開頁補讀失敗，${CONFIG.coldRetrySeconds} 秒後再試` : "背景補讀失敗", { reason });
+      if (wasCold) setTimeout(requestColdBackfill, CONFIG.coldRetrySeconds * 1000);
       return;
     }
     if (wasCold) publicState.coldBackfillDone = true;

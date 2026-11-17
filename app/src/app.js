@@ -770,6 +770,8 @@ let bulkHoldSeconds = 0;
  */
 let collabDocReady = false;
 let collabWaitLogged = false;
+/** 守門員補讀等太久已經記進決策紀錄（v0.3.33，每次自動刷新一次）。 */
+let guardWaitLogged = false;
 /** 工具寫過、文件裡連續找不到的次數（v0.3.32）：key → 次數。 */
 let vanishStreaks = new Map();
 const VANISH_ROUNDS = 3;
@@ -1149,7 +1151,14 @@ async function runInewsPipeline() {
   } catch (err) {
     // 協作工具還在載入或沒連上：這一輪跳過，下一輪再試，不停掉自動刷新（v0.3.15）。
     if (isCollabNotReady(err)) {
-      inewsStatus(`⏳ ${String(err).replace(COLLAB_NOT_READY, "").trim()}`, "warn");
+      const msg = String(err).replace(COLLAB_NOT_READY, "").trim();
+      // 守門員補讀等太久（v0.3.33）：紅字，並記進決策紀錄（每次自動刷新只記一次）。
+      const longWait = msg.includes("請在協作視窗按 F5");
+      inewsStatus(`${longWait ? "⚠" : "⏳"} ${msg}`, longWait ? "error" : "warn");
+      if (longWait && !guardWaitLogged) {
+        guardWaitLogged = true;
+        logDecision(`[等待文件] ${msg}`);
+      }
       return;
     }
     stopInewsAuto(`⚠ 無法比對協作文件，自動刷新已停止：${err}\n請先「開啟協作工具」並登入，再重新打開「自動刷新」。`);
@@ -1706,6 +1715,7 @@ async function toggleInewsAuto() {
   inewsSessionStart = true;
   collabDocReady = false;
   collabWaitLogged = false;
+  guardWaitLogged = false;
   inewsStatus(`自動刷新已開啟，每 ${inewsCfg.poll_seconds} 秒讀一次 iNEWS。` +
     (inewsCfg.auto_write ? "（全自動寫入）" : "（產生關鍵字後等你按「確認寫入」）"));
   scheduleInewsRound(0);

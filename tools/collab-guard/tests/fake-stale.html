@@ -14,7 +14,8 @@
      ?mode=cold      開頁補讀（1.4.0）：讀到「已同步」就補讀整份一次，window.__collabGuard.coldBackfillDone 變 true
      ?mode=coldhidden 同 cold 但視窗縮小＋backfillWhenHidden（App 的協作視窗）→ 照樣補讀
      ?mode=toolwrite 小更新都不顯示，但 App 每 2 秒寫一筆（設 __collabGuardIgnoreDomUntil）→ 照樣補讀
-     （cold、coldhidden 以外的 mode 關掉開頁補讀，只測原本的偵測）
+     ?mode=coldhang  開頁補讀第一次請求一直不回（1.4.1）→ 2 秒逾時、2 秒後重試成功；遲到的回應不算
+     （cold、coldhidden、coldhang 以外的 mode 關掉開頁補讀，只測原本的偵測）
      加 &frame=1 測 showAlertFrame 打開。window.__reqs 是頁面發出的拉取網址。
      測試前在 console 清掉：localStorage.clear(); sessionStorage.clear(); window.name = "" -->
 <div id="bar"><span id="s">已同步</span></div>
@@ -28,7 +29,9 @@
     backfillCooldownMinutes: 0.05,
     backfillMaxPerHour: mode === "hard" || mode === "typing" ? 1 : 10,
     showAlertFrame: params.get("frame") === "1",
-    coldBackfill: mode === "cold" || mode === "coldhidden",
+    coldBackfill: mode === "cold" || mode === "coldhidden" || mode === "coldhang",
+    backfillTimeoutSeconds: 2,
+    coldRetrySeconds: 2,
     backfillWhenHidden: mode === "coldhidden",
   };
   if (mode === "hidden" || mode === "coldhidden") Object.defineProperty(document, "hidden", { get: () => true });
@@ -44,6 +47,12 @@
     window.__reqs.push(String(input));
     const after = Number(String(input).match(/after=(\d+)/)[1]);
     let body;
+    if (after === 0 && mode === "coldhang" && !window.__hungOnce) {
+      // 第一次補讀：5 秒後才回（逾時是 2 秒），看遲到的回應會不會被當成完成。
+      window.__hungOnce = true;
+      await new Promise((r) => setTimeout(r, 5000));
+      window.__lateArrived = true;
+    }
     if (after === 0) {
       body = { updates: [{ cursor: serverCursor, update: "S".repeat(50_000) }], nextCursor: serverCursor, snapshotCursor: serverCursor, hasMore: false };
     } else {
@@ -61,7 +70,7 @@
     const isSnapshot = p.updates[0]?.update.length > 1000;
     const fixable = mode === "stale" || mode === "gap" || mode === "toolwrite";
     const shows =
-      mode === "ok" || mode === "gapok" || mode === "cold" || mode === "coldhidden" ||
+      mode === "ok" || mode === "gapok" || mode === "cold" || mode === "coldhidden" || mode === "coldhang" ||
       (isSnapshot && fixable) ||
       (fixable && window.__fixed);
     if (isSnapshot && fixable) window.__fixed = true;

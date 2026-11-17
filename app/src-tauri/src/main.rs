@@ -1323,8 +1323,14 @@ const SCRAPE_SCRIPT: &str = r#"
     }
     // 守門員開頁補讀還沒完成（v0.3.32）：頁面顯示的可能是本機快取的舊內容，「已同步」也
     // 不可靠（11/17 停在前一晚的內容 45 分鐘）。跟上面一樣回 [未就緒]，這一輪先跳過。
-    if (window.__collabGuard && window.__collabGuard.coldBackfillDone === false) {
-      send({ Err: '[未就緒] 守門員還在補讀整份協作文件（開頁時顯示的可能是舊的快取），這一輪先不比對、不寫入。' });
+    var g = window.__collabGuard;
+    if (g && g.coldBackfillDone === false) {
+      // 等太久（1.4.1 起補讀有 60 秒逾時、30 秒後重試）：講清楚等了多久、要怎麼辦（v0.3.33）。
+      var mins = g.coldRequestedAt ? Math.floor((Date.now() - g.coldRequestedAt) / 60000) : 0;
+      var tail = mins >= 3
+        ? '已經等了 ' + mins + ' 分鐘（試了 ' + (g.coldAttempts || 0) + ' 次' + (g.coldLastError ? '，上次：' + g.coldLastError : '') + '），請在協作視窗按 F5 重新整理。'
+        : '這一輪先不比對、不寫入。';
+      send({ Err: '[未就緒] 守門員還在補讀整份協作文件（開頁時顯示的可能是舊的快取），' + tail });
       return;
     }
     if (typeof Quill === 'undefined' || !Quill.find) {
