@@ -656,6 +656,22 @@ test("re-importing keeps edits by slug and takes fresh fields from the new impor
   assert.equal(merged[1].title, "合成標題2");
 });
 
+test("re-importing replaces an empty or unedited title with the fresh one (v0.3.36)", () => {
+  // 11/19：18:07 抓到還沒寫好的版本（標題空），20:49 再抓要換成完整版的標題。
+  const prev = [
+    ev(1, { title: "", importedTitle: "" }),
+    ev(2, { title: "舊匯入標題", importedTitle: "舊匯入標題" }),
+    ev(3, { title: "手改標題", importedTitle: "舊匯入標題" }),
+    ev(4, { title: "  " }),
+  ];
+  const fresh = [1, 2, 3, 4].map((k) => ev(k, { title: `新標題${k}`, importedTitle: `新標題${k}` }));
+  const merged = L.mergeEveningEdits(fresh, prev);
+  assert.deepEqual(merged.map((m) => m.title), ["新標題1", "新標題2", "手改標題", "新標題4"]);
+  assert.equal(merged[2].importedTitle, "新標題3", "the fresh import's title becomes the new baseline");
+  const item = L.eveningItemFromDto({ kind: "Passed", Passed: { slug: "合成1800", title: "原" } }, 0);
+  assert.equal(item.importedTitle, "原");
+});
+
 test("date helpers", () => {
   assert.equal(L.mmddOf("2026-10-17"), "1017");
   assert.equal(L.mmddOf("bad"), "");

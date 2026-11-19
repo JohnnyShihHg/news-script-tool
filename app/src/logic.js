@@ -331,6 +331,8 @@
       group: f.group ?? "",
       marker: f.slug_marker ?? "",
       title: f.title ?? "",
+      // 匯入時拿到的標題：同一天再匯入時，用來分辨標題是不是使用者改過的（v0.3.36）。
+      importedTitle: f.title ?? "",
       body: f.body ?? "",
       // Per-card keywords are an aid only; the list's hashtag line comes from the
       // group (see groupTagLine), not from these.
@@ -505,15 +507,21 @@
    * Re-importing the same day must not throw away what was already edited. Cards are
    * matched by slug and keep their title, keywords and tick; everything
    * else (time, style, marker) comes fresh from the new import.
+   *
+   * 標題只留「使用者改過的」（v0.3.36）：11/19 18:07 先抓一次，晚報時段的稿還沒寫好、
+   * 標題是空的；20:49 再抓拿到完整版，舊的空標題卻被當成編輯留下來。所以空標題、或跟
+   * 上次匯入時一模一樣（沒改過）的標題，一律換成這次匯入的。
    */
   function mergeEveningEdits(fresh, previous) {
     const bySlug = new Map((previous ?? []).map((p) => [p.slug, p]));
     return fresh.map((item) => {
       const p = bySlug.get(item.slug);
       if (!p) return item;
+      const prevTitle = String(p.title ?? "");
+      const edited = prevTitle.trim() !== "" && (p.importedTitle === undefined || prevTitle !== p.importedTitle);
       return {
         ...item,
-        title: p.title,
+        title: edited ? prevTitle : item.title,
         keywords: p.keywords,
         status: p.status,
         matchedLine: p.matchedLine,
