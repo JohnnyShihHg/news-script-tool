@@ -51,6 +51,7 @@ const {
   formatSlotSpans,
   parsePrograms,
   noteInewsRound,
+  resumeShowForProgram,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -1029,6 +1030,7 @@ async function inewsRound() {
     }
     const meta = summary.inews;
     noteInewsRound(closedShows, programDividers, meta);
+    lastWrittenShow = resumeShowForProgram(lastWrittenShow, meta);
     // Restarted mid-show: the backend picked up the show it was following, so the
     // divider for it is not written a second time (v0.3.5).
     //

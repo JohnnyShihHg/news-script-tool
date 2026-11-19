@@ -924,6 +924,22 @@ test("before-position writes the 關鍵時刻 divider on its own once 2000 is sw
   assert.equal(L.composeInewsWrite([], { lastShow: "0800", closed: new Set(["0800"]), programs }, BEFORE, toText).text, "");
 });
 
+test("after a restart the swept show with a program divider becomes the show being written (v0.3.37)", () => {
+  // 11/19：22:03 重開（還沒寫過任何一則），22:10 補掃 2000，帶關鍵時刻。
+  const closed = new Set();
+  const programs = new Map();
+  const meta = { show: "2200", closed_show: "2000", program_divider: "==== 22 關鍵時刻 ====" };
+  L.noteInewsRound(closed, programs, meta);
+  const lastShow = L.resumeShowForProgram("", meta);
+  assert.equal(lastShow, "2000");
+  const r = L.composeInewsWrite([mk("出國更划算2100", "2000")], { lastShow, closed, programs }, BEFORE, toText);
+  assert.equal(r.text, "出國更划算2100\n\n==== 22 關鍵時刻 ====");
+  // 已經寫過的不動；沒有節目分隔線的補掃、沒補掃的輪次都不改。
+  assert.equal(L.resumeShowForProgram("1800", meta), "1800");
+  assert.equal(L.resumeShowForProgram("", { show: "2200", closed_show: "2000" }), "");
+  assert.equal(L.resumeShowForProgram("", { show: "2200" }), "");
+});
+
 test("program settings parse 開頭=名稱 pairs", () => {
   assert.deepEqual(L.parsePrograms("關鍵KS=關鍵時刻, XX＝某節目"), { 關鍵KS: "關鍵時刻", XX: "某節目" });
   assert.deepEqual(L.parsePrograms(""), {});

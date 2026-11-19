@@ -716,6 +716,17 @@
     }
   }
 
+  /**
+   * 重開後還沒寫過任何一則（lastShow 是空的）時，補掃帶節目分隔線的那一節要當成「寫到
+   * 這一節」，不然節目分隔線永遠不會寫（v0.3.37）。11/19 22:03 重開，22:10 補掃 2000、
+   * 寫了 出國更划算2100，但 `==== 22 關鍵時刻 ====` 沒寫：2000 被當成「晚到的稿」寫在
+   * 最下面，收尾時沒有「目前節次」可以收。已經在文件裡的分隔線，寫入前比對會濾掉。
+   */
+  function resumeShowForProgram(lastShow, meta) {
+    if (lastShow) return lastShow;
+    return meta?.closed_show && meta.program_divider ? meta.closed_show : "";
+  }
+
   /** `關鍵KS=關鍵時刻, XX=某節目` -> { 關鍵KS: "關鍵時刻", ... }; null on a malformed part. */
   function parsePrograms(text) {
     const programs = {};
@@ -955,6 +966,7 @@
     formatSlotSpans,
     parsePrograms,
     noteInewsRound,
+    resumeShowForProgram,
     composeInewsWrite,
     eveningItemFromDto,
     isEveningHit,
