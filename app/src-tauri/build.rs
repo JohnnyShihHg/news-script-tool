@@ -48,6 +48,8 @@ fn main() {
             "get_autostart",
             "set_autostart",
             "load_evening_from_records",
+            "load_write_session",
+            "save_write_session",
         ])),
     )
     .expect("failed to run tauri-build");

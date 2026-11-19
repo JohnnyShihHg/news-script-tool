@@ -52,6 +52,8 @@ const {
   parsePrograms,
   noteInewsRound,
   resumeShowForProgram,
+  writeSessionSnapshot,
+  restoreWriteSession,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -924,6 +926,42 @@ const closedShows = new Set();
 const programDividers = new Map();
 /** The next auto round is the first since 自動刷新 was switched on. */
 let inewsSessionStart = false;
+/** 寫入進度存檔（v0.3.38）：開了自動刷新後第一輪接回來一次；上次存的內容，沒變就不重存。 */
+let writeSessionRestorePending = true;
+let writeSessionDay = "";
+let lastSavedWriteSession = "";
+
+async function restoreWriteSessionOnce(meta) {
+  if (!writeSessionRestorePending) return;
+  writeSessionRestorePending = false;
+  // 同一次執行裡關掉又打開自動刷新：記憶體裡的就是最新的，不蓋掉。
+  if (lastWrittenShow || closedShows.size) return;
+  let saved = null;
+  try {
+    const raw = await invoke("load_write_session");
+    saved = raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.warn("寫入進度讀取失敗", err);
+    return;
+  }
+  const r = restoreWriteSession(saved, meta);
+  if (!r) return;
+  lastWrittenShow = r.lastShow;
+  for (const s of r.closed) closedShows.add(s);
+  for (const [show, text] of r.programs) programDividers.set(show, text);
+  logDecision(
+    `[接續寫入] 上一則寫到 ${r.lastShow || "（無）"}｜已收尾 ${r.closed.join("、") || "（無）"}` +
+      (r.programs.length ? `｜節目分隔線 ${r.programs.map(([s, t]) => `${s}→${t}`).join("、")}` : "")
+  );
+}
+
+function saveWriteSession() {
+  if (!writeSessionDay) return;
+  const json = JSON.stringify(writeSessionSnapshot(writeSessionDay, lastWrittenShow, closedShows, programDividers));
+  if (json === lastSavedWriteSession) return;
+  lastSavedWriteSession = json;
+  invoke("save_write_session", { json }).catch((err) => console.warn("寫入進度存檔失敗", err));
+}
 /** `${key}|${version}` written this session: one version is never written twice. */
 const writtenKeys = new Set();
 /** story key -> { slug, show } written this session, for the 疑似誤寫 check (v0.3.11). */
@@ -1029,6 +1067,7 @@ async function inewsRound() {
       return;
     }
     const meta = summary.inews;
+    await restoreWriteSessionOnce(meta);
     noteInewsRound(closedShows, programDividers, meta);
     lastWrittenShow = resumeShowForProgram(lastWrittenShow, meta);
     // Restarted mid-show: the backend picked up the show it was following, so the
@@ -1041,6 +1080,8 @@ async function inewsRound() {
     if (meta.resumed_show && !lastWrittenShow && inewsCfg.divider_position !== "before") {
       lastWrittenShow = meta.resumed_show;
     }
+    writeSessionDay = meta.day ?? writeSessionDay;
+    saveWriteSession();
     const { added, changed } = diffInewsVersions(inewsVersions, meta.stories);
     const hadCards = items.some((i) => i.inews);
     const before = items;
@@ -1369,6 +1410,7 @@ async function writeInewsItems(ready) {
       i.alreadyInDoc = true;
     }
     lastWrittenShow = lastShow;
+    saveWriteSession();
     hideInewsConfirm();
     status.textContent = (written.length ? `✅ 自動寫入 ${written.length} 則：${msg}` : `✅ 已寫入節次分隔線：${msg}`) +
       (held.length ? `\n⏸ ${heldText(held)}` : "");
@@ -1754,6 +1796,7 @@ async function toggleInewsAuto() {
     return;
   }
   inewsSessionStart = true;
+  writeSessionRestorePending = true;
   collabDocReady = false;
   collabWaitLogged = false;
   guardWaitLogged = false;

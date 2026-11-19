@@ -389,6 +389,10 @@ pub struct StoryMeta {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct InewsMeta {
+    /// 播出日 MMDD（v0.3.38）：前端的寫入進度存檔只在同一個播出日接回來。
+    pub day: String,
+    /// 目前節次的上一個有效節次（v0.3.38）：寫入進度接回來時，判斷「上一則寫到的節次」還會不會收尾。
+    pub previous_show: Option<String>,
     pub show: String,
     pub show_label: String,
     pub queue_path: String,
@@ -1269,6 +1273,8 @@ impl InewsState {
             rundown: snapshots,
             search,
             meta: InewsMeta {
+                day: today.clone(),
+                previous_show: plan.previous.as_ref().map(|p| p.slot.show.clone()),
                 show_label: inews::show_hour_label(&cur.slot.show),
                 show: cur.slot.show.clone(),
                 queue_path: queue_of(&cur.slot.show),

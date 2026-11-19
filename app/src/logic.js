@@ -727,6 +727,40 @@
     return meta?.closed_show && meta.program_divider ? meta.closed_show : "";
   }
 
+  /**
+   * 寫入進度存檔（v0.3.38）：上一則寫到哪一節、哪些節次已收尾、收尾後要接的節目分隔線。
+   * 原本只在記憶體，重開 App 就沒了（11/19 22:03 重開，`==== 22 關鍵時刻 ====` 沒寫）。
+   */
+  function writeSessionSnapshot(day, lastShow, closed, programs) {
+    return {
+      version: 1,
+      day: String(day ?? ""),
+      lastShow: String(lastShow ?? ""),
+      closed: [...(closed ?? [])],
+      programs: Object.fromEntries(programs ?? []),
+    };
+  }
+
+  /**
+   * 重開後第一輪把存檔接回來；不是同一個播出日、格式不對就回 null（照舊從頭）。
+   *
+   * 「上一則寫到的節次」要還會收尾才接：已收尾、是目前節次、是上一個有效節次，或後端接續的
+   * 就是它。App 關了好幾節才重開，那一節不會再補掃，接回來的話它永遠收不了尾，後面每一節
+   * 的稿都會被擋住，所以這種情況照舊當成沒寫過。
+   */
+  function restoreWriteSession(saved, meta) {
+    if (!saved || saved.version !== 1 || !meta?.day || saved.day !== meta.day) return null;
+    const closed = Array.isArray(saved.closed) ? saved.closed.filter((s) => typeof s === "string" && s) : [];
+    const programs = Object.entries(saved.programs && typeof saved.programs === "object" ? saved.programs : {}).filter(
+      ([show, text]) => closed.includes(show) && typeof text === "string" && text
+    );
+    let lastShow = typeof saved.lastShow === "string" ? saved.lastShow : "";
+    const willClose =
+      closed.includes(lastShow) || lastShow === meta.show || lastShow === meta.previous_show || lastShow === meta.resumed_show;
+    if (!willClose) lastShow = "";
+    return { lastShow, closed, programs };
+  }
+
   /** `關鍵KS=關鍵時刻, XX=某節目` -> { 關鍵KS: "關鍵時刻", ... }; null on a malformed part. */
   function parsePrograms(text) {
     const programs = {};
@@ -967,6 +1001,8 @@
     parsePrograms,
     noteInewsRound,
     resumeShowForProgram,
+    writeSessionSnapshot,
+    restoreWriteSession,
     composeInewsWrite,
     eveningItemFromDto,
     isEveningHit,

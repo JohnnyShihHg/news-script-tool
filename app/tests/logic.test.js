@@ -940,6 +940,30 @@ test("after a restart the swept show with a program divider becomes the show bei
   assert.equal(L.resumeShowForProgram("", { show: "2200" }), "");
 });
 
+test("the write progress is saved and restored across a restart (v0.3.38)", () => {
+  const programs = new Map([["2000", "==== 22 關鍵時刻 ===="]]);
+  const saved = JSON.parse(JSON.stringify(L.writeSessionSnapshot("1119", "2000", new Set(["1800", "2000"]), programs)));
+  assert.deepEqual(saved, { version: 1, day: "1119", lastShow: "2000", closed: ["1800", "2000"], programs: { 2000: "==== 22 關鍵時刻 ====" } });
+  const r = L.restoreWriteSession(saved, { day: "1119", show: "2200", previous_show: "2000" });
+  assert.equal(r.lastShow, "2000");
+  assert.deepEqual(r.closed, ["1800", "2000"]);
+  assert.deepEqual(r.programs, [["2000", "==== 22 關鍵時刻 ===="]]);
+  // 22:03 重開、2000 還沒補掃（還沒收尾）：上一則寫到 2000，是上一個有效節次，接回來。
+  const early = L.restoreWriteSession({ ...saved, closed: ["1800"], programs: {} }, { day: "1119", show: "2200", previous_show: "2000" });
+  assert.equal(early.lastShow, "2000");
+  // 隔天、格式不對：不接。
+  assert.equal(L.restoreWriteSession(saved, { day: "1120", show: "0600" }), null);
+  assert.equal(L.restoreWriteSession({ ...saved, version: 2 }, { day: "1119", show: "2200" }), null);
+  assert.equal(L.restoreWriteSession(null, { day: "1119", show: "2200" }), null);
+  // 12:30 關掉、18:10 才重開：1200 不會再補掃，接回來會擋住 1800，所以當成沒寫過。
+  const late = L.restoreWriteSession({ ...saved, lastShow: "1200", closed: ["1100"], programs: {} }, { day: "1119", show: "1800", previous_show: "1700" });
+  assert.equal(late.lastShow, "");
+  assert.deepEqual(late.closed, ["1100"]);
+  // 沒收尾的節次不帶節目分隔線。
+  const orphan = L.restoreWriteSession({ ...saved, closed: ["1800"] }, { day: "1119", show: "2200", previous_show: "2000" });
+  assert.deepEqual(orphan.programs, []);
+});
+
 test("program settings parse 開頭=名稱 pairs", () => {
   assert.deepEqual(L.parsePrograms("關鍵KS=關鍵時刻, XX＝某節目"), { 關鍵KS: "關鍵時刻", XX: "某節目" });
   assert.deepEqual(L.parsePrograms(""), {});

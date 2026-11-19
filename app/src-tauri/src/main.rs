@@ -358,6 +358,34 @@ fn inews_state_file() -> Option<std::path::PathBuf> {
         .and_then(|d| d.config_dir().parent().map(|p| p.join("state").join("inews-session.json")))
 }
 
+/// 前端的寫入進度存檔（v0.3.38）：上一則寫到哪一節、哪些節次已收尾、收尾後要接的節目
+/// 分隔線。原本只在記憶體，11/19 22:03 重開後 `==== 22 關鍵時刻 ====` 沒寫。內容由前端
+/// 決定（JSON 字串），這裡只負責存取。跟 inews-session.json 放同一個資料夾。
+fn write_session_file() -> Option<std::path::PathBuf> {
+    inews_state_file().map(|p| p.with_file_name("write-session.json"))
+}
+
+#[tauri::command]
+fn load_write_session(window: tauri::Window) -> Result<Option<String>, String> {
+    require_main_window(&window)?;
+    match write_session_file() {
+        Some(p) if p.exists() => std::fs::read_to_string(p).map(Some).map_err(|e| e.to_string()),
+        _ => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn save_write_session(window: tauri::Window, json: String) -> Result<(), String> {
+    require_main_window(&window)?;
+    let path = write_session_file().ok_or_else(|| "找不到狀態存放路徑".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
 /// 決策紀錄資料夾：`%APPDATA%\\ebc\\news-script-tool\\logs`（設定檔在同一層的 `config`）。
 fn inews_log_dir() -> Option<std::path::PathBuf> {
     directories::ProjectDirs::from("tw", "ebc", "news-script-tool")
@@ -2121,7 +2149,9 @@ fn main() {
             fetch_prelist,
             get_autostart,
             set_autostart,
-            load_evening_from_records
+            load_evening_from_records,
+            load_write_session,
+            save_write_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

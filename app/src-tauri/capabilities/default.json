@@ -50,6 +50,8 @@
     "allow-fetch-prelist",
     "allow-get-autostart",
     "allow-set-autostart",
-    "allow-load-evening-from-records"
+    "allow-load-evening-from-records",
+    "allow-load-write-session",
+    "allow-save-write-session"
   ]
 }
