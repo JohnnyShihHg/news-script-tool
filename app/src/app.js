@@ -45,6 +45,7 @@ const {
   isPendingWrite,
   mergeInewsItems,
   autoWriteCandidates,
+  pendingShows,
   composeInewsWrite,
   parseSlotSpans,
   formatSlotSpans,
@@ -1218,6 +1219,7 @@ async function runInewsPipeline() {
   }
   const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel).filter((i) => !beforeWriteStartShow(i));
   const plan = inewsWriteText(ready);
+  logHeld(plan.held, ready);
   if (plan.written.length === 0 && !plan.text.trim()) {
     hideInewsConfirm();
     if (plan.held.length) showHeldNotice(plan.held);
@@ -1230,12 +1232,7 @@ async function runInewsPipeline() {
 /// Shows that still have entries waiting for keywords or a compare: their divider
 /// waits for those, or a straggler would land under the next show's divider.
 function pendingShowsOutside(ready) {
-  const inReady = new Set(ready);
-  return new Set(
-    items
-      .filter((i) => i.inews && !inReady.has(i) && isPendingWrite(i, writtenKeys) && i.inews.hold !== "suspect")
-      .map((i) => i.inews.show)
-  );
+  return pendingShows(items, ready, writtenKeys);
 }
 
 function inewsWriteText(ready) {
@@ -1266,6 +1263,44 @@ function writeLogNote(written, dividers) {
     (dividers.length ? `｜分隔線 ${dividers.join("、")}` : "") +
     (dateHeaderOwed ? `｜日期分隔線 ${dateHeaderOwed}` : "")
   );
+}
+
+/**
+ * 等待寫入的原因記進決策紀錄（v0.3.35）：11/19 1400 整節卡了一小時，紀錄只有「寫入成功」，
+ * 查不到在等誰。內容跟上一次一樣就不重複記。
+ */
+let lastHeldLog = "";
+function heldReason(held, ready) {
+  const show = lastWrittenShow;
+  const heldShows = [...new Set(held.map((i) => i.inews?.show))].join("、");
+  if (!closedShows.has(show)) return `[等待寫入] ${held.length} 則 ${heldShows} 的稿等 ${show} 節延遲補掃完成`;
+  const inReady = new Set(ready);
+  const blockers = items.filter(
+    (i) =>
+      i.inews?.show === show && !inReady.has(i) && isPendingWrite(i, writtenKeys) &&
+      i.inews.hold !== "suspect" && !i.inews.recheck && !i.inews.manual
+  );
+  const why = (i) =>
+    i.inews?.hold ? "等確認"
+    : i.matchStatus == null ? "等比對"
+    : i.keywordStatus === "error" ? `關鍵字失敗：${String(i.keywordError ?? "").slice(0, 60)}`
+    : (i.keywords ?? "").trim() === "" ? "等關鍵字"
+    : "等寫入";
+  return (
+    `[等待寫入] ${held.length} 則 ${heldShows} 的稿等 ${show} 節收尾：` +
+    (blockers.length ? blockers.map((i) => `${slugOf(i)}（${why(i)}）`).join("、") : "沒有找到在等的稿")
+  );
+}
+function logHeld(held, ready) {
+  if (!held.length) {
+    lastHeldLog = "";
+    return;
+  }
+  const line = heldReason(held, ready);
+  if (line !== lastHeldLog) {
+    lastHeldLog = line;
+    logDecision(line);
+  }
 }
 
 function showHeldNotice(held) {

@@ -310,6 +310,10 @@ pub struct InewsState {
     swept_for: Option<String>,
     /// story key → 上一次看到的版本，決策紀錄算「新增／變動」用。
     versions: HashMap<String, String>,
+    /// 這個播出日看過的「節次|slug」（v0.3.35）。iNEWS 的 story key 每次存檔、搬稿都會換
+    /// （11/19 潑水丟紅包1200 在 1200 就換了 6 次），定時複查用 key 判斷「沒看過」會把
+    /// 製作人播完再整理的列當成漏寫的稿，所以改看節次＋slug。
+    seen_slugs: HashSet<String>,
     /// 上次存檔的節次狀態：剛打開自動刷新那一輪拿來接續（見 `SavedSession`）。
     resume: Option<SavedSession>,
     /// rundown 異常保護（v0.3.11）：寫入確認、異常冷卻、可疑稿。
@@ -325,6 +329,11 @@ pub struct InewsState {
     /// 目前節次上一輪的樣子，異常時存檔用。
     last_obs: Vec<RowObs>,
     recheck: RecheckState,
+}
+
+/// 「節次|slug」（v0.3.35）：定時複查、疑似誤寫認稿用，比 story key 穩定。
+fn seen_key(show: &str, slug: &str) -> String {
+    format!("{show}|{}", slug.trim())
 }
 
 /// 定時複查（v0.3.11）：每次讀兩輪（第一輪記下補掃後才出現的稿，第二輪還是已播出才寫），
@@ -346,6 +355,8 @@ pub struct RecheckMeta {
     pub shows: Vec<String>,
     /// 複查的節次與目前節次裡所有已播出的 story key。
     pub aired_keys: Vec<String>,
+    /// 同上，換成「節次|slug」（v0.3.35）：疑似誤寫改用這個比，key 會跟著存檔一直換。
+    pub aired_slugs: Vec<String>,
 }
 
 /// 存在檔案裡的自動刷新狀態。程式重開或關掉自動刷新時，記憶體裡的 `last_show` /
@@ -826,6 +837,7 @@ impl InewsState {
         if let FetchMode::Auto { session_start } = mode {
             if self.guard_day != today {
                 self.guard.new_day();
+                self.seen_slugs.clear();
                 self.followed.clear();
                 self.confirm_prev.clear();
                 self.last_obs.clear();
@@ -938,7 +950,16 @@ impl InewsState {
                     let s = inews::select_rows(&rows, None, &w, cfg.include_floated, marker);
                     for &i in &s.rows {
                         let key = rundowns[&w.slot.show][i].0.story_key();
-                        let take = if second { self.recheck.candidates.contains(&key) } else { !self.versions.contains_key(&key) };
+                        // 非新聞列（CM、分隔列、主編、片頭、空白 slug）不撿（v0.3.35）：11/19 撿回
+                        // `=====CM1=======`、`主編：…`，還寫進一則空白稿。看過沒看過改用節次＋slug。
+                        let row = &rows[i];
+                        let story_row = row.styled && !row.title.trim().is_empty() && !row.title.trim_start().starts_with('=');
+                        let take = story_row
+                            && if second {
+                                self.recheck.candidates.contains(&key)
+                            } else {
+                                !self.seen_slugs.contains(&seen_key(&w.slot.show, &row.title))
+                            };
                         if take {
                             candidates.insert(key);
                             let mut p = Pick::new(&w.slot.show, i, s.cume[i]);
@@ -1116,7 +1137,14 @@ impl InewsState {
                 aired_keys.extend(sel.rows.iter().map(|&i| rundowns[&cur.slot.show][i].0.story_key()));
                 shows.push(cur.slot.show.clone());
             }
-            RecheckMeta { shows, aired_keys }
+            let mut aired_slugs: Vec<String> = recheck_sels
+                .iter()
+                .flat_map(|(w, s)| s.rows.iter().map(|&i| seen_key(&w.slot.show, rundowns[&w.slot.show][i].1.title())).collect::<Vec<_>>())
+                .collect();
+            if !cur.slot.off_air {
+                aired_slugs.extend(sel.rows.iter().map(|&i| seen_key(&cur.slot.show, rundowns[&cur.slot.show][i].1.title())));
+            }
+            RecheckMeta { shows, aired_keys, aired_slugs }
         });
 
         // 目前節次與上一個有效節次整份存下來，停播節次不算。`plan_slots` 為了判斷有效節次
@@ -1195,6 +1223,7 @@ impl InewsState {
             let fill = (cfg.fill_computed_time && !cume.is_empty()).then_some(cume.as_str());
             files.push((file_name.clone(), inews::story_to_text(story, fill)));
             let key = entry.story_key();
+            self.seen_slugs.insert(seen_key(&pick.show, story.title()));
             match self.versions.insert(key.clone(), entry.version().to_string()) {
                 None => added += 1,
                 Some(v) if v != entry.version() => changed += 1,
@@ -2433,5 +2462,44 @@ mod tests {
         assert!(meta.aired_keys.contains(&x.key));
         let r = st.fetch(&c, &pw, hm(12, 29), auto(false)).unwrap();
         assert!(hold_of(&r, "X").is_none() && r.meta.recheck.is_none());
+    }
+
+    #[test]
+    fn sim_the_recheck_ignores_re_saved_stories_and_non_story_rows() {
+        // v0.3.35，11/19：製作人播完再整理 1100，每一列存檔後 story key 都換了，複查把
+        // `=====CM1=======`、`主編：…` 這些列當成漏寫的稿撿回來，還寫進一則空白稿。
+        let server = sim_server(&["1100", "1200"]);
+        let q1100 = "51新聞台.SHOWS.1100.ONAIR";
+        server.set_queue(q1100, &sim_rows("1100", 39300, &["A", "B", "C"]));
+        server.set_queue(Q1200, &sim_rows("1200", 42900, &["A", "B"]));
+        let mut c = cfg(server.port);
+        c.slot_spans.clear();
+        let mut st = InewsState::default();
+        let auto = |start| FetchMode::Auto { session_start: start };
+        let pw = creds("secret");
+        st.fetch(&c, &pw, hm(11, 0), auto(true)).unwrap();
+        st.fetch(&c, &pw, hm(11, 1), auto(false)).unwrap();
+        st.fetch(&c, &pw, hm(11, 56), auto(false)).unwrap();
+        st.fetch(&c, &pw, hm(11, 57), auto(false)).unwrap();
+        let r = st.fetch(&c, &pw, hm(12, 6), auto(false)).unwrap();
+        assert_eq!(r.meta.closed_show.as_deref(), Some("1100"));
+
+        // 補掃之後：A～C 被存檔（key 中段換掉），中間多了沒有樣式的 CM 列、主編列和空白列。
+        let mut rows: Vec<(String, String, String)> = sim_rows("1100", 39300, &["A", "B", "C"])
+            .into_iter()
+            .map(|(name, file, xml)| (name.replacen(":0000000", ":00A0000", 1), file, xml))
+            .collect();
+        rows.insert(2, ("1100CM00:000000F1:00000001".into(), "CM1".into(), story("", "=====CM1=======", 120, "", "")));
+        rows.insert(3, ("1100ED00:000000F2:00000001".into(), "主編".into(), story("", "主編：合成", 0, "", "")));
+        rows.insert(4, ("1100BL00:000000F3:00000001".into(), "空白".into(), story("", "", 30, "", "SOT")));
+        server.set_queue(q1100, &rows);
+        st.fetch(&c, &pw, hm(12, 26), auto(false)).unwrap();
+        let r = st.fetch(&c, &pw, hm(12, 27), auto(false)).unwrap();
+        assert!(!r.meta.stories.iter().any(|s| s.recheck), "{:?}", r.meta.stories.iter().map(|s| &s.file_name).collect::<Vec<_>>());
+        let r = st.fetch(&c, &pw, hm(12, 28), auto(false)).unwrap();
+        assert!(r.extra_logs.iter().any(|l| l.starts_with("[複查] 1100") && l.contains("0 則")), "{:?}", r.extra_logs);
+        // 疑似誤寫改看節次＋slug：key 換了，slug 還在就不算。
+        let meta = r.meta.recheck.as_ref().expect("recheck meta");
+        assert!(meta.aired_slugs.contains(&"1100|A模擬稿1100".to_string()), "{:?}", meta.aired_slugs);
     }
 }

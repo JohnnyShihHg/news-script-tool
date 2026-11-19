@@ -995,6 +995,23 @@ test("疑似誤寫 lists written stories that the recheck no longer sees aired",
   const r = L.findMisfires(written, { shows: ["1100", "1200"], aired_keys: ["A:2"] });
   assert.deepEqual(r, [{ key: "A:1", slug: "記憶卡破萬1200", show: "1200" }]);
   assert.deepEqual(L.findMisfires(written, null), []);
+  // v0.3.35：存檔後 key 換了，但同一節還有同 slug 的已播出列 → 不算誤寫。
+  const resaved = L.findMisfires(written, { shows: ["1200"], aired_keys: ["A:9"], aired_slugs: ["1200|記憶卡破萬1200", "1200|國安救台股1200"] });
+  assert.deepEqual(resaved, []);
+});
+
+test("cards the recheck brought back, and manual cards, do not hold a show's divider", () => {
+  // v0.3.35，11/19：複查撿回的 1200 卡片寫不出去，1200 一直收不了尾，1400 整節等到 15:05。
+  const cards = L.inewsItemsFromSummary(inewsSummary("1200", [
+    { slug: "撿回的", key: "R:1", version: "v1", recheck: true },
+    { slug: "手動的", key: "R:2", version: "v1" },
+    { slug: "等關鍵字", key: "R:3", version: "v1" },
+    { slug: "可疑", key: "R:4", version: "v1", hold: "suspect" },
+  ]));
+  cards[1].inews.manual = true;
+  for (const c of cards) { c.included = true; c.matchStatus = "to_cut"; }
+  assert.deepEqual([...L.pendingShows(cards, [], new Set())], ["1200"], "等關鍵字的一般稿照樣擋");
+  assert.deepEqual([...L.pendingShows(cards, [cards[2]], new Set())], [], "只剩撿回的、手動的、可疑的就不擋");
 });
 
 // --- 寫入前重新比對逐則傳入（v0.3.14）---

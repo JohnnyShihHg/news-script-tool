@@ -749,6 +749,24 @@
    * Stories of a show already closed and left behind arrive late (edited after the
    * sweep); they are written where they are, with no divider of their own.
    */
+  /**
+   * 還有稿在等（關鍵字、比對）的節次：它們的分隔線要等，不然漏網的稿會落到下一節的分隔線
+   * 下面。定時複查撿回來的、手動載入的卡片本來就寫在最下面，不擋（v0.3.35：11/19 複查撿回
+   * 的 1200 卡片寫不出去，1200 一直收不了尾，1400 整節等到 15:05 才寫）。可疑稿也不擋。
+   */
+  function pendingShows(items, ready, writtenKeys) {
+    const inReady = new Set(ready ?? []);
+    return new Set(
+      (items ?? [])
+        .filter(
+          (i) =>
+            i.inews && !inReady.has(i) && isPendingWrite(i, writtenKeys) &&
+            i.inews.hold !== "suspect" && !i.inews.recheck && !i.inews.manual
+        )
+        .map((i) => i.inews.show)
+    );
+  }
+
   function composeInewsWrite(items, { lastShow = "", closed = new Set(), pending = new Set(), programs = new Map() } = {}, { format, position }, toText) {
     const groups = [];
     for (const i of items) {
@@ -891,14 +909,19 @@
    * middle of a move looks like afterwards. Only reported; the doc is never edited.
    *
    *   written -- Map story key -> { slug, show } written this session
-   *   recheck -- `meta.recheck`: { shows, aired_keys }
+   *   recheck -- `meta.recheck`: { shows, aired_keys, aired_slugs }
+   *
+   * v0.3.35：iNEWS 的 story key 每次存檔、搬稿都會換，只比 key 會把播完又被製作人存檔
+   * 或搬到後面節次重播的稿全報成疑似誤寫（11/19 一次報 20 則）。key 還在、或同一節還有
+   * 同 slug 的已播出列，都不算。
    */
   function findMisfires(written, recheck) {
     if (!recheck) return [];
     const shows = new Set(recheck.shows ?? []);
     const aired = new Set(recheck.aired_keys ?? []);
+    const airedSlugs = new Set(recheck.aired_slugs ?? []);
     return [...(written ?? new Map()).entries()]
-      .filter(([key, w]) => shows.has(w.show) && !aired.has(key))
+      .filter(([key, w]) => shows.has(w.show) && !aired.has(key) && !airedSlugs.has(`${w.show}|${String(w.slug ?? "").trim()}`))
       .map(([key, w]) => ({ key, ...w }));
   }
 
@@ -907,6 +930,7 @@
     unknownReviewTargets,
     vanishedWrites,
     keywordCsv,
+    pendingShows,
     isRerunStyle,
     isTelStyle,
     keepManualCards,
