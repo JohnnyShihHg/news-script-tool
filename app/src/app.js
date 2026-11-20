@@ -39,6 +39,8 @@ const {
   writeParts,
   unknownReviewTargets,
   vanishedWrites,
+  reopenForRewrite,
+  stuckReasons,
   keepManualCards,
   diffInewsVersions,
   writtenKey,
@@ -1220,6 +1222,7 @@ async function runInewsPipeline() {
     for (const key of v.release) {
       writtenKeys.delete(key);
       const item = items.find((i) => writtenKey(i) === key);
+      reopenForRewrite(item);
       logDecision(`[重寫] ${item ? slugOf(item) : key}：工具寫過，但文件今天的段落連續 ${VANISH_ROUNDS} 次比對都找不到，重新寫入`);
     }
   }
@@ -1262,7 +1265,7 @@ async function runInewsPipeline() {
   }
   const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel).filter((i) => !beforeWriteStartShow(i));
   const plan = inewsWriteText(ready);
-  logHeld(plan.held, ready);
+  logHeld(plan.held, ready, plan.written.length === 0 && !plan.text.trim());
   if (plan.written.length === 0 && !plan.text.trim()) {
     hideInewsConfirm();
     if (plan.held.length) showHeldNotice(plan.held);
@@ -1334,12 +1337,23 @@ function heldReason(held, ready) {
     (blockers.length ? blockers.map((i) => `${slugOf(i)}（${why(i)}）`).join("、") : "沒有找到在等的稿")
   );
 }
-function logHeld(held, ready) {
-  if (!held.length) {
+/** 什麼都沒寫、也不是在等上一節收尾時：有稿在等就逐則記原因（v0.3.39）。 */
+function stuckLine(ready) {
+  const list = stuckReasons(items, ready, writtenKeys, {
+    hasApiKey,
+    cooldownSeconds: Math.max(0, Math.ceil((keywordCooldownUntil - Date.now()) / 1000)),
+    skip: beforeWriteStartShow,
+  });
+  if (!list.length) return "";
+  return `[等待寫入] ${list.length} 則還沒寫：` + list.map((r) => `${r.slug}（${r.why}）`).join("、");
+}
+
+function logHeld(held, ready, nothingWritten = false) {
+  const line = held.length ? heldReason(held, ready) : nothingWritten ? stuckLine(ready) : "";
+  if (!line) {
     lastHeldLog = "";
     return;
   }
-  const line = heldReason(held, ready);
   if (line !== lastHeldLog) {
     lastHeldLog = line;
     logDecision(line);

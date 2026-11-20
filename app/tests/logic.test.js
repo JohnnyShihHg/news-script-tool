@@ -964,6 +964,57 @@ test("the write progress is saved and restored across a restart (v0.3.38)", () =
   assert.deepEqual(orphan.programs, []);
 });
 
+const rwCard = (slug) => ({ bucket: "passed", kind: "Passed", dto: { Passed: { slug } }, body: "內文", keywords: "" });
+
+test("a released rewrite is ticked again so the auto write picks it up (v0.3.39)", () => {
+  // 11/20 龜殼花咬人1800：寫入時被設成不勾選、已在文件；[重寫] 只刪 writtenKeys 的話永遠不會再寫。
+  const c = rwCard("龜殼花咬人1800");
+  c.inews = { key: "K1", version: "V1", show: "0800", hold: null };
+  c.matchStatus = "to_cut";
+  c.keywords = "#龜殼花";
+  c.included = false;
+  c.defaultIncluded = false;
+  c.alreadyInDoc = true;
+  c.userIncluded = false;
+  const written = new Set();
+  assert.equal(L.autoWriteCandidates([c], written, "").length, 0, "before: stuck");
+  L.reopenForRewrite(c);
+  assert.equal(L.autoWriteCandidates([c], written, "").length, 1);
+  // 下一次比對照樣勾著（待處理）。
+  assert.equal(L.decideInclusion({ status: "to_cut", matched_line: null }, c.defaultIncluded, c.userIncluded), true);
+  L.reopenForRewrite(undefined); // 找不到卡片不出錯
+});
+
+test("stuck reasons say what each unwritten story waits for (v0.3.39)", () => {
+  const mkc = (slug, extra) => {
+    const c = rwCard(slug);
+    c.inews = { key: slug, version: "V", show: "0900", hold: null };
+    c.matchStatus = "to_cut";
+    c.included = true;
+    return Object.assign(c, extra);
+  };
+  const items = [
+    mkc("等關鍵字0900", {}),
+    mkc("關鍵字錯0900", { keywordStatus: "error", keywordError: "429 quota" }),
+    mkc("等比對0900", { matchStatus: null }),
+    mkc("可疑0900", { inews: { key: "S", version: "V", show: "0900", hold: "suspect" } }),
+    mkc("可寫0900", { keywords: "#a" }),
+    mkc("寫過0900", { keywords: "#a" }),
+  ];
+  const written = new Set([`寫過0900|V`]);
+  const ready = L.autoWriteCandidates(items, written, "");
+  const r = L.stuckReasons(items, ready, written, { hasApiKey: true });
+  assert.deepEqual(r, [
+    { slug: "等關鍵字0900", why: "等關鍵字" },
+    { slug: "關鍵字錯0900", why: "關鍵字失敗：429 quota" },
+    { slug: "等比對0900", why: "等比對" },
+    { slug: "可疑0900", why: "可疑稿，等人工確認" },
+  ]);
+  assert.equal(L.stuckReasons([items[0]], [], written, { hasApiKey: false })[0].why, "沒有 Gemini API key");
+  assert.equal(L.stuckReasons([items[0]], [], written, { hasApiKey: true, cooldownSeconds: 30 })[0].why, "等關鍵字（額度冷卻中）");
+  assert.deepEqual(L.stuckReasons(items, ready, written, { hasApiKey: true, skip: () => true }), []);
+});
+
 test("program settings parse 開頭=名稱 pairs", () => {
   assert.deepEqual(L.parsePrograms("關鍵KS=關鍵時刻, XX＝某節目"), { 關鍵KS: "關鍵時刻", XX: "某節目" });
   assert.deepEqual(L.parsePrograms(""), {});

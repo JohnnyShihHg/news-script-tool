@@ -600,6 +600,40 @@
   }
 
   /**
+   * 放行重寫（v0.3.39）：寫入時卡片被設成「不勾選、已在文件」（defaultIncluded 也是 false），
+   * 只刪 writtenKeys 的話，下一次比對還是算成不勾選，永遠不會自動重寫 —— 11/20 龜殼花咬人1800、
+   * 顯卡記憶漲1800 08:39 記了 [重寫]，一直到 09:36 有人手動寫入才補上。
+   */
+  function reopenForRewrite(item) {
+    if (!item) return;
+    item.defaultIncluded = true;
+    item.included = true;
+    item.alreadyInDoc = false;
+    delete item.userIncluded;
+  }
+
+  /**
+   * 這一輪「有稿在等、卻什麼都沒寫」時，逐則說明在等什麼（v0.3.39）。11/20 09:06～09:36 0900
+   * 整節沒寫，紀錄只有比對，查不到卡在哪。回傳 [{ slug, why }]，只列還沒寫、這一輪也不能寫的。
+   */
+  function stuckReasons(items, ready, writtenKeys, opts = {}) {
+    const inReady = new Set(ready ?? []);
+    const why = (i) =>
+      i.inews?.hold === "suspect" ? "可疑稿，等人工確認"
+      : i.inews?.hold === "cooldown" ? "rundown 時間異常，暫停"
+      : i.inews?.hold ? "等下一輪確認"
+      : i.matchStatus == null ? "等比對"
+      : i.keywordStatus === "loading" ? "關鍵字產生中"
+      : i.keywordStatus === "error" ? `關鍵字失敗：${String(i.keywordError ?? "").slice(0, 80)}`
+      : !opts.hasApiKey ? "沒有 Gemini API key"
+      : opts.cooldownSeconds > 0 ? "等關鍵字（額度冷卻中）"
+      : "等關鍵字";
+    return (items ?? [])
+      .filter((i) => isPendingWrite(i, writtenKeys) && !inReady.has(i) && !(opts.skip && opts.skip(i)))
+      .map((i) => ({ slug: String((i.dto?.[i.kind] ?? i.dto ?? {}).slug ?? i.slug ?? ""), why: why(i) }));
+  }
+
+  /**
    * Ticked, not handled in the doc, and this exact version not yet written. Covers
    * both "waiting for keywords" and "waiting to be written".
    */
@@ -982,6 +1016,8 @@
     writeParts,
     unknownReviewTargets,
     vanishedWrites,
+    reopenForRewrite,
+    stuckReasons,
     keywordCsv,
     pendingShows,
     isRerunStyle,
