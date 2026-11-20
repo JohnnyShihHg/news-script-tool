@@ -943,7 +943,7 @@ test("after a restart the swept show with a program divider becomes the show bei
 test("the write progress is saved and restored across a restart (v0.3.38)", () => {
   const programs = new Map([["2000", "==== 22 關鍵時刻 ===="]]);
   const saved = JSON.parse(JSON.stringify(L.writeSessionSnapshot("1119", "2000", new Set(["1800", "2000"]), programs)));
-  assert.deepEqual(saved, { version: 1, day: "1119", lastShow: "2000", closed: ["1800", "2000"], programs: { 2000: "==== 22 關鍵時刻 ====" } });
+  assert.deepEqual(saved, { version: 1, day: "1119", lastShow: "2000", closed: ["1800", "2000"], programs: { 2000: "==== 22 關鍵時刻 ====" }, prints: [] });
   const r = L.restoreWriteSession(saved, { day: "1119", show: "2200", previous_show: "2000" });
   assert.equal(r.lastShow, "2000");
   assert.deepEqual(r.closed, ["1800", "2000"]);
@@ -965,6 +965,54 @@ test("the write progress is saved and restored across a restart (v0.3.38)", () =
 });
 
 const rwCard = (slug) => ({ bucket: "passed", kind: "Passed", dto: { Passed: { slug } }, body: "內文", keywords: "" });
+
+// v0.3.41（AUDIT_REPORT #5）：iNEWS 換了 key 的同一則稿，靠內容指紋認回「已寫過」。
+const fpCard = (key, { show = "0800", slug = "合成掃街0800", title = "合成標題", body = "合成內文", matchStatus = "to_cut" } = {}) => ({
+  bucket: "passed", kind: "Passed", dto: { Passed: { slug } }, title, body, keywords: "#掃街",
+  included: true, matchStatus, inews: { key, version: "V1", show, hold: null },
+});
+
+test("a re-saved story with the same content is recognised as already written (v0.3.41)", () => {
+  const written = fpCard("K-OLD");
+  const prints = new Set([L.contentPrint(written)]);
+  const keys = new Set(["K-OLD|V1"]);
+  // 製作人存檔：key 換了、內容沒變 → 認回，不寫。
+  const resaved = fpCard("K-NEW");
+  assert.equal(L.autoWriteCandidates([resaved], keys, "").length, 1, "before: would be written again");
+  assert.deepEqual(L.adoptWrittenPrints([resaved], keys, prints), [resaved]);
+  assert.ok(keys.has("K-NEW|V1"));
+  assert.equal(L.autoWriteCandidates([resaved], keys, "").length, 0);
+});
+
+test("a changed story, another show, or a refresh request is still written (v0.3.41)", () => {
+  const prints = new Set([L.contentPrint(fpCard("K-OLD"))]);
+  const cases = [
+    fpCard("K1", { body: "記者改過的內文" }), // 內容改了
+    fpCard("K2", { title: "改過的標題" }),
+    fpCard("K3", { show: "0900" }), // 別的節次
+    fpCard("K4", { slug: "合成別則0800" }),
+    fpCard("K5", { matchStatus: "keep_refresh" }), // 文件是抓新行：製作人要求重寫
+  ];
+  const keys = new Set();
+  assert.deepEqual(L.adoptWrittenPrints(cases, keys, prints), []);
+  assert.equal(keys.size, 0);
+  // 沒有 iNEWS 資訊的卡片沒有指紋；空集合什麼都不做。
+  assert.equal(L.contentPrint({ title: "t", body: "b" }), "");
+  assert.deepEqual(L.adoptWrittenPrints([fpCard("K6")], new Set(), new Set()), []);
+});
+
+test("written prints survive a restart on the same broadcast day only (v0.3.41)", () => {
+  const p = L.contentPrint(fpCard("K-OLD"));
+  const saved = JSON.parse(JSON.stringify(L.writeSessionSnapshot("1120", "0800", new Set(["0700"]), new Map(), new Set([p]))));
+  assert.deepEqual(saved.prints, [p]);
+  const meta = { day: "1120", show: "0800", previous_show: "0700" };
+  assert.deepEqual(L.restoreWriteSession(saved, meta).prints, [p]);
+  assert.equal(L.restoreWriteSession(saved, { ...meta, day: "1121" }), null, "next day: not restored");
+  // 舊版存檔沒有 prints 欄位：當作空的。
+  const old = { ...saved };
+  delete old.prints;
+  assert.deepEqual(L.restoreWriteSession(old, meta).prints, []);
+});
 
 test("a released rewrite is ticked again so the auto write picks it up (v0.3.39)", () => {
   // 11/20 龜殼花咬人1800：寫入時被設成不勾選、已在文件；[重寫] 只刪 writtenKeys 的話永遠不會再寫。

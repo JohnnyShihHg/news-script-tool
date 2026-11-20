@@ -40,6 +40,21 @@
 - **寫入／校正腳本（`main.rs` 的 `COLLAB_EDIT_PRELUDE`、`build_append_script`、`build_correct_script`）改了要讓 `app/tests/fake-quill.html` 的 golden test 照樣通過**；行為真的要變，先改 `collab_script_cases` 的預期值並說明為什麼。
 - 寫死的門檻值（消失 3 輪才重寫、操作中暫停 30 秒／3 分鐘、eval 逾時 10 秒）是刻意的，不要搬進設定。
 
+## 跨輪狀態清單（重開 App 之後怎麼辦）
+
+新增跨輪狀態時，先決定它屬於哪一列，並補「重開後」的測試。
+
+| 狀態 | 存在哪 | 重開後 |
+|---|---|---|
+| 讀 iNEWS 跟到哪一節、補掃過哪一節 | 後端 `state\inews-session.json` | 接續（`resumed_show`） |
+| 上一則寫到哪一節、已收尾節次、節目分隔線 | 前端 `state\write-session.json` | 同播出日接回（`restoreWriteSession`） |
+| 今天寫過的稿的內容指紋（`writtenPrints`） | 前端 `state\write-session.json` | 同播出日接回；換播出日清掉 |
+| `writtenKeys`／`writtenSlugs`／`writtenStories` | 只在記憶體 | 靠比對文件＋內容指紋（`adoptWrittenPrints`）認回 |
+| 消失計數（`vanishStreaks`） | 只在記憶體 | 從 0 重數（最多晚 3 輪重寫，可接受） |
+| 手動勾選（`userIncluded`） | 只在記憶體 | 不保留（刻意） |
+
+存檔失敗要記進決策紀錄（`saveWriteSession` 用 `noteOnce` 記 `[錯誤]`）。
+
 ## 不能做的事
 
 - **不能執行**任何連 iNEWS FTP 的程式、寫入或校正協作文件的流程、呼叫 Gemini、抓氣象署、啟動 App 的自動刷新。只能看程式碼、用測試裡的假資料。

@@ -53,7 +53,7 @@
 - **時間校正**（v0.3.9，`correct_time`，自動刷新時）：每一輪對目前節次和還沒補掃完的上一節裡已播出的列，在今天的日期段落找同一個 slug、時間落在該節有效範圍內的行，rundown 時間不同就只改時間字串（保留前綴、樣式、組別、`18:05:52`／`180552`／`18：05：52` 的寫法和標題格式）。範圍外的同 slug 行是其他節次的播出紀錄，不改；抓新行（`(抓新)`、`(19)`、`(X/19)`）不改；前一天段落不改。同一節多則同 slug 依時間先後配對，數量不同就不改。新舊時間差超過 `correct_time_max_delta_minutes`（預設 10）分鐘不改：編輯把播過的稿直接挪到後面重播時，原本那行是上一次的播出紀錄（v0.3.10）。同一個新時間要連續 `correct_time_stable_rounds`（預設 2）輪才改；改之前重新讀文件，該行內容變了就放棄、下一輪重判。決策紀錄寫 `[校正]`／`[校正略過]`。
 - **rundown 異常保護**（v0.3.11，自動刷新時）：製作人搬稿、還沒重設硬時間的那一分鐘，下面的列累積時間會整段往前縮，還沒播的稿被算成已播出（11/9 12:45 就這樣寫進 5 則）。所以：
   - **寫入確認**：新稿要連續 `write_stable_rounds`（預設 2）輪都是已播出、累積時間沒有大跳才寫，卡片顯示「⏳ 等下一輪確認」。只出現一輪就消失的記 `[確認略過]`。
-  - **異常 → 冷卻**：同一節內「最後納入」倒退、新播出的稿排在已播出範圍之前、或 3 則以上已播出的稿同時移動超過 `anomaly_threshold_seconds`（預設 120 秒），就暫停寫入與目前節次的時間校正（`[異常]`），連續 `anomaly_quiet_rounds`（預設 3）輪穩定才恢復（`[異常解除]`），最多 `anomaly_max_cooldown_minutes`（預設 15）分鐘。異常那一輪的前後兩輪 rundown 存成 `logsnomaly-YYYYMMDD-HHMMSS.json`。
+  - **異常 → 冷卻**：同一節內「最後納入」倒退、新播出的稿排在已播出範圍之前、或 3 則以上已播出的稿同時移動超過 `anomaly_threshold_seconds`（預設 120 秒），就暫停寫入與目前節次的時間校正（`[異常]`），連續 `anomaly_quiet_rounds`（預設 3）輪穩定才恢復（`[異常解除]`），最多 `anomaly_max_cooldown_minutes`（預設 15）分鐘。異常那一輪的前後兩輪 rundown 存成 `%APPDATA%\ebc\news-script-tool\logs\anomaly-YYYYMMDD-HHMMSS.json`。
   - **可疑稿**：異常前沒播過、異常時卻排到異常前「最後納入」之前的稿（`[可疑]`）。冷卻結束或逾時都不寫、也不拿去校正，要等它的時間推進到那條邊界之後（製作人重設硬時間、主播真的播到它）才照一般規則處理；補掃、換節最後同步時一樣擋。一直沒推進就一直列在 App 的狀態區讓人判斷，不會寫進文件。搬走再搬回原位的稿本來就播過，不算可疑；同一列換成新存的稿（同 slug、時間差在門檻內，iNEWS ID 變了），或插進長度 0 的列（下一列時間一樣），也不算往過去插入（v0.3.13）。
 - **定時複查**（v0.3.11，`recheck_interval_minutes`，預設 30，0 = 關閉）：每隔這麼久重讀這個播出日已經補掃完、而且程式跟過的節次，連讀兩輪。已播出稿的時間照時間校正的規則校正；補掃後才出現的已播出稿（這個 session 沒看過的）寫在文件最下面、不寫分隔線，紀錄寫 `[複查]`。這個 session 寫過、但複查時已經不是已播出的稿，列在 App 狀態區的「疑似誤寫」，不會自動刪。程式重開後，開之前的節次不複查。
 - **協作視窗內建守門員**（v0.3.15）：App 開的協作視窗是獨立的 WebView，沒有竄改猴，所以每次載入都注入同一份 `tools/collab-guard/collab-guard.user.js`（打包時內嵌，不另外維護一份）。新開時卡在「正在載入共同文章」會自動重整一次，同步卡住會紅框。
@@ -69,13 +69,31 @@
 
 ## 開發
 
-```bash
-cargo test --workspace          # Rust：解析、清洗、標點、比對、Gemini 回應處理
-cd app && node --test tests/logic.test.js   # UI 決策邏輯（不需 npm install）
-# 沒有 Node.js：用瀏覽器從 app/ 用 http 開 tests/browser-harness.html，跑同一份測試
+開發規則（必跑檢查、回報要附證據、不能執行的東西）見 [AGENTS.md](AGENTS.md)。
 
-cargo run -p news-script-tool   # 開發模式執行
+### 怎麼跑檢查
+
+```powershell
+powershell -ExecutionPolicy Bypass -File check.ps1
 ```
+
+一個指令跑完全部，任何修改完成前都要全部通過（每次 push 時 GitHub Actions 的 `check.yml` 也跑同一支）：
+
+- `cargo test --workspace`（同時產生寫入／校正腳本的測試案例 `app/tests/generated/collab-cases.js`）
+- `cargo clippy`：不能比 `tools/check/clippy-baseline.txt`（既有待清清單）多；`cargo fmt --check` 只報數量
+- 不准有空的 catch、JS 語法檢查
+- 用 Edge／Chrome headless 開測試頁：`app/tests/browser-harness.html`（logic.test.js）、`tools/collab-marker/tests/browser-harness.html`、`app/tests/fake-quill.html`（寫入／時間校正腳本 golden test）、`tools/collab-guard/tests/fake-stale.html` 每個 mode
+
+全部是本機、假資料，不連 iNEWS、不碰協作文件、不呼叫 Gemini。這台電腦預設的 gnu 工具鏈編不過，check.ps1 有裝 `stable-x86_64-pc-windows-msvc` 就會用它；clippy、rustfmt 要另外裝：`rustup component add --toolchain stable-x86_64-pc-windows-msvc clippy rustfmt`。
+
+有 Node.js 的話也可以單獨跑：
+
+```bash
+cd app && node --test tests/logic.test.js
+node --test tools/collab-marker/tests/lookup.test.js
+```
+
+開發模式執行（會開真的 App）：`cargo run -p news-script-tool`
 
 ### 專案結構
 
@@ -83,7 +101,11 @@ cargo run -p news-script-tool   # 開發模式執行
 |---|---|
 | `core/` | 純函式核心：解析、清洗、標點正規化、輸出格式、slug 比對、Gemini 客戶端 |
 | `app/src-tauri/` | Tauri 外殼：IPC 指令、設定、keyring、協作視窗 |
-| `app/src/` | 前端。`logic.js` 是可測試的純決策邏輯，`app.js` 只負責接線與渲染 |
+| `app/src/` | 前端。`logic.js` 是可測試的純決策邏輯（新的判斷一律寫在這裡並補測試）；`app.js` 負責接線、渲染、設定頁，以及自動刷新和寫入流程的狀態（還有一部分判斷沒搬進 logic.js，例如分隔線何時該寫、預列清單） |
+| `app/tests/` | `logic.test.js`、瀏覽器測試頁、`fake-quill.html`（寫入／校正腳本 golden test） |
+| `tools/collab-guard/` | 協作視窗守門員（App 打包時內嵌）＋ `tests/fake-stale.html` 假資料測試頁 |
+| `tools/collab-marker/` | 查上網標記的書籤小工具 |
+| `check.ps1`、`tools/check/` | 一個指令跑完所有檢查；clippy 待清清單、JS 語法檢查頁 |
 | `news-script-tool-spec.md` | 專案規格 |
 
 ### 測試資料

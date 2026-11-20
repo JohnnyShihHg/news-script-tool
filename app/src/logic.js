@@ -788,14 +788,59 @@
    * 寫入進度存檔（v0.3.38）：上一則寫到哪一節、哪些節次已收尾、收尾後要接的節目分隔線。
    * 原本只在記憶體，重開 App 就沒了（11/19 22:03 重開，`==== 22 關鍵時刻 ====` 沒寫）。
    */
-  function writeSessionSnapshot(day, lastShow, closed, programs) {
+  function writeSessionSnapshot(day, lastShow, closed, programs, prints) {
     return {
       version: 1,
       day: String(day ?? ""),
       lastShow: String(lastShow ?? ""),
       closed: [...(closed ?? [])],
       programs: Object.fromEntries(programs ?? []),
+      // 寫過的稿的內容指紋（v0.3.41，見 contentPrint）：重開後也認得出已經寫過的稿。
+      prints: [...(prints ?? [])],
     };
+  }
+
+  /** FNV-1a 32 位元，十六進位。只拿來比「內容一不一樣」，不是安全用途。 */
+  function fnv1a(text) {
+    let h = 0x811c9dc5;
+    for (let k = 0; k < text.length; k++) {
+      h ^= text.charCodeAt(k);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16).padStart(8, "0");
+  }
+
+  /**
+   * 一則稿的內容指紋（v0.3.41）：`節次|slug|標題＋內文的雜湊`。iNEWS 的 story key（連版本）
+   * 每次存檔、搬稿都會換，「key|版本」記得的「寫過了」會失效（AUDIT_REPORT #5）；指紋只看
+   * 寫出去的東西，內容沒變就認得出來，內容改了（記者改稿）就是新的指紋、照常寫。
+   * 沒有 iNEWS 資訊（手動匯入的資料夾卡片）回空字串，不參與。
+   */
+  function contentPrint(item) {
+    if (!item?.inews) return "";
+    const slug = String((item.dto?.[item.kind] ?? item.dto ?? {}).slug ?? item.slug ?? "").trim();
+    const text = `${String(item.title ?? "").trim()}\n${String(item.body ?? "").trim()}`;
+    return `${item.inews.show ?? ""}|${slug}|${fnv1a(text)}`;
+  }
+
+  /**
+   * 還在等寫入、但同一節同一個 slug、內容一模一樣的稿今天已經寫過（只是 iNEWS 換了 key）：
+   * 當作已寫過，把它的 key 記進 writtenKeys（v0.3.41）。回傳被認回的卡片，給決策紀錄用。
+   * 要重貼（keep_refresh，文件裡是抓新行）的不認：那是製作人要求重寫。
+   * 一定要在產生關鍵字之前跑，不然會白花額度。
+   */
+  function adoptWrittenPrints(items, writtenKeys, prints) {
+    const adopted = [];
+    if (!prints?.size) return adopted;
+    for (const i of items ?? []) {
+      if (!isPendingWrite(i, writtenKeys) || i.matchStatus === "keep_refresh") continue;
+      const p = contentPrint(i);
+      const key = writtenKey(i);
+      if (!p || !key || !prints.has(p)) continue;
+      writtenKeys.add(key);
+      adopted.push(i);
+    }
+    return adopted;
   }
 
   /**
@@ -815,7 +860,8 @@
     const willClose =
       closed.includes(lastShow) || lastShow === meta.show || lastShow === meta.previous_show || lastShow === meta.resumed_show;
     if (!willClose) lastShow = "";
-    return { lastShow, closed, programs };
+    const prints = Array.isArray(saved.prints) ? saved.prints.filter((s) => typeof s === "string" && s) : [];
+    return { lastShow, closed, programs, prints };
   }
 
   /** `關鍵KS=關鍵時刻, XX=某節目` -> { 關鍵KS: "關鍵時刻", ... }; null on a malformed part. */
@@ -1063,6 +1109,8 @@
     resumeShowForProgram,
     writeSessionSnapshot,
     restoreWriteSession,
+    contentPrint,
+    adoptWrittenPrints,
     composeInewsWrite,
     eveningItemFromDto,
     isEveningHit,

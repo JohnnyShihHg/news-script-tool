@@ -104,7 +104,24 @@ if ($LASTEXITCODE -ne 0 -and -not ($fmt -match "^Diff in")) {
   Write-Host "rustfmt 差異 $diffs 處（不擋）"
 }
 
-# ---------------------------------------------------------------- 4. 空的 catch
+# ---------------------------------------------------------------- 4a. 前端寫死的設定預設值
+Step "前端不准自己寫設定預設值（?? 數字）"
+$appJs = [System.IO.File]::ReadAllText((Join-Path $root "app\src\app.js"))
+$cfgDefault = '\b(inewsCfg|inewsSettings|s|config\.[a-z_]+)\.[a-z_]+\s*\?\?\s*\d'
+$cfgHits = @()
+foreach ($m in [regex]::Matches($appJs, $cfgDefault)) {
+  $lineNo = ($appJs.Substring(0, $m.Index) -split "`n").Count
+  $cfgHits += "app\src\app.js:$lineNo  $($m.Value)"
+}
+if ($cfgHits.Count) {
+  Fail ("前端寫了設定的預設值：`n  " + ($cfgHits -join "`n  ") +
+    "`n  正確做法：預設值只寫在 core/src/config.rs（serde 預設），get_config 會回傳完整設定，前端直接用；" +
+    "新欄位記得在 Rust 加預設值，core/tests/frontend_config_fields.rs 會檢查。")
+} else {
+  Pass "沒有前端寫死的設定預設值"
+}
+
+# ---------------------------------------------------------------- 4b. 空的 catch
 Step "不准有空的 catch"
 $jsFiles = @(Get-ChildItem -Path "app\src", "app\tests", "tools" -Recurse -Include *.js, *.html -File |
   Where-Object { $_.FullName -notmatch "\\generated\\" })

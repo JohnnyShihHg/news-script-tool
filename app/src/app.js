@@ -57,6 +57,8 @@ const {
   resumeShowForProgram,
   writeSessionSnapshot,
   restoreWriteSession,
+  contentPrint,
+  adoptWrittenPrints,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -893,9 +895,12 @@ async function writeBackToCollab() {
       writtenSlugs.add(slugOf(i));
       const key = writtenKey(i);
       if (key) writtenKeys.add(key);
+      const print = contentPrint(i);
+      if (print) writtenPrints.add(print);
       // 寫過了：手動勾選的記憶清掉，下一次比對照文件狀態重算（不然會一直勾著）。
       delete i.userIncluded;
     });
+    saveWriteSession();
     status.textContent = `✅ ${msg}`;
   } catch (err) {
     status.className = "compare-status error";
@@ -952,19 +957,35 @@ async function restoreWriteSessionOnce(meta) {
   lastWrittenShow = r.lastShow;
   for (const s of r.closed) closedShows.add(s);
   for (const [show, text] of r.programs) programDividers.set(show, text);
+  for (const p of r.prints) writtenPrints.add(p);
   logDecision(
     `[接續寫入] 上一則寫到 ${r.lastShow || "（無）"}｜已收尾 ${r.closed.join("、") || "（無）"}` +
-      (r.programs.length ? `｜節目分隔線 ${r.programs.map(([s, t]) => `${s}→${t}`).join("、")}` : "")
+      (r.programs.length ? `｜節目分隔線 ${r.programs.map(([s, t]) => `${s}→${t}`).join("、")}` : "") +
+      `｜寫過 ${r.prints.length} 則`
   );
 }
 
 function saveWriteSession() {
   if (!writeSessionDay) return;
-  const json = JSON.stringify(writeSessionSnapshot(writeSessionDay, lastWrittenShow, closedShows, programDividers));
+  const json = JSON.stringify(
+    writeSessionSnapshot(writeSessionDay, lastWrittenShow, closedShows, programDividers, writtenPrints)
+  );
   if (json === lastSavedWriteSession) return;
   lastSavedWriteSession = json;
-  invoke("save_write_session", { json }).catch((err) => console.warn("寫入進度存檔失敗", err));
+  invoke("save_write_session", { json })
+    .then(() => noteOnce("save-session", ""))
+    .catch((err) => {
+      // 存檔失敗也要留紀錄（v0.3.41）：存不進去的話，重開後又會失憶。
+      console.warn("寫入進度存檔失敗", err);
+      lastSavedWriteSession = "";
+      noteOnce("save-session", `[錯誤] 寫入進度存檔失敗，重開 App 後可能接不回去：${err}`);
+    });
 }
+/**
+ * 今天寫過的稿的內容指紋（v0.3.41，logic.js contentPrint）：iNEWS 換了 key 也認得出來。
+ * 跟寫入進度一起存檔，換播出日就清掉。
+ */
+const writtenPrints = new Set();
 /** `${key}|${version}` written this session: one version is never written twice. */
 const writtenKeys = new Set();
 /** story key -> { slug, show } written this session, for the 疑似誤寫 check (v0.3.11). */
@@ -1083,6 +1104,8 @@ async function inewsRound() {
     if (meta.resumed_show && !lastWrittenShow && inewsCfg.divider_position !== "before") {
       lastWrittenShow = meta.resumed_show;
     }
+    // 換了播出日：昨天寫過的指紋不算（同一節同一個 slug 隔天重播要照常寫）。
+    if (meta.day && writeSessionDay && meta.day !== writeSessionDay) writtenPrints.clear();
     writeSessionDay = meta.day ?? writeSessionDay;
     saveWriteSession();
     const { added, changed } = diffInewsVersions(inewsVersions, meta.stories);
@@ -1237,8 +1260,19 @@ async function runInewsPipeline() {
     for (const key of v.release) {
       writtenKeys.delete(key);
       const item = items.find((i) => writtenKey(i) === key);
+      // 指紋也要拿掉，不然下面的 adoptWrittenPrints 會馬上把它認回「已寫過」（v0.3.41）。
+      if (item) writtenPrints.delete(contentPrint(item));
       reopenForRewrite(item);
       logDecision(`[重寫] ${item ? slugOf(item) : key}：工具寫過，但文件今天的段落連續 ${VANISH_ROUNDS} 次比對都找不到，重新寫入`);
+    }
+  }
+
+  // 1c. iNEWS 換了 key、但同一節同一則、內容一模一樣的稿今天已經寫過：當作已寫過（v0.3.41）。
+  // 在產生關鍵字之前做，不白花額度。文件還沒同步到那一行時，這是唯一擋得住重寫的地方。
+  {
+    const adopted = adoptWrittenPrints(items, writtenKeys, writtenPrints);
+    if (adopted.length) {
+      logDecision(`[略過] ${adopted.length} 則內容跟今天寫過的一樣（iNEWS 換了 key），不再寫：${adopted.map(slugOf).join("、")}`);
     }
   }
 
@@ -1324,7 +1358,7 @@ function dividerOwed() {
 
 function heldText(held) {
   const shows = [...new Set(held.map((i) => i.inews?.show))].join("、");
-  return `${held.length} 則 ${shows} 的稿等 ${lastWrittenShow} 節延遲補掃完成、寫完分隔線後再寫入（換節次後 ${inewsCfg.sweep_delay_minutes ?? 10} 分鐘）。`;
+  return `${held.length} 則 ${shows} 的稿等 ${lastWrittenShow} 節延遲補掃完成、寫完分隔線後再寫入（換節次後 ${inewsCfg.sweep_delay_minutes} 分鐘）。`;
 }
 
 /// 寫進決策紀錄的一行：幾則、哪些 slug、分隔線。
@@ -1435,6 +1469,8 @@ async function writeInewsItems(ready) {
       writtenSlugs.add(slugOf(i));
       writtenSlugs.add(`${slugOf(i)}|${i.inews?.version ?? ""}`);
       if (i.inews) writtenStories.set(i.inews.key, { slug: slugOf(i), show: i.inews.show });
+      const print = contentPrint(i);
+      if (print) writtenPrints.add(print);
       // 已經在文件裡了：取消勾選，下一輪比對也會得到同樣的結果。
       i.included = false;
       i.defaultIncluded = false;
@@ -1520,7 +1556,7 @@ const REVIEW_SOUNDS = {
 
 function playReviewSound(kind, volume) {
   const sound = REVIEW_SOUNDS[kind] ?? REVIEW_SOUNDS.double;
-  const peak = Math.min(1, Math.max(0, Number(volume ?? 60) / 100)) * 0.5;
+  const peak = Math.min(1, Math.max(0, Number(volume) / 100)) * 0.5;
   if (peak <= 0) return;
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -2138,7 +2174,9 @@ function settingsModalHtml(config, apiStatus, inewsCred, autostart = false) {
     `<div class="field"><label>${label}</label><input type="text" data-cfg="${path}" value="${escapeHtml(value ?? "")}" /></div>`;
   const s = inewsSettings;
   const soundKind = s.unknown_review_sound_kind || "double";
-  const volume = s.unknown_review_volume ?? 60;
+  // 預設值一律來自後端（config.rs 的 serde 預設，get_config 回傳完整設定），前端不再寫一份
+  // （AUDIT_REPORT #8；core/tests/frontend_config_fields.rs 檢查每個欄位都有）。
+  const volume = s.unknown_review_volume;
 
   return `
     <div class="modal-backdrop" id="settingsBackdrop">
@@ -2172,9 +2210,9 @@ ${sec("flow", "每天的流程", `
             ${check("inews.off_air_on_empty", s.off_air_on_empty !== false, "空節次當停播（2200 關鍵時刻、0100 收播）")}
             <div class="field"><label>停播節目（slug 開頭=名稱，例：關鍵KS=關鍵時刻）</label><input type="text" data-cfg-programs="inews.programs" value="${escapeHtml(Object.entries(s.programs ?? {}).map(([a, b]) => `${a}=${b}`).join(", "))}" /></div>
             ${text("節目分隔線（{hh} 小時、{name} 名稱）", "inews.program_divider_format", s.program_divider_format ?? "==== {hh} {name} ====")}
-            ${num("換節後幾分鐘補掃上一節", "inews.sweep_delay_minutes", s.sweep_delay_minutes ?? 10)}
+            ${num("換節後幾分鐘補掃上一節", "inews.sweep_delay_minutes", s.sweep_delay_minutes)}
             ${check("inews.hold_after_open_live", s.hold_after_open_live !== false, "0:00 的直進／LIVE 播出後，後面的稿等新的硬時間")}
-            ${num("直進暫緩上限（分鐘）", "inews.open_live_max_minutes", s.open_live_max_minutes ?? 30, 1)}
+            ${num("直進暫緩上限（分鐘）", "inews.open_live_max_minutes", s.open_live_max_minutes, 1)}
             ${text("播出日分界（HH:MM）", "inews.broadcast_day_start", s.broadcast_day_start ?? "02:00")}
             ${text("每天開始寫入（HH:MM，空白＝不限制）", "inews.write_start", s.write_start ?? "07:00")}
             <div class="muted">播出日分界到這個時間之前只讀不寫；時間到了從當時的節次開始寫，跟那時才打開工具一樣。</div>
@@ -2249,16 +2287,16 @@ ${sec("write", "寫入與比對", `
             ${check("inews.cross_day_title_match", s.cross_day_title_match !== false, "前一天 slug＋標題相同、有處理標記才算重播")}
             ${check("inews.include_floated", s.include_floated, "也匯入 float 列")}
             ${check("inews.fill_computed_time", s.fill_computed_time, "累積時間空白時填入算出的時間")}
-            ${num("新稿連續幾輪判定已播出才寫入（1 = 不等）", "inews.write_stable_rounds", s.write_stable_rounds ?? 2, 1)}
-            ${num("rundown 異常門檻（秒）", "inews.anomaly_threshold_seconds", s.anomaly_threshold_seconds ?? 120, 1)}
-            ${num("異常後連續幾輪穩定才恢復", "inews.anomaly_quiet_rounds", s.anomaly_quiet_rounds ?? 3, 1)}
-            ${num("異常冷卻上限（分鐘）", "inews.anomaly_max_cooldown_minutes", s.anomaly_max_cooldown_minutes ?? 15, 1)}
-            ${num("定時複查已結束節次（分鐘，0 = 關閉）", "inews.recheck_interval_minutes", s.recheck_interval_minutes ?? 30)}
+            ${num("新稿連續幾輪判定已播出才寫入（1 = 不等）", "inews.write_stable_rounds", s.write_stable_rounds, 1)}
+            ${num("rundown 異常門檻（秒）", "inews.anomaly_threshold_seconds", s.anomaly_threshold_seconds, 1)}
+            ${num("異常後連續幾輪穩定才恢復", "inews.anomaly_quiet_rounds", s.anomaly_quiet_rounds, 1)}
+            ${num("異常冷卻上限（分鐘）", "inews.anomaly_max_cooldown_minutes", s.anomaly_max_cooldown_minutes, 1)}
+            ${num("定時複查已結束節次（分鐘，0 = 關閉）", "inews.recheck_interval_minutes", s.recheck_interval_minutes)}
             ${check("inews.correct_time", s.correct_time !== false, "時間校正：已寫入的稿時間跟著 rundown 改")}
-            ${num("文件大量變動：兩次讀取之間增減幾行以上算大量", "inews.bulk_change_lines", s.bulk_change_lines ?? 20, 1)}
-            ${num("文件大量變動後暫停寫入與校正幾秒（0 = 不偵測）", "inews.bulk_change_wait_seconds", s.bulk_change_wait_seconds ?? 60)}
-            ${num("時間校正：連續幾輪一樣才改", "inews.correct_time_stable_rounds", s.correct_time_stable_rounds ?? 2, 1)}
-            ${num("時間校正：差超過幾分鐘不改（疑似挪稿）", "inews.correct_time_max_delta_minutes", s.correct_time_max_delta_minutes ?? 10, 1)}
+            ${num("文件大量變動：兩次讀取之間增減幾行以上算大量", "inews.bulk_change_lines", s.bulk_change_lines, 1)}
+            ${num("文件大量變動後暫停寫入與校正幾秒（0 = 不偵測）", "inews.bulk_change_wait_seconds", s.bulk_change_wait_seconds)}
+            ${num("時間校正：連續幾輪一樣才改", "inews.correct_time_stable_rounds", s.correct_time_stable_rounds, 1)}
+            ${num("時間校正：差超過幾分鐘不改（疑似挪稿）", "inews.correct_time_max_delta_minutes", s.correct_time_max_delta_minutes, 1)}
             <h4 class="settings-sub">抓新標記</h4>
             ${styleField("代表「要重抓」的關鍵字", "markers.refresh_keywords", config.markers.refresh_keywords)}
             <div class="muted">帶時間的（抓18、(19)）要等播出時間到了才抓。</div>`)}
