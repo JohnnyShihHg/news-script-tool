@@ -6,7 +6,9 @@
        scan(); setTimeout(scan, 200)          → 0 秒畫一次、200ms 那次被跳過、約 800ms 補畫（共 2 次）
        insertTop()                            → 上面插一行，色條要馬上跟著往下（不等重畫）
        removeDup(0)                           → 刪掉有色條的那行，色條藏起來
-       document.querySelector(".ql-editor").spellcheck → false -->
+       document.querySelector(".ql-editor").spellcheck → false
+     ?auto=1：自動跑上面四項並判 PASS/FAIL，寫在 #verdict 和 window.__verdict（check.ps1 用；
+     會一併用計時器代替 requestAnimationFrame，headless 時才穩定）。 -->
 <style>
   body { margin: 0; font: 16px/24px sans-serif; }
   .doc-page { position: relative; width: 600px; margin: 20px; }
@@ -21,7 +23,8 @@
 </div>
 <script>
   // ?shimraf=1：測試面板被隱藏時瀏覽器不跑 requestAnimationFrame，用計時器代替。
-  if (new URLSearchParams(location.search).get("shimraf")) {
+  const pageParams = new URLSearchParams(location.search);
+  if (pageParams.get("shimraf") || pageParams.get("auto")) {
     window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 16);
     window.cancelAnimationFrame = (id) => clearTimeout(id);
   }
@@ -66,3 +69,38 @@
   window.removeDup = (n) => [...editor.children].filter((p) => p.textContent.startsWith("DUP"))[n].remove();
 </script>
 <script src="../collab-guard.user.js"></script>
+<pre id="verdict">judging…</pre>
+<script>
+  // 自動判定（AUDIT_REPORT #12）：?auto=1 才跑。
+  (function () {
+    const show = (text) => { document.getElementById("verdict").textContent = text; window.__verdict = text; };
+    if (!pageParams.get("auto")) { show("手動模式：加 ?auto=1 自動判定"); return; }
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const marks = () => [...document.getElementById("duplicateHighlightLayer").children];
+    const checks = [];
+    (async () => {
+      // 守門員等編輯器出現才啟動（每 500ms 看一次），先等它起來。
+      await wait(1500);
+      const base = window.__renders;
+      scan();
+      await wait(200);
+      scan();
+      await wait(1500);
+      checks.push([window.__renders - base === 2, `限流：連掃兩次畫 2 次（實際 ${window.__renders - base}）`]);
+      const before = marks().map((m) => parseFloat(m.style.top));
+      checks.push([before.length === 2, `畫出 2 條色條（實際 ${before.length}）`]);
+      const rendersBefore = window.__renders;
+      insertTop();
+      await wait(150);
+      const after = marks().map((m) => parseFloat(m.style.top));
+      checks.push([window.__renders === rendersBefore, "插一行後不用等重畫"]);
+      checks.push([after.length === 2 && after.every((t, i) => t - before[i] >= 20), `色條跟著往下（${before} → ${after}）`]);
+      removeDup(0);
+      await wait(150);
+      checks.push([marks()[0]?.style.visibility === "hidden", "刪掉的那行色條藏起來"]);
+      checks.push([document.querySelector(".ql-editor").spellcheck === false, "關掉拼字檢查"]);
+      const bad = checks.filter(([ok]) => !ok).map(([, what]) => what);
+      show(bad.length ? `FAIL highlight：${bad.join("、")}` : "PASS highlight");
+    })().catch((e) => show(`FAIL highlight：例外 ${e}`));
+  })();
+</script>

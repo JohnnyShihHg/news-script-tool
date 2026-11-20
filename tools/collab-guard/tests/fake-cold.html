@@ -4,7 +4,9 @@
 <!-- 守門員冷啟動規則的手動測試頁：
      ?mode=stuck 一直停在載入中（應該剛好自動重整一次）
      ?mode=ok    3 秒後讀完（不重整，記一筆約 3 秒）
-     &nostorage=1 模擬網站儲存被封鎖：sessionStorage 一碰就丟錯（應該還是只重整一次） -->
+     &nostorage=1 模擬網站儲存被封鎖：sessionStorage 一碰就丟錯（應該還是只重整一次）
+     卡住幾秒才重整在這一頁縮短成 4 秒（正式值 20 秒不動）。
+     載入後 15 秒自動判 PASS/FAIL，寫在 #verdict 和 window.__verdict（check.ps1 用 Edge headless 讀）。 -->
 <div id="bar"><span id="s">正在載入共同文章</span></div>
 <div class="ql-editor"><p>測試</p></div>
 <script>
@@ -18,5 +20,44 @@
     Object.defineProperty(window, "sessionStorage", { get() { throw new DOMException("blocked", "SecurityError"); } });
   }
   if (mode === "ok") setTimeout(() => { document.getElementById("s").textContent = "已同步"; }, 3000);
+  window.__collabGuardTestConfig = { coldStartReloadSeconds: 4 };
 </script>
 <script src="../collab-guard.user.js"></script>
+<pre id="verdict">judging…</pre>
+<script>
+  // 自動判定（AUDIT_REPORT #12）。stuck 會自己重整一次：第一次載入不判，第二次載入再判。
+  (function () {
+    const JUDGE_MS = 15000;
+    const tag = `${mode}${params.get("nostorage") ? "+nostorage" : ""}`;
+    const show = (text) => { document.getElementById("verdict").textContent = text; window.__verdict = text; };
+    const coldLog = () => {
+      try { return JSON.parse(localStorage.getItem("collabGuardColdLoads") || "[]"); }
+      catch (e) { console.warn("讀不到冷啟動紀錄", e); return []; }
+    };
+    const verdict = (checks) => {
+      const bad = checks.filter(([ok]) => !ok).map(([, what]) => what);
+      show(bad.length ? `FAIL ${tag}：${bad.join("、")}` : `PASS ${tag}`);
+    };
+    if (mode === "stuck" && n === 1) {
+      setTimeout(() => show(`FAIL ${tag}：${JUDGE_MS / 1000} 秒內沒有自動重整`), JUDGE_MS);
+      return;
+    }
+    setTimeout(() => {
+      const log = coldLog();
+      if (mode === "stuck") {
+        verdict([
+          [n === 2, "剛好重整一次"],
+          [log.filter((e) => e.reloaded).length === 1, "紀錄裡只有一次自動重整"],
+        ]);
+      } else if (mode === "ok") {
+        verdict([
+          [n === 1, "沒有重整"],
+          [log.length === 1 && log[0].reloaded === false, "記一筆、沒有重整"],
+          [log.length === 1 && log[0].seconds >= 2.5 && log[0].seconds <= 5, "讀取秒數約 3 秒"],
+        ]);
+      } else {
+        show(`FAIL ${tag}：沒有這個 mode 的判定`);
+      }
+    }, JUDGE_MS);
+  })();
+</script>

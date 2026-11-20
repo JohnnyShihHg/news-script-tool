@@ -336,15 +336,13 @@ fn classify_body(
         // A genuinely empty rundown placeholder (`[< >]`, no cards at all) is
         // structure, not a news script -- but it goes to 解析失敗 rather than
         // vanishing, in case a real story was left that empty.
-        (None, true) if !has_content => {
-            return parse_failed(
-                file_name,
-                header,
-                "",
-                "製作區是空的、也沒有稿頭內文，判定為節目結構".to_string(),
-                cfg,
-            );
-        }
+        (None, true) if !has_content => parse_failed(
+            file_name,
+            header,
+            "",
+            "製作區是空的、也沒有稿頭內文，判定為節目結構".to_string(),
+            cfg,
+        ),
         // Cards exist (has_content) but no T2 ever resolved to a title, or the title
         // tag itself was never found -- and there's no稿頭內文 either. This is the
         // same shape as TEL-with-no-content: a real story the tool cannot finish
@@ -370,7 +368,7 @@ fn classify_body(
                     w
                 },
             };
-            return needs_manual(entry, force, cfg);
+            needs_manual(entry, force, cfg)
         }
         // The title card is there but its T2 was never filled in, while the script
         // itself is real: keep the body and let a human supply the title.
@@ -397,11 +395,9 @@ fn classify_body(
                 keywords: Vec::new(),
                 warnings,
             };
-            return needs_manual(entry, force, cfg);
+            needs_manual(entry, force, cfg)
         }
-        (None, false) => {
-            return parse_failed(file_name, header, &body_cleaned, "找不到標題標記".to_string(), cfg);
-        }
+        (None, false) => parse_failed(file_name, header, &body_cleaned, "找不到標題標記".to_string(), cfg),
         (Some(title), true) => {
             // The title tag resolved fine -- only 稿頭內文 is missing. Normalize and
             // prefix the title exactly like the Passed path so it doesn't sit
@@ -433,7 +429,7 @@ fn classify_body(
                 keywords: Vec::new(),
                 warnings,
             };
-            return needs_manual(entry, force, cfg);
+            needs_manual(entry, force, cfg)
         }
         (Some(title), false) => {
             let (title_norm, mut warnings) = {

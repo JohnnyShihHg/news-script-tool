@@ -27,17 +27,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # 跟每次 push 跑的 check.yml 同一個入口：cargo test --workspace（含 app crate 的測試：
       # inews.rs、weather.rs、main.rs 的寫入／校正腳本案例）、clippy 不能多過待清清單、
-      # 空 catch、JS 語法、瀏覽器測試頁（logic、collab-marker、fake-quill golden、守門員）。
+      # 空 catch、JS 語法與 logic／collab-marker 測試（runner 內建 Node，check.ps1 自動用 node）、
+      # 需要 DOM 的瀏覽器測試頁（fake-quill golden、守門員）。
       # 以前這裡只跑 core（理由是 app crate 沒有測試，已經不是事實），app crate 的測試從來
       # 沒在 CI 跑過。--workspace 會多編 wry/tao/WebView2，約多 4 分鐘。
       - name: check.ps1
         shell: powershell
         run: ./check.ps1
-      - name: UI logic tests (Node)
-        working-directory: app
-        run: node --test tests/logic.test.js
-      - name: collab-marker tests (Node)
-        run: node --test tools/collab-marker/tests/lookup.test.js
 
   release:
     needs: test

@@ -9,7 +9,8 @@
 #   3. cargo fmt --check：只報數量、不擋（既有 600 多處差異，待清，見 AUDIT_REPORT #14）
 #   4. 空的 catch：JS 檔和 main.rs 裡注入的腳本一律不准有
 #   5. JS 語法：app.js、logic.js、守門員、collab-marker（只解析不執行）
-#   6. 瀏覽器測試頁（Edge／Chrome headless）：logic.test.js、lookup.test.js、
+#      ＋ logic.test.js、lookup.test.js：有 Node 用 node --check／node --test，沒有就退回 Edge 測試頁
+#   6. 瀏覽器測試頁（Edge／Chrome headless，需要 DOM）：
 #      fake-quill.html（寫入／校正腳本 golden test）、守門員 fake-stale.html 每個 mode
 #
 # 這台電腦預設的 gnu 工具鏈編不過，有裝 stable-x86_64-pc-windows-msvc 就用它。
@@ -105,9 +106,11 @@ if ($LASTEXITCODE -ne 0 -and -not ($fmt -match "^Diff in")) {
 }
 
 # ---------------------------------------------------------------- 4a. 前端寫死的設定預設值
-Step "前端不准自己寫設定預設值（?? 數字）"
+Step "前端不准自己寫設定預設值（?? 數字／字串／清單）"
 $appJs = [System.IO.File]::ReadAllText((Join-Path $root "app\src\app.js"))
-$cfgDefault = '\b(inewsCfg|inewsSettings|s|config\.[a-z_]+)\.[a-z_]+\s*\?\?\s*\d'
+# 設定欄位後面接 `?? 常數` 或 `|| "字串"`：數字、字串、陣列、物件、true/false 都算。
+# 接變數（`?? noUploadLabel`）不算，那是「沒設定就沿用目前的值」。
+$cfgDefault = '\b(inewsCfg|inewsSettings|s|config\??\.[a-z_]+)\??\.[a-z_]+\s*(\?\?\s*(\d|"|''|`|\[|\{|true\b|false\b)|\|\|\s*("|''|`))'
 $cfgHits = @()
 foreach ($m in [regex]::Matches($appJs, $cfgDefault)) {
   $lineNo = ($appJs.Substring(0, $m.Index) -split "`n").Count
@@ -192,18 +195,103 @@ function Check-Harness($name, $relPath) {
   }
 }
 
+# 有 Node 就用 Node 跑 JS 語法檢查和兩份純邏輯測試（不需要 DOM）；沒有 Node 的電腦退回 Edge 測試頁。
+# 設 CHECK_NO_NODE=1 可以強制走 Edge（測退回路徑用）。fake-quill 和守門員需要 DOM，一律用瀏覽器。
+$node = $null
+if (-not $env:CHECK_NO_NODE) {
+  $cmd = Get-Command node -ErrorAction SilentlyContinue
+  if ($cmd) { $node = $cmd.Source }
+}
+
+function Check-NodeTest($name, $relPath) {
+  $out = @(& $node --test $relPath 2>&1 | ForEach-Object { "$_" })
+  $exit = $LASTEXITCODE
+  $pass = [regex]::Match(($out -join "`n"), '(?m)^. pass (\d+)')
+  $fail = [regex]::Match(($out -join "`n"), '(?m)^. fail (\d+)')
+  $passed = 0; if ($pass.Success) { $passed = [int]$pass.Groups[1].Value }
+  $failed = 0; if ($fail.Success) { $failed = [int]$fail.Groups[1].Value }
+  if ($exit -ne 0 -or $failed -gt 0 -or $passed -eq 0) {
+    $bad = $out | Where-Object { $_ -match "not ok|✖|Error|expected|actual" } | Select-Object -First 30
+    Fail "${name}（Node）：$passed 通過、$failed 失敗（exit $exit）`n$($bad -join "`n")"
+  } else {
+    Pass "${name}（Node）：$passed 通過"
+  }
+}
+
+if ($node) {
+  Step "JS 語法（node --check，$(& $node --version)）"
+  # 檔案清單只維護一份：tools/check/syntax-check.html 的 FILES（沒有 Node 時用那一頁檢查）。
+  $syntaxPage = [System.IO.File]::ReadAllText((Join-Path $root "tools\check\syntax-check.html"))
+  $checkDir = Join-Path $root "tools\check"
+  $syntaxFiles = @([regex]::Matches($syntaxPage, '"((?:\.\./)+[^"]+\.js)"') |
+    ForEach-Object { [System.IO.Path]::GetFullPath((Join-Path $checkDir ($_.Groups[1].Value -replace "/", "\"))) })
+  $syntaxBad = @()
+  foreach ($f in $syntaxFiles) {
+    $msg = @(& $node --check $f 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) { $syntaxBad += "$($f.Substring($root.Length + 1))`n$($msg -join "`n")" }
+  }
+  if ($syntaxFiles.Count -eq 0) { Fail "JS 語法檢查：從 tools/check/syntax-check.html 讀不到檔案清單" }
+  elseif ($syntaxBad.Count) { Fail ("JS 語法錯誤：`n" + ($syntaxBad -join "`n")) }
+  else { Pass "ALL OK：$($syntaxFiles.Count) 支 JS 語法正確" }
+
+  Step "JS 純邏輯測試（node --test）"
+  Check-NodeTest "logic.test.js" "app\tests\logic.test.js"
+  Check-NodeTest "lookup.test.js（collab-marker）" "tools\collab-marker\tests\lookup.test.js"
+
+  Step "logic.js 測試涵蓋率（只報數字，不擋）"
+  $cov = @(& $node --test --experimental-test-coverage "app\tests\logic.test.js" 2>&1 | ForEach-Object { "$_" })
+  $row = $cov | Where-Object { $_ -match '\blogic\.js\s*\|' } | Select-Object -First 1
+  if ($row) {
+    $cells = $row.Split("|") | ForEach-Object { $_.Trim() }
+    $line = "logic.js 涵蓋率：行 $($cells[1])%、分支 $($cells[2])%、函式 $($cells[3])%"
+    Write-Host $line
+    $notes.Add($line)
+  } else {
+    $notes.Add("logic.js 涵蓋率讀不到（Node 版本可能不支援 --experimental-test-coverage）")
+  }
+
+  Step "collab-marker 書籤是不是最新（build.js --out 暫存資料夾，比對 repo 裡的檔案）"
+  $buildDir = Join-Path ([System.IO.Path]::GetTempPath()) ("nst-marker-" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $buildDir | Out-Null
+  $buildOut = @(& $node "tools\collab-marker\build.js" --out $buildDir 2>&1 | ForEach-Object { "$_" })
+  if ($LASTEXITCODE -ne 0) {
+    Fail "build.js 跑失敗：`n$($buildOut -join "`n")"
+  } else {
+    $stale = @()
+    foreach ($f in @("install.html", "bookmarklet.txt")) {
+      # 換行符號不算（repo 裡的檔案在 Windows 上被 git 轉成 CRLF）。
+      $built = [System.IO.File]::ReadAllText((Join-Path $buildDir $f)) -replace "`r", ""
+      $repo = [System.IO.File]::ReadAllText((Join-Path $root "tools\collab-marker\$f")) -replace "`r", ""
+      if ($built -ne $repo) { $stale += "tools/collab-marker/$f" }
+    }
+    if ($stale.Count) {
+      Fail ("書籤沒有重新產生（lookup.js 或 panel.js 改了，但這些檔還是舊的）：`n  " + ($stale -join "`n  ") +
+        "`n  正確做法：node tools/collab-marker/build.js，把產生的檔案一起 commit。")
+    } else {
+      Pass "install.html、bookmarklet.txt 跟 lookup.js／panel.js 一致"
+    }
+  }
+  try { Remove-Item -Recurse -Force $buildDir -ErrorAction Stop } catch { Write-Host "（暫存資料夾刪不掉，略過：$buildDir）" }
+} else {
+  $notes.Add("沒有 Node：JS 語法檢查和 logic／lookup 測試改用 Edge 測試頁跑")
+}
+
 if (-not $browser) {
   Fail "找不到 Edge 或 Chrome，瀏覽器測試沒跑。設定環境變數 CHECK_BROWSER 指到瀏覽器執行檔。"
 } else {
-  Step "JS 語法（只解析不執行）"
-  $dom = Open-Page "tools\check\syntax-check.html" "" 3000
-  $m = [regex]::Match($dom, '<pre id="out">([\s\S]*?)</pre>')
-  $text = [System.Net.WebUtility]::HtmlDecode($m.Groups[1].Value)
-  if (-not $m.Success -or $text -notmatch "^ALL OK") { Fail "JS 語法檢查：`n$text" } else { Pass ($text -split "`n")[0] }
+  if (-not $node) {
+    Step "JS 語法（只解析不執行，Edge）"
+    $dom = Open-Page "tools\check\syntax-check.html" "" 3000
+    $m = [regex]::Match($dom, '<pre id="out">([\s\S]*?)</pre>')
+    $text = [System.Net.WebUtility]::HtmlDecode($m.Groups[1].Value)
+    if (-not $m.Success -or $text -notmatch "^ALL OK") { Fail "JS 語法檢查：`n$text" } else { Pass ($text -split "`n")[0] }
+  }
 
   Step "瀏覽器測試頁"
-  Check-Harness "logic.test.js" "app\tests\browser-harness.html"
-  Check-Harness "lookup.test.js（collab-marker）" "tools\collab-marker\tests\browser-harness.html"
+  if (-not $node) {
+    Check-Harness "logic.test.js" "app\tests\browser-harness.html"
+    Check-Harness "lookup.test.js（collab-marker）" "tools\collab-marker\tests\browser-harness.html"
+  }
   Check-Harness "寫入／校正腳本 golden test（fake-quill.html）" "app\tests\fake-quill.html"
 
   Step "守門員 fake-stale.html 每個 mode"
@@ -211,6 +299,19 @@ if (-not $browser) {
     $dom = Open-Page "tools\collab-guard\tests\fake-stale.html" "?mode=$mode" 40000
     $v = [System.Net.WebUtility]::HtmlDecode([regex]::Match($dom, '<pre id="verdict">([^<]*)</pre>').Groups[1].Value)
     if ($v -like "PASS*") { Pass "守門員 $v" } else { Fail "守門員 mode=${mode}：$v" }
+  }
+
+  Step "守門員 fake-cold／fake-highlight／fake-pending"
+  # fake-pending：1.5.0 卡在待同步自動重整（只有待同步才重整、App 寫入和使用者操作時不重整、
+  # 重整前後的報告）。門檻在測試頁縮短成 3 秒，正式值不動。
+  foreach ($page in @("fake-cold.html?mode=stuck", "fake-cold.html?mode=ok", "fake-cold.html?mode=stuck&nostorage=1", "fake-cold.html?mode=ok&nostorage=1",
+                      "fake-highlight.html?auto=1",
+                      "fake-pending.html?mode=pending", "fake-pending.html?mode=connecting", "fake-pending.html?mode=ignoredom",
+                      "fake-pending.html?mode=typing", "fake-pending.html?mode=brief")) {
+    $file, $query = $page.Split("?", 2)
+    $dom = Open-Page "tools\collab-guard\tests\$file" "?$query" 40000
+    $v = [System.Net.WebUtility]::HtmlDecode([regex]::Match($dom, '<pre id="verdict">([^<]*)</pre>').Groups[1].Value)
+    if ($v -like "PASS*") { Pass "守門員 $file $v" } else { Fail "守門員 ${page}：$v" }
   }
 }
 

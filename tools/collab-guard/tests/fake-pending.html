@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fake pending</title>
+<!-- 守門員 1.5.0「卡在待同步自動重整」的測試頁（AUDIT_REPORT #12）。門檻在這一頁縮短成 3 秒
+     （autoReloadAfterStuckSeconds，正式值 60 秒不動）。狀態文字由這一頁固定：
+     ?mode=pending    一直「待同步 3 筆」→ 重整剛好一次；重整前把報告寫進 sessionStorage，
+                      重整後 window.__collabGuard.autoReload 讀得到（狀態、卡了幾秒）
+     ?mode=connecting 一直「連線中」→ 不重整（只有待同步才重整）
+     ?mode=ignoredom  待同步，但 App 每 2 秒寫入一次（設 __collabGuardIgnoreDomUntil）→ 不重整
+     ?mode=typing     待同步，但使用者每 2 秒打一個字 → 不重整
+     ?mode=brief      待同步 2 秒就恢復已同步 → 不重整（沒超過門檻）
+     載入後 12 秒自動判 PASS/FAIL，寫在 #verdict 和 window.__verdict。手動測試前先清掉
+     localStorage、sessionStorage（check.ps1 每次用全新的瀏覽器設定檔）。 -->
+<div id="bar"><span id="s">已同步</span></div>
+<div class="ql-editor"><p>測試</p></div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const mode = params.get("mode") || "pending";
+  const n = Number(localStorage.getItem("fakeLoads") || 0) + 1;
+  localStorage.setItem("fakeLoads", String(n));
+  document.title = `loads=${n}`;
+  window.__collabGuardTestConfig = { autoReloadAfterStuckSeconds: 3, coldBackfill: false };
+  const status = document.getElementById("s");
+  // 重整後（第二次載入）恢復正常，看的是重整前留下的報告。
+  const stuckText = { pending: "待同步 3 筆", ignoredom: "待同步 3 筆", typing: "待同步 3 筆", brief: "待同步 1 筆", connecting: "連線中" }[mode];
+  if (n === 1 && stuckText) status.textContent = stuckText;
+  if (mode === "brief") setTimeout(() => { status.textContent = "已同步"; }, 2000);
+  if (mode === "ignoredom") setInterval(() => { window.__collabGuardIgnoreDomUntil = Date.now() + 3000; }, 2000);
+  if (mode === "typing") setInterval(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" })), 2000);
+</script>
+<script src="../collab-guard.user.js"></script>
+<pre id="verdict">judging…</pre>
+<script>
+  (function () {
+    const JUDGE_MS = 12000;
+    const show = (text) => { document.getElementById("verdict").textContent = text; window.__verdict = text; };
+    const verdict = (checks) => {
+      const bad = checks.filter(([ok]) => !ok).map(([, what]) => what);
+      show(bad.length ? `FAIL ${mode}：${bad.join("、")}` : `PASS ${mode}`);
+    };
+    if (!stuckText) { show(`FAIL ${mode}：沒有這個 mode 的判定`); return; }
+    if (mode === "pending" && n === 1) {
+      setTimeout(() => show(`FAIL pending：${JUDGE_MS / 1000} 秒內沒有自動重整`), JUDGE_MS);
+      return;
+    }
+    setTimeout(() => {
+      if (mode === "pending") {
+        const r = (window.__collabGuard || {}).autoReload;
+        let left = "x";
+        try { left = sessionStorage.getItem("collabGuardAutoReloadReport"); }
+        catch (e) { console.warn("讀不到 sessionStorage", e); }
+        verdict([
+          [n === 2, "剛好重整一次"],
+          [!!r && /^待同步/.test(r.status || ""), "重整後讀得到報告（狀態是待同步）"],
+          [!!r && r.seconds >= 3, `報告記了卡多久（${r && r.seconds} 秒）`],
+          [left === null, "報告讀走後就清掉，只記一次"],
+        ]);
+      } else {
+        verdict([[n === 1, "沒有重整"], [!(window.__collabGuard || {}).autoReload, "沒有自動重整報告"]]);
+      }
+    }, JUDGE_MS);
+  })();
+</script>

@@ -19,7 +19,7 @@ fn app_js() -> String {
 
 fn used_fields(js: &str, sections: &BTreeSet<String>) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
-    let dotted = Regex::new(r"\bconfig\.([a-z_]+)\.([a-z_]+)").unwrap();
+    let dotted = Regex::new(r"\bconfig\??\.([a-z_]+)\??\.([a-z_]+)").unwrap();
     for c in dotted.captures_iter(js) {
         out.insert((c[1].to_string(), c[2].to_string()));
     }
@@ -42,9 +42,32 @@ fn every_setting_the_frontend_reads_has_a_backend_default() {
     let sections: BTreeSet<String> = defaults.as_object().unwrap().keys().cloned().collect();
     let used = used_fields(&app_js(), &sections);
     assert!(used.len() > 40, "app.js 裡找到的設定欄位太少（{}），比對的寫法可能變了", used.len());
-    // 一定要涵蓋以前寫死預設值的那幾個。
-    for f in ["sweep_delay_minutes", "anomaly_threshold_seconds", "write_stable_rounds", "unknown_review_volume"] {
-        assert!(used.contains(&("inews".to_string(), f.to_string())), "沒有找到 inews.{f}，比對的寫法可能變了");
+    // 一定要涵蓋以前寫死預設值的那幾個（數字、字串、清單、勾選）。
+    for f in [
+        "inews.sweep_delay_minutes",
+        "inews.anomaly_threshold_seconds",
+        "inews.write_stable_rounds",
+        "inews.unknown_review_volume",
+        "inews.broadcast_day_start",
+        "inews.write_start",
+        "inews.prelist_queue",
+        "inews.program_divider_format",
+        "inews.programs",
+        "inews.unknown_review_sound_kind",
+        "inews.off_air_on_empty",
+        "inews.correct_time",
+        "import.default_folder",
+        "filter.force_pass_slug_prefixes",
+        "filter.no_body_pass_terms",
+        "filter.blank_style_timecode_pass",
+        "evening.window_start",
+        "evening.blocked_styles",
+        "evening.anchors",
+        "annotations.exclusive_prefix",
+        "output.keyword_csv_line",
+    ] {
+        let (s, k) = f.split_once('.').unwrap();
+        assert!(used.contains(&(s.to_string(), k.to_string())), "沒有找到 {f}，比對的寫法可能變了");
     }
     let missing: Vec<String> = used
         .iter()

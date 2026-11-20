@@ -42,8 +42,7 @@ fn tag_text<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
 /// 字卡的範圍是 cue 行（`[BAR_大]`）之後，到空行、下一個 cue 行或 `>]` 為止。
 pub fn parse_script<S: AsRef<str>>(lines: &[S]) -> ScriptInfo {
     let lines: Vec<&str> = lines.iter().map(|l| l.as_ref().trim()).collect();
-    let mut info = ScriptInfo::default();
-    info.dual = lines.iter().any(|l| l.contains("[雙框"));
+    let mut info = ScriptInfo { dual: lines.iter().any(|l| l.contains("[雙框")), ..Default::default() };
     for (i, cue) in lines.iter().enumerate() {
         let is_bar = BAR_CUE.is_match(cue);
         let is_super = SUPER_CUE.is_match(cue);

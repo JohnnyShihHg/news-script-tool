@@ -10,9 +10,7 @@ use once_cell::sync::Lazy;
 pub(crate) fn url_mask(input: &str) -> Vec<bool> {
     let mut mask = vec![false; input.len()];
     for m in URL_RE.find_iter(input) {
-        for i in m.start()..m.end() {
-            mask[i] = true;
-        }
+        mask[m.start()..m.end()].fill(true);
     }
     mask
 }
@@ -39,9 +37,7 @@ pub fn normalize(input: &str, cfg: &PunctuationConfig) -> PunctuationResult {
     let mut is_url = vec![false; input.len()];
     if cfg.protect_urls {
         for m in URL_RE.find_iter(input) {
-            for i in m.start()..m.end() {
-                is_url[i] = true;
-            }
+            is_url[m.start()..m.end()].fill(true);
         }
     }
 
@@ -90,7 +86,7 @@ pub fn normalize(input: &str, cfg: &PunctuationConfig) -> PunctuationResult {
         out.push(*c);
     }
 
-    if quote_count % 2 != 0 {
+    if !quote_count.is_multiple_of(2) {
         warnings.push(format!("引號數量為單數（{} 個），請確認「」配對是否正確", quote_count));
     }
 

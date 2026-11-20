@@ -860,8 +860,7 @@ theme = "warm"
 
     #[test]
     fn a_freshly_defaulted_config_is_already_current() {
-        let mut cfg = Config::default();
-        cfg.config_version = CURRENT_CONFIG_VERSION;
+        let mut cfg = Config { config_version: CURRENT_CONFIG_VERSION, ..Default::default() };
         assert!(!migrate(&mut cfg));
     }
 
@@ -874,8 +873,7 @@ theme = "warm"
 
     /// A config as written by v0.2.9 (version 6), with some settings the user changed.
     fn v6_toml() -> String {
-        let mut cfg = Config::default();
-        cfg.config_version = 6;
+        let mut cfg = Config { config_version: 6, ..Default::default() };
         cfg.ui.theme = "dark".into();
         cfg.import.default_folder = r"D:\iNews".into();
         cfg.filter.allowed_styles.push("自訂樣式".into());
@@ -944,8 +942,7 @@ theme = "warm"
 
     #[test]
     fn a_version_8_config_gains_the_2000_span_and_keeps_its_own_spans() {
-        let mut old = Config::default();
-        old.config_version = 8;
+        let mut old = Config { config_version: 8, ..Default::default() };
         old.inews.slot_spans = [("1200", "1400"), ("1800", "2000")]
             .into_iter()
             .map(|(a, b)| (a.to_string(), b.to_string()))
@@ -981,8 +978,7 @@ theme = "warm"
     fn an_older_config_gains_the_real_live_style() {
         // 只有「開過設定頁、把清單存下來」的人會卡住：存下來的 allowed_styles 會整個
         // 蓋掉新預設，所以新樣式一定要靠 migrate 的 union 才進得去。
-        let mut old = Config::default();
-        old.config_version = CURRENT_CONFIG_VERSION - 1;
+        let mut old = Config { config_version: CURRENT_CONFIG_VERSION - 1, ..Default::default() };
         old.filter.allowed_styles.retain(|s| s != "真連");
         old.filter.allowed_styles.push("自訂樣式".into());
 
@@ -998,8 +994,7 @@ theme = "warm"
     fn a_version_7_config_gains_the_v032_styles_and_keeps_the_users_own() {
         // v0.3.1 as saved on disk: the old narrower lists, slug_keep_terms (removed in
         // v0.3.2), a style the user added themselves, and none of the new settings.
-        let mut old = Config::default();
-        old.config_version = 7;
+        let mut old = Config { config_version: 7, ..Default::default() };
         old.filter.allowed_styles.retain(|s| !["電聯", "DL", "DLIVE", "直進"].contains(&s.as_str()));
         old.filter.allowed_styles.push("自訂樣式".into());
         old.filter.blocked_styles = vec!["BS".into(), "SO".into(), "自訂擋掉".into()];
@@ -1044,8 +1039,7 @@ theme = "warm"
 
     #[test]
     fn a_version_10_config_gains_time_correction_and_keeps_its_settings() {
-        let mut old = Config::default();
-        old.config_version = 10;
+        let mut old = Config { config_version: 10, ..Default::default() };
         old.inews.poll_seconds = 30;
         old.inews.server = "10.3.125.2".into();
         old.filter.slug_style_terms.push("自訂詞".into());
@@ -1070,8 +1064,7 @@ theme = "warm"
 
     #[test]
     fn a_version_12_config_gains_the_rundown_guard_and_keeps_its_settings() {
-        let mut old = Config::default();
-        old.config_version = CURRENT_CONFIG_VERSION - 1;
+        let mut old = Config { config_version: CURRENT_CONFIG_VERSION - 1, ..Default::default() };
         old.inews.poll_seconds = 30;
         old.inews.correct_time_max_delta_minutes = 7;
         let guard_keys = ["write_stable_rounds", "anomaly_", "recheck_interval_minutes"];

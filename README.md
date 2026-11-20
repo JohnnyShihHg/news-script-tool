@@ -82,7 +82,9 @@ powershell -ExecutionPolicy Bypass -File check.ps1
 - `cargo test --workspace`（同時產生寫入／校正腳本的測試案例 `app/tests/generated/collab-cases.js`）
 - `cargo clippy`：不能比 `tools/check/clippy-baseline.txt`（既有待清清單）多；`cargo fmt --check` 只報數量
 - 不准有空的 catch、JS 語法檢查
-- 用 Edge／Chrome headless 開測試頁：`app/tests/browser-harness.html`（logic.test.js）、`tools/collab-marker/tests/browser-harness.html`、`app/tests/fake-quill.html`（寫入／時間校正腳本 golden test）、`tools/collab-guard/tests/fake-stale.html` 每個 mode
+- JS 語法和純邏輯測試（`app/tests/logic.test.js`、`tools/collab-marker/tests/lookup.test.js`）：有 Node 就用 `node --check`／`node --test`，沒有就退回 Edge 開 `browser-harness.html`
+- 有 Node 時另外報 `logic.js` 的測試涵蓋率（只報數字），並檢查 `tools/collab-marker` 的 `install.html`、`bookmarklet.txt` 有沒有跟著 `build.js` 重新產生
+- 需要 DOM 的測試頁一律用 Edge／Chrome headless：`app/tests/fake-quill.html`（寫入／時間校正腳本 golden test），守門員的 `fake-stale.html` 每個 mode、`fake-cold.html`（開頁卡住重整一次）、`fake-highlight.html`（螢光限流與跟行）、`fake-pending.html`（待同步自動重整）
 
 全部是本機、假資料，不連 iNEWS、不碰協作文件、不呼叫 Gemini。這台電腦預設的 gnu 工具鏈編不過，check.ps1 有裝 `stable-x86_64-pc-windows-msvc` 就會用它；clippy、rustfmt 要另外裝：`rustup component add --toolchain stable-x86_64-pc-windows-msvc clippy rustfmt`。
 

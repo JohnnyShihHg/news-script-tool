@@ -167,10 +167,7 @@ fn config_path() -> Option<std::path::PathBuf> {
 
 fn load_config_from_disk_or_default() -> Config {
     let mut cfg = match config_path() {
-        Some(path) if path.exists() => match news_script_core::config::load_from_path(&path) {
-            Ok(cfg) => cfg,
-            Err(_) => Config::default(),
-        },
+        Some(path) if path.exists() => news_script_core::config::load_from_path(&path).unwrap_or_default(),
         _ => Config::default(),
     };
 
@@ -1589,8 +1586,35 @@ async fn eval_in_collab_locked(
         Ok(Err(_)) => Err("與協作工具溝通時發生內部錯誤（channel closed）。".to_string()),
         Err(_) => {
             *lock_or_recover(&state.scrape_reply) = None;
-            Err("逾時（10 秒）。請按「診斷協作連線」查看實際原因。".to_string())
+            Err(COLLAB_EVAL_TIMEOUT.to_string())
         }
+    }
+}
+
+const COLLAB_EVAL_TIMEOUT: &str = "逾時（10 秒）。請按「診斷協作連線」查看實際原因。";
+
+/// 寫入腳本的錯誤轉成給前端的訊息（#10）。腳本是同步寫完才回覆的，回覆逾時的時候
+/// 文件多半已經寫進去了：不能當成「寫入失敗」停掉自動刷新，改回 `[未就緒]`，前端把稿
+/// 留著，下一輪重新比對文件——已經寫進去的會被認成「已在文件」，沒寫進去的照常再寫。
+fn append_error_for_frontend(e: &str) -> String {
+    if e == COLLAB_EVAL_TIMEOUT {
+        "[未就緒] 寫入腳本已送出，但 10 秒內沒收到協作視窗的回覆，稿子可能已經寫進文件。下一輪會重新讀文件確認，不會重複寫。".to_string()
+    } else {
+        e.to_string()
+    }
+}
+
+#[cfg(test)]
+mod append_error_tests {
+    use super::*;
+
+    #[test]
+    fn a_write_reply_timeout_is_not_a_failure_that_stops_auto_refresh() {
+        // 逾時 → [未就緒]：前端 isCollabNotReady 會把稿留著、不停自動刷新。
+        let msg = append_error_for_frontend(COLLAB_EVAL_TIMEOUT);
+        assert!(msg.starts_with("[未就緒]"), "{msg}");
+        // 其他錯誤（例如沒有 Quill）照舊原樣回傳，前端照舊停掉自動刷新。
+        assert_eq!(append_error_for_frontend("找不到編輯器"), "找不到編輯器");
     }
 }
 
@@ -1764,17 +1788,23 @@ async fn append_to_collab_doc_checked(
     }
 
     let r = eval_in_collab_locked(&app, &state, &build_append_script(&filtered.text)).await;
-    if r.is_ok() {
+    let timed_out = matches!(&r, Err(e) if e == COLLAB_EVAL_TIMEOUT);
+    if r.is_ok() || timed_out {
         // 自己寫進去的行數（加上前面那一行空行），下一次讀文件時不算成「大量變動」。
+        // 逾時時多半也已經寫進去了（#10），一樣算，免得下一輪被自己的寫入擋成 [未就緒]。
         lock_or_recover(&state.bulk).own += filtered.text.lines().count() + 1;
     }
     if let Some(note) = &log_note {
         match &r {
             Ok(_) => log(format!("[寫入] 成功：{note}")),
+            Err(_) if timed_out => log(format!(
+                "[寫入] 未確認：{note}｜10 秒內沒收到回覆，稿子可能已經寫進文件；自動刷新不停，下一輪重新比對確認"
+            )),
             Err(e) => log(format!("[寫入] 失敗：{note}｜{e}")),
         }
     }
-    Ok(CheckedAppendDto { message: Some(r?), dropped: filtered.dropped })
+    let message = r.map_err(|e| append_error_for_frontend(&e))?;
+    Ok(CheckedAppendDto { message: Some(message), dropped: filtered.dropped })
 }
 
 /// 把協作文件裡幾行的時間換掉（v0.3.9）。每一行先重新定位：第 `line` 行的內容必須
@@ -2280,7 +2310,8 @@ mod collab_script_cases {
             }),
             json!({
                 // #10：腳本是同步寫完才回覆的。回覆送不回來（App 端 10 秒逾時）時文件其實已經寫進去，
-                // 所以「逾時」不能當成「沒寫」——前端停掉自動刷新、靠寫入前重新比對擋重複。
+                // 所以「逾時」不能當成「沒寫」——後端改回 [未就緒]（append_error_for_frontend），
+                // 前端把稿留著、不停自動刷新，下一輪重新比對文件確認。
                 "name": "append：回覆一直沒送回（逾時）時，文件已經寫進去了",
                 "doc": DOC,
                 "script": build_append_script(write),

@@ -54,8 +54,8 @@ pub enum BodyParse {
         title: Option<String>,
         body: String,
         /// Whether the `[< ... >]` block itself held anything beyond the opening
-        /// marker line -- distinguishes a genuinely empty rundown placeholder (`[<
-        /// >]`, no cards at all) from a script whose cards exist but never resolved
+        /// marker line -- distinguishes a genuinely empty rundown placeholder
+        /// (`[< >]`, no cards at all) from a script whose cards exist but never resolved
         /// to a title (e.g. no T2 line anywhere). Both can have `title: None`, but
         /// only the former is safe to skip silently.
         has_content: bool,

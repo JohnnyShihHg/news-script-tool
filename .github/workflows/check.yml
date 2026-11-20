@@ -20,12 +20,10 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       # cargo test --workspace、clippy（不能多過 tools/check/clippy-baseline.txt）、空 catch、
-      # JS 語法、Edge headless 跑瀏覽器測試頁。windows-latest 內建 Edge。
+      # JS 語法和 logic／lookup 測試（runner 內建 Node，check.ps1 自動用 node --check／node --test）、
+      # Edge headless 跑需要 DOM 的測試頁（fake-quill、守門員）。windows-latest 內建 Node 和 Edge。
+      # 不加 actions/setup-node：沒有 npm 相依、只用 node:test／node:assert，內建的 LTS 就夠；
+      # 要釘版本時再加。
       - name: check.ps1
         shell: powershell
         run: ./check.ps1
-      - name: UI logic tests (Node)
-        working-directory: app
-        run: node --test tests/logic.test.js
-      - name: collab-marker tests (Node)
-        run: node --test tools/collab-marker/tests/lookup.test.js

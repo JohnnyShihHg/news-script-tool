@@ -6,7 +6,8 @@
 
 - 檢查（完成任何修改前必跑）：`powershell -ExecutionPolicy Bypass -File check.ps1`
 - 開發執行：`cargo run -p news-script-tool`（會開真的 App，見下方「不能做的事」）
-- 這台電腦預設的 gnu 工具鏈編不過，cargo 一律加 `+stable-x86_64-pc-windows-msvc`；沒有 Node，JS 測試用 check.ps1（Edge headless）跑。
+- 這台電腦預設的 gnu 工具鏈編不過，cargo 一律加 `+stable-x86_64-pc-windows-msvc`。
+- JS：這台有 Node（v26，`C:\Program Files\nodejs\node.exe`），可以直接 `node --test app/tests/logic.test.js`、`node --check app/src/app.js`。check.ps1 有 Node 就用 Node 跑語法檢查和 logic／collab-marker 測試，沒有就自動退回 Edge 測試頁；需要 DOM 的 fake-quill golden test 和守門員 mode 一律用 Edge headless。不要新增 npm 套件或 package.json 相依，只用 Node 內建的 `node:test`／`node:assert`。
 
 ## 功能名稱（報告、測試、commit 訊息都用這組）
 

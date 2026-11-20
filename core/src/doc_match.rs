@@ -444,7 +444,7 @@ fn is_prelisted(slug: &str, matched_line: Option<&str>, today_section: Option<&s
 /// 日期分隔線就不補（沒有段落可言）。
 pub fn prelist_wanted(doc_text: &str, today: &str, previous: &str) -> bool {
     let days = day_sections(doc_text, today, previous);
-    days.has_dividers && days.today.as_deref().map_or(true, |t| t.trim().is_empty())
+    days.has_dividers && days.today.as_deref().is_none_or(|t| t.trim().is_empty())
 }
 
 /// 決策紀錄用：前一天段落裡出現這個 slug 的每一行，和它下面那一行標題（正規化後）。
@@ -1332,7 +1332,7 @@ fn slug_end(folded: &[char], needle: &[char]) -> Option<usize> {
     }
     (0..=folded.len() - needle.len()).find_map(|i| {
         let end = i + needle.len();
-        let boundary = folded.get(end).map_or(true, |c| !(c.is_alphanumeric() || *c == '-'));
+        let boundary = folded.get(end).is_none_or(|c| !(c.is_alphanumeric() || *c == '-'));
         (folded[i..end] == *needle && boundary).then_some(end)
     })
 }
@@ -1711,7 +1711,7 @@ mod time_tests {
             start: 23 * 3600 + 55 * 60,
             end: 25 * 3600,
         };
-        let p = fix("合成午夜2400 SOT 23:58:00", &[r.clone()]);
+        let p = fix("合成午夜2400 SOT 23:58:00", std::slice::from_ref(&r));
         assert_eq!(changes(&p), vec![("23:58:00".into(), "00:03:00".into())]);
         let p = fix("合成午夜2400 SOT 22:58:00", &[r]);
         assert!(p.corrections.is_empty(), "22:58 是 2200 的播出紀錄");

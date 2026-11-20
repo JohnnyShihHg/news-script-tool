@@ -6,10 +6,15 @@
 //
 // 刻意不用任何打包工具或壓縮器 —— 這支程式要能在只有 node 的機器上跑，跟 repo 其他
 // 部分一樣不需要 npm install。只做兩件保守的事：拿掉整行註解、去掉行首縮排。
+//
+// `--out <資料夾>`：輸出寫到別的資料夾（check.ps1 用來比對 repo 裡的檔案是不是最新，不覆寫）。
+// 沒給就照舊寫回這個資料夾。
 const fs = require("fs");
 const path = require("path");
 
 const dir = __dirname;
+const outFlag = process.argv.indexOf("--out");
+const outDir = outFlag >= 0 && process.argv[outFlag + 1] ? path.resolve(process.argv[outFlag + 1]) : dir;
 
 function stripComments(src) {
   return src
@@ -32,7 +37,7 @@ const bundle = `(function(){var module={exports:{}};\n${lookup}\n${panel}\n})();
 
 const bookmarklet = "javascript:" + encodeURIComponent(bundle);
 
-fs.writeFileSync(path.join(dir, "bookmarklet.txt"), bookmarklet + "\n", "utf8");
+fs.writeFileSync(path.join(outDir, "bookmarklet.txt"), bookmarklet + "\n", "utf8");
 
 const html = `<!doctype html>
 <html lang="zh-Hant">
@@ -79,7 +84,7 @@ document.getElementById("copy").addEventListener("click", async function () {
 </html>
 `;
 
-fs.writeFileSync(path.join(dir, "install.html"), html, "utf8");
+fs.writeFileSync(path.join(outDir, "install.html"), html, "utf8");
 
 console.log(`bookmarklet.txt  ${bookmarklet.length} 字元`);
 console.log("install.html     已更新");
