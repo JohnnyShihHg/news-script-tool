@@ -1,0 +1,13 @@
+# cargo clippy 既有警告（待清，見 AUDIT_REPORT #14）。格式：檔案|lint|數量。
+# check.ps1 只擋「比這份多」的警告。清掉幾個之後跑 check.ps1 -UpdateClippyBaseline 更新；不要為了過關把新警告加進來。
+app/src-tauri/src/main.rs|clippy::manual_unwrap_or_default|1
+app/src-tauri/src/main.rs|clippy::needless_borrows_for_generic_args|1
+app/src-tauri/src/main.rs|clippy::type_complexity|1
+core/src/config.rs|clippy::field_reassign_with_default|7
+core/src/doc_match.rs|clippy::cloned_ref_to_slice_refs|1
+core/src/doc_match.rs|clippy::unnecessary_map_or|2
+core/src/lib.rs|clippy::needless_return|5
+core/src/parse.rs|clippy::doc_lazy_continuation|1
+core/src/punctuation.rs|clippy::manual_is_multiple_of|1
+core/src/punctuation.rs|clippy::needless_range_loop|2
+core/src/rundown.rs|clippy::field_reassign_with_default|1

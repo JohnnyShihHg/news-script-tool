@@ -1,0 +1,31 @@
+name: Check
+
+# 每次 push 都跑一次 check.ps1（AUDIT_REPORT #2）。發版的 release.yml 也跑同一個入口。
+# 全部是本機、假資料：不連 iNEWS、不碰協作文件、不呼叫 Gemini、不抓氣象署，也不需要任何 secret。
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # cargo test --workspace、clippy（不能多過 tools/check/clippy-baseline.txt）、空 catch、
+      # JS 語法、Edge headless 跑瀏覽器測試頁。windows-latest 內建 Edge。
+      - name: check.ps1
+        shell: powershell
+        run: ./check.ps1
+      - name: UI logic tests (Node)
+        working-directory: app
+        run: node --test tests/logic.test.js
+      - name: collab-marker tests (Node)
+        run: node --test tools/collab-marker/tests/lookup.test.js

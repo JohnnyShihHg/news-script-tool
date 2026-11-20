@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>JS syntax check</title>
+<pre id="out">running…</pre>
+<script>
+  // check.ps1 用：把每支 JS 讀成文字、用 new Function 解析，不執行。
+  // 用 file:// 開要加 --allow-file-access-from-files（check.ps1 會加）；也可以用 http 開。
+  const FILES = [
+    "../../app/src/app.js",
+    "../../app/src/logic.js",
+    "../../app/tests/logic.test.js",
+    "../collab-guard/collab-guard.user.js",
+    "../collab-marker/lookup.js",
+    "../collab-marker/panel.js",
+    "../collab-marker/build.js",
+    "../collab-marker/tests/lookup.test.js",
+  ];
+  const lines = [];
+  let bad = 0;
+  for (const f of FILES) {
+    const xhr = new XMLHttpRequest();
+    try {
+      xhr.open("GET", `${f}?v=${Date.now()}`, false);
+      xhr.send();
+    } catch (e) {
+      bad++;
+      lines.push(`FAIL ${f}：讀不到（${e}）`);
+      continue;
+    }
+    if (!xhr.responseText) { bad++; lines.push(`FAIL ${f}：讀不到內容`); continue; }
+    try {
+      // 去掉 shebang（node 腳本可能有），其他原樣解析。
+      new Function(xhr.responseText.replace(/^#!.*\n/, ""));
+      lines.push(`ok   ${f}`);
+    } catch (e) {
+      bad++;
+      lines.push(`FAIL ${f}：${e.name}: ${e.message}`);
+    }
+  }
+  lines.unshift(bad ? `${bad} 支語法錯誤（共 ${FILES.length} 支）` : `ALL OK：${FILES.length} 支 JS 語法正確`);
+  document.getElementById("out").textContent = lines.join("\n");
+</script>

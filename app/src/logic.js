@@ -625,12 +625,35 @@
       : i.matchStatus == null ? "等比對"
       : i.keywordStatus === "loading" ? "關鍵字產生中"
       : i.keywordStatus === "error" ? `關鍵字失敗：${String(i.keywordError ?? "").slice(0, 80)}`
+      : (i.keywords ?? "").trim() !== "" ? "等寫入"
       : !opts.hasApiKey ? "沒有 Gemini API key"
       : opts.cooldownSeconds > 0 ? "等關鍵字（額度冷卻中）"
       : "等關鍵字";
     return (items ?? [])
       .filter((i) => isPendingWrite(i, writtenKeys) && !inReady.has(i) && !(opts.skip && opts.skip(i)))
       .map((i) => ({ slug: String((i.dto?.[i.kind] ?? i.dto ?? {}).slug ?? i.slug ?? ""), why: why(i) }));
+  }
+
+  /**
+   * 下一節的稿被擋住、在等上一節（`ctx.lastShow`）時寫進決策紀錄的那一行（v0.3.41）。
+   * 以前 app.js 的 heldReason 自己判斷每則在等什麼，跟 stuckReasons 的用字已經分歧
+   * （冷卻中記成「等確認」、關鍵字產生中記成「等關鍵字」）；現在原因一律由 stuckReasons 決定，
+   * 這裡只決定開頭：上一節還沒補掃完是「延遲補掃完成」，補掃完了是「收尾：」逐則列原因。
+   * ctx：{ lastShow, closed: Set, hasApiKey, cooldownSeconds }。
+   */
+  function heldReasonLine(held, ready, items, writtenKeys, ctx) {
+    const show = ctx.lastShow;
+    const heldShows = [...new Set((held ?? []).map((i) => i.inews?.show))].join("、");
+    const n = (held ?? []).length;
+    if (!ctx.closed?.has(show)) return `[等待寫入] ${n} 則 ${heldShows} 的稿等 ${show} 節延遲補掃完成`;
+    const sameShow = (items ?? []).filter(
+      (i) => i.inews?.show === show && i.inews.hold !== "suspect" && !i.inews.recheck && !i.inews.manual
+    );
+    const list = stuckReasons(sameShow, ready, writtenKeys, { hasApiKey: ctx.hasApiKey, cooldownSeconds: ctx.cooldownSeconds });
+    return (
+      `[等待寫入] ${n} 則 ${heldShows} 的稿等 ${show} 節收尾：` +
+      (list.length ? list.map((r) => `${r.slug}（${r.why}）`).join("、") : "沒有找到在等的稿")
+    );
   }
 
   /**
@@ -1018,6 +1041,7 @@
     vanishedWrites,
     reopenForRewrite,
     stuckReasons,
+    heldReasonLine,
     keywordCsv,
     pendingShows,
     isRerunStyle,

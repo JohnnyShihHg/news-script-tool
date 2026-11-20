@@ -1015,6 +1015,138 @@ test("stuck reasons say what each unwritten story waits for (v0.3.39)", () => {
   assert.deepEqual(L.stuckReasons(items, ready, written, { hasApiKey: true, skip: () => true }), []);
 });
 
+// --- 重開後同播出日（AUDIT_REPORT #4，只補測試、不改架構）---
+
+test("restart, same broadcast day: the closed show's divider is written once, not twice and not never", () => {
+  // 重開前：0900 寫到一半（0800 已收尾、分隔線已在 0900 第一則前寫過）。
+  const programs = new Map();
+  const before = L.composeInewsWrite([mk("九點一", "0900")], { lastShow: "0800", closed: new Set(["0800"]), programs }, AFTER, toText);
+  assert.equal(before.text, "==== 08 ====\n\n九點一");
+  assert.equal(before.lastShow, "0900");
+  // 存檔 → 關 App → 同一個播出日重開。
+  const saved = JSON.parse(JSON.stringify(L.writeSessionSnapshot("1120", before.lastShow, new Set(["0800"]), programs)));
+  const r = L.restoreWriteSession(saved, { day: "1120", show: "0900", previous_show: "0800" });
+  const closed = new Set(r.closed);
+  const progs = new Map(r.programs);
+  // 重開後 0900 再來一則：不會再寫一次 ==== 08 ====。
+  const again = L.composeInewsWrite([mk("九點二", "0900")], { lastShow: r.lastShow, closed, programs: progs }, AFTER, toText);
+  assert.equal(again.text, "九點二");
+  // 0900 補掃完、第一則 1000：==== 09 ==== 照常寫。
+  closed.add("0900");
+  const next = L.composeInewsWrite([mk("十點一", "1000")], { lastShow: again.lastShow, closed, programs: progs }, AFTER, toText);
+  assert.equal(next.text, "==== 09 ====\n\n十點一");
+  // 對照：沒有存檔（v0.3.38 以前）重開，上一則寫到的節次是空的，==== 09 ==== 就漏掉。
+  const lost = L.composeInewsWrite([mk("十點一", "1000")], { lastShow: "", closed, programs: progs }, AFTER, toText);
+  assert.equal(lost.text, "十點一");
+});
+
+test("restart, same broadcast day: a story written before the restart is held back only by the doc compare", () => {
+  // writtenKeys 只在記憶體：重開後是空的，同一版本的卡片又是「待寫入」。
+  const [card] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲0800", key: "A:1", version: "v1" }]));
+  card.keywords = "#甲";
+  assert.ok(L.isPendingWrite(card, new Set()));
+  // 還沒比對：不會自動寫。
+  assert.deepEqual(L.autoWriteCandidates([card], new Set(), ""), []);
+  // 比對讀到文件裡那一行（已在文件）：取消勾選，不寫。
+  const r = { status: "in_doc", matched_line: "甲0800 SOT 08:05:00" };
+  card.matchStatus = r.status;
+  card.alreadyInDoc = L.isAlreadyInDoc(r);
+  card.included = L.decideInclusion(r, card.defaultIncluded, card.userIncluded);
+  assert.deepEqual(L.autoWriteCandidates([card], new Set(), ""), []);
+});
+
+// --- 寫入後 story key 變了（AUDIT_REPORT #5）---
+
+test("after a write the story is saved in iNEWS (new key): the fresh card waits for the compare and is not rewritten", () => {
+  const [card] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲0800", key: "A:1", version: "v1" }]));
+  card.matchStatus = "to_cut";
+  card.keywords = "#甲";
+  const written = new Set();
+  assert.deepEqual(L.autoWriteCandidates([card], written, ""), [card]);
+  // 寫入後（同 app.js writeInewsItems）。
+  written.add(L.writtenKey(card));
+  card.included = false;
+  card.defaultIncluded = false;
+  card.alreadyInDoc = true;
+  // 製作人存檔：key 換了（版本也可能換）。
+  const fresh = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲0800", key: "A:9", version: "v2" }]));
+  const merged = L.mergeInewsItems([card], fresh, written);
+  assert.equal(merged.length, 1);
+  const f = merged[0];
+  assert.equal(f.id, "inews-A:9");
+  // writtenKeys 認不得新 key：去重失效，卡片又是「待寫入」……
+  assert.ok(L.isPendingWrite(f, written));
+  // ……但還沒比對前不會自動寫，
+  f.keywords = "#甲";
+  assert.deepEqual(L.autoWriteCandidates(merged, written, ""), []);
+  // 比對讀到文件裡剛寫的那一行就是「已在文件」，不會重寫。
+  const r = { status: "in_doc", matched_line: "甲0800 SOT 08:05:00" };
+  f.matchStatus = r.status;
+  f.alreadyInDoc = L.isAlreadyInDoc(r);
+  f.included = L.decideInclusion(r, f.defaultIncluded, f.userIncluded);
+  assert.deepEqual(L.autoWriteCandidates(merged, written, ""), []);
+  // 比對沒讀到那一行（文件還沒同步到）：會再寫一次。剩下的保護是寫入前在同一個協作操作裡
+  // 重新讀文件（後端 filter_write_parts_with_prelist），讀到的是同一份文件。
+  f.matchStatus = "to_cut";
+  f.alreadyInDoc = false;
+  f.included = true;
+  assert.deepEqual(L.autoWriteCandidates(merged, written, ""), [f]);
+});
+
+// --- 「為什麼沒寫」只有一份判斷（v0.3.41，AUDIT_REPORT #3）---
+
+const heldCard = (slug, show, extra = {}) => {
+  const c = rwCard(slug);
+  c.inews = { key: slug, version: "V", show, hold: null, ...(extra.inews ?? {}) };
+  c.matchStatus = "to_cut";
+  c.included = true;
+  delete extra.inews;
+  return Object.assign(c, extra);
+};
+const heldCtx = (over = {}) => ({ lastShow: "0800", closed: new Set(["0800"]), hasApiKey: true, cooldownSeconds: 0, ...over });
+
+test("held line: a cooling-down card says 時間異常, not 等確認", () => {
+  const items = [heldCard("冷卻0800", "0800", { inews: { hold: "cooldown" } })];
+  const line = L.heldReasonLine([heldCard("九點0900", "0900")], [], items, new Set(), heldCtx());
+  assert.equal(line, "[等待寫入] 1 則 0900 的稿等 0800 節收尾：冷卻0800（rundown 時間異常，暫停）");
+  assert.equal(L.stuckReasons(items, [], new Set(), { hasApiKey: true })[0].why, "rundown 時間異常，暫停");
+});
+
+test("held line: keywords still loading says 關鍵字產生中", () => {
+  const items = [heldCard("產生中0800", "0800", { keywordStatus: "loading" })];
+  const line = L.heldReasonLine([heldCard("九點0900", "0900")], [], items, new Set(), heldCtx());
+  assert.equal(line, "[等待寫入] 1 則 0900 的稿等 0800 節收尾：產生中0800（關鍵字產生中）");
+});
+
+test("held line: no API key is named instead of 等關鍵字", () => {
+  const items = [heldCard("沒鑰匙0800", "0800")];
+  const line = L.heldReasonLine([heldCard("九點0900", "0900")], [], items, new Set(), heldCtx({ hasApiKey: false }));
+  assert.equal(line, "[等待寫入] 1 則 0900 的稿等 0800 節收尾：沒鑰匙0800（沒有 Gemini API key）");
+  // 有關鍵字、只是還沒輪到寫：等寫入，不是等關鍵字。
+  const kw = [heldCard("有關鍵字0800", "0800", { keywords: "#a" })];
+  assert.equal(L.stuckReasons(kw, [], new Set(), { hasApiKey: true })[0].why, "等寫入");
+});
+
+test("held line: previous show not swept yet vs. swept and waiting to wrap up", () => {
+  const held = [heldCard("九點一0900", "0900"), heldCard("九點二0900", "0900")];
+  const items = [heldCard("等比對0800", "0800", { matchStatus: null }), heldCard("可疑0800", "0800", { inews: { hold: "suspect" } }), ...held];
+  // 0800 還沒補掃完：只說在等補掃，不逐則列。
+  assert.equal(
+    L.heldReasonLine(held, [], items, new Set(), heldCtx({ closed: new Set() })),
+    "[等待寫入] 2 則 0900 的稿等 0800 節延遲補掃完成"
+  );
+  // 補掃完了：逐則列 0800 還在等的稿；可疑稿和 0900 的稿不列。
+  assert.equal(
+    L.heldReasonLine(held, [], items, new Set(), heldCtx()),
+    "[等待寫入] 2 則 0900 的稿等 0800 節收尾：等比對0800（等比對）"
+  );
+  // 0800 沒有在等的稿。
+  assert.equal(
+    L.heldReasonLine(held, [], held, new Set(), heldCtx()),
+    "[等待寫入] 2 則 0900 的稿等 0800 節收尾：沒有找到在等的稿"
+  );
+});
+
 test("program settings parse 開頭=名稱 pairs", () => {
   assert.deepEqual(L.parsePrograms("關鍵KS=關鍵時刻, XX＝某節目"), { 關鍵KS: "關鍵時刻", XX: "某節目" });
   assert.deepEqual(L.parsePrograms(""), {});

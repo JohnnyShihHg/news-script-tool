@@ -41,6 +41,7 @@ const {
   vanishedWrites,
   reopenForRewrite,
   stuckReasons,
+  heldReasonLine,
   keepManualCards,
   diffInewsVersions,
   writtenKey,
@@ -1342,32 +1343,23 @@ function writeLogNote(written, dividers) {
  * 查不到在等誰。內容跟上一次一樣就不重複記。
  */
 let lastHeldLog = "";
+/** 每則在等什麼一律由 logic.js 的 stuckReasons 判斷（v0.3.41），這裡只帶入 App 狀態。 */
+function keywordCooldownSeconds() {
+  return Math.max(0, Math.ceil((keywordCooldownUntil - Date.now()) / 1000));
+}
 function heldReason(held, ready) {
-  const show = lastWrittenShow;
-  const heldShows = [...new Set(held.map((i) => i.inews?.show))].join("、");
-  if (!closedShows.has(show)) return `[等待寫入] ${held.length} 則 ${heldShows} 的稿等 ${show} 節延遲補掃完成`;
-  const inReady = new Set(ready);
-  const blockers = items.filter(
-    (i) =>
-      i.inews?.show === show && !inReady.has(i) && isPendingWrite(i, writtenKeys) &&
-      i.inews.hold !== "suspect" && !i.inews.recheck && !i.inews.manual
-  );
-  const why = (i) =>
-    i.inews?.hold ? "等確認"
-    : i.matchStatus == null ? "等比對"
-    : i.keywordStatus === "error" ? `關鍵字失敗：${String(i.keywordError ?? "").slice(0, 60)}`
-    : (i.keywords ?? "").trim() === "" ? "等關鍵字"
-    : "等寫入";
-  return (
-    `[等待寫入] ${held.length} 則 ${heldShows} 的稿等 ${show} 節收尾：` +
-    (blockers.length ? blockers.map((i) => `${slugOf(i)}（${why(i)}）`).join("、") : "沒有找到在等的稿")
-  );
+  return heldReasonLine(held, ready, items, writtenKeys, {
+    lastShow: lastWrittenShow,
+    closed: closedShows,
+    hasApiKey,
+    cooldownSeconds: keywordCooldownSeconds(),
+  });
 }
 /** 什麼都沒寫、也不是在等上一節收尾時：有稿在等就逐則記原因（v0.3.39）。 */
 function stuckLine(ready) {
   const list = stuckReasons(items, ready, writtenKeys, {
     hasApiKey,
-    cooldownSeconds: Math.max(0, Math.ceil((keywordCooldownUntil - Date.now()) / 1000)),
+    cooldownSeconds: keywordCooldownSeconds(),
     skip: beforeWriteStartShow,
   });
   if (!list.length) return "";
@@ -1480,8 +1472,16 @@ let reviewing = null;
 let reviewBeepTimer = null;
 let audioCtx = null;
 
+/** 決策紀錄寫失敗已經在狀態列提示過（每次開 App 一次）。 */
+let logFailShown = false;
 function logDecision(line) {
-  invoke("append_decision_log", { line }).catch(() => {});
+  invoke("append_decision_log", { line }).catch((err) => {
+    // 不能改成寫紀錄：寫紀錄本身就是失敗的那件事，會一直遞迴。狀態列顯示一次。
+    console.warn("決策紀錄寫入失敗", err);
+    if (logFailShown) return;
+    logFailShown = true;
+    inewsStatus(`⚠ 決策紀錄寫不進去，之後的判斷可能沒有留下紀錄：${err}`, "warn");
+  });
 }
 
 function queueUnknownReviews() {

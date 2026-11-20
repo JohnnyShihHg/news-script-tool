@@ -24,6 +24,9 @@
 # Node
 node_modules/
 
+# cargo test 產生的寫入／校正腳本測試案例（main.rs collab_script_cases → app/tests/fake-quill.html）
+/app/tests/generated/
+
 # Editor / OS
 .vscode/
 .idea/

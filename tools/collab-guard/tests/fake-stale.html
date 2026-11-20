@@ -39,12 +39,14 @@
   localStorage.setItem("fakeLoads", String(n));
   document.title = `loads=${n}`;
   window.__reqs = [];
+  window.__t0 = Date.now();
   let serverCursor = 100;
   let cursor = 100;
   window.fetch = async (input, init) => {
     const isPost = (init?.method || "GET").toUpperCase() === "POST";
     if (isPost) return new Response("{}", { status: 200 });
     window.__reqs.push(String(input));
+    if (/after=0\b/.test(String(input)) && window.__firstBackfillAt == null) window.__firstBackfillAt = Date.now();
     const after = Number(String(input).match(/after=(\d+)/)[1]);
     let body;
     if (after === 0 && mode === "coldhang" && !window.__hungOnce) {
@@ -90,3 +92,60 @@
   }
 </script>
 <script src="../collab-guard.user.js"></script>
+<pre id="verdict">judging…</pre>
+<script>
+  // 自動判定（AUDIT_REPORT #12）：載入後 JUDGE_MS 毫秒依上面每個 mode 的預期判 PASS/FAIL，
+  // 寫在 #verdict 和 window.__verdict。check.ps1 用 Edge headless（每次全新的設定檔，所以
+  // localStorage 是空的）逐一開每個 mode 讀這一行。手動測的話照上面說明先清掉 storage。
+  // hard 會自己重整一次：第一次載入不判，第二次載入再判（重整過剛好一次、沒有再重整）。
+  (function () {
+    const JUDGE_MS = 15000;
+    const backfills = () => window.__reqs.filter((u) => /after=0\b/.test(u));
+    const firstBackfillAt = () => (window.__firstBackfillAt == null ? null : window.__firstBackfillAt - window.__t0);
+    const events = () => {
+      try {
+        return JSON.parse(localStorage.getItem("collabGuardStaleEvents") || "[]").map((e) => e.kind);
+      } catch (e) {
+        console.warn("讀不到守門員的事件紀錄", e);
+        return [];
+      }
+    };
+    const g = () => window.__collabGuard || {};
+    const loads = Number(localStorage.getItem("fakeLoads") || 0);
+    const expect = {
+      ok: () => [[backfills().length === 0, "不補讀"]],
+      stale: () => [[backfills().length === 1, "補讀剛好一次"], [!!window.__fixed, "補讀後畫面有更新"]],
+      gap: () => [[backfills().length >= 1, "有補讀"], [firstBackfillAt() != null && firstBackfillAt() < 4000, "不用等 4 秒就補讀"]],
+      gapok: () => [[backfills().length === 0, "不補讀"]],
+      hard: () => [[loads === 2, "重整剛好一次"], [events().filter((k) => k === "補讀後還是收不到，自動重整").length === 1, "紀錄只有一次自動重整"]],
+      typing: () => [[backfills().length <= 1, "補讀最多一次"], [events().includes("補讀後還是收不到，等時機重整"), "打字中改成等時機重整"]],
+      hidden: () => [[backfills().length === 0, "背景分頁不補讀"]],
+      echo: () => [[backfills().length === 0, "自己送回來的不算"]],
+      cold: () => [[g().coldBackfillDone === true, "開頁補讀完成"], [backfills().length === 1, "只補讀一次"]],
+      coldhidden: () => [[g().coldBackfillDone === true, "縮小時照樣開頁補讀"], [backfills().length === 1, "只補讀一次"]],
+      toolwrite: () => [[backfills().length >= 1, "App 寫入不算收得到，照樣補讀"]],
+      coldhang: () => [
+        [g().coldAttempts === 2, "逾時後重試一次"],
+        [g().coldBackfillDone === true, "重試成功"],
+        [/秒沒回應/.test(g().coldLastError || ""), "記下逾時原因"],
+        [window.__lateArrived === true, "遲到的回應有回來但不算"],
+      ],
+    };
+    const show = (text) => {
+      document.getElementById("verdict").textContent = text;
+      window.__verdict = text;
+    };
+    if (!expect[mode]) { show(`FAIL ${mode}：沒有這個 mode 的判定`); return; }
+    if (mode === "hard" && loads === 1) {
+      // 第一次載入：應該在 JUDGE_MS 內自己重整；沒重整就是失敗。
+      setTimeout(() => show(`FAIL hard：${JUDGE_MS / 1000} 秒內沒有自動重整`), JUDGE_MS);
+      return;
+    }
+    setTimeout(() => {
+      const checks = expect[mode]();
+      if (mode !== "hard") checks.push([loads === 1, "沒有重整"]);
+      const bad = checks.filter(([ok]) => !ok).map(([, what]) => what);
+      show(bad.length ? `FAIL ${mode}：${bad.join("、")}` : `PASS ${mode}`);
+    }, JUDGE_MS);
+  })();
+</script>

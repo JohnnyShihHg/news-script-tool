@@ -1548,6 +1548,42 @@ async fn scrape_collab_text(
     eval_in_collab_and_wait(app, state, SCRAPE_SCRIPT).await
 }
 
+/// 寫入、時間校正腳本共用的開頭（AUDIT_REPORT #13；改這裡兩支腳本一起變，
+/// `app/tests/fake-quill.html` 的 golden test 會跑兩支）。放在 `(function() {` 裡面。
+///
+/// - `send(payload)`：把 `{ Ok }`／`{ Err }` 連同 `window.__nstReqId` 帶回 App。
+/// - `findQuill(action, method)`：找編輯器；找不到就回錯誤並回 null。頁面把 Quill 實例放在
+///   模組範圍的 const 裡，`window` 拿不到，只能用 `Quill.find()` 從 `#editor` 找。
+/// - `nudgePush()`：協作工具的同步有一道閘門，只在 `bootstrapFinalized` 亮起時才排程上傳，
+///   沒亮就把改動堆在記憶體裡、而且不會再重試 —— 那一頁變成只收不發，外觀完全正常。它另外
+///   有一條不看那道閘門的「離開前補送」，掛在 window 的 pagehide 上，而那個監聽器不檢查事件
+///   是不是真的來自瀏覽器。所以每次改完就補送一個 pagehide，把內容立刻推上伺服器。它的補送
+///   有 48,000 字元上限、超過就靜默放棄，所以這不是根治；根治要請工具作者把上傳解開那道閘門。
+const COLLAB_EDIT_PRELUDE: &str = r#"
+      function send(payload) {
+        if (!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)) return;
+        window.__TAURI__.core.invoke('receive_scraped_text', { text: payload, id: window.__nstReqId })
+          .catch(function(e) { console.error('[news-script-tool] reply failed', e); });
+      }
+      function findQuill(action, method) {
+        if (typeof Quill === 'undefined' || !Quill.find) {
+          send({ Err: '協作工具頁面上找不到 Quill，無法' + action + '。' });
+          return null;
+        }
+        var container = document.querySelector('#editor');
+        if (!container) { send({ Err: '找不到編輯器容器 #editor。' }); return null; }
+        var q = Quill.find(container);
+        if (!q || typeof q[method] !== 'function') {
+          send({ Err: '取不到 Quill 編輯器實例，無法' + action + '。' });
+          return null;
+        }
+        return q;
+      }
+      function nudgePush() {
+        try { window.dispatchEvent(new Event('pagehide')); }
+        catch (nudgeErr) { console.warn('[news-script-tool] pagehide nudge failed', nudgeErr); }
+      }"#;
+
 /// Appends `text` to the bottom of the shared doc, mirroring the collab tool's own
 /// `appendNotepadTextToArticle`: insert at `getLength() - 1`, separated by a blank
 /// line, with source `"user"` so the QuillBinding propagates it through Yjs to the
@@ -1561,25 +1597,12 @@ fn build_append_script(text: &str) -> String {
     format!(
         r#"
     (function() {{
-      function send(payload) {{
-        if (!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)) return;
-        window.__TAURI__.core.invoke('receive_scraped_text', {{ text: payload, id: window.__nstReqId }})
-          .catch(function(e) {{ console.error('[news-script-tool] reply failed', e); }});
-      }}
+{prelude}
       try {{
         // 告訴守門員接下來的畫面變動是 App 自己寫的，不算「別人的更新有顯示」（v0.3.32）。
         window.__collabGuardIgnoreDomUntil = Date.now() + 3000;
-        if (typeof Quill === 'undefined' || !Quill.find) {{
-          send({{ Err: '協作工具頁面上找不到 Quill，無法寫入。' }});
-          return;
-        }}
-        var container = document.querySelector('#editor');
-        if (!container) {{ send({{ Err: '找不到編輯器容器 #editor。' }}); return; }}
-        var q = Quill.find(container);
-        if (!q || typeof q.insertText !== 'function') {{
-          send({{ Err: '取不到 Quill 編輯器實例，無法寫入。' }});
-          return;
-        }}
+        var q = findQuill('寫入', 'insertText');
+        if (!q) return;
         var importedText = {payload};
         var insertIndex = Math.max(0, q.getLength() - 1);
         var existingText = q.getText(0, insertIndex);
@@ -1608,23 +1631,16 @@ fn build_append_script(text: &str) -> String {
           console.error('[news-script-tool] heading formatting failed', fmtErr);
         }}
 
-        // 協作工具的同步有一道閘門：它只在 `bootstrapFinalized` 亮起時才排程上傳，
-        // 沒亮就把改動堆在記憶體裡、而且不會再重試 —— 那一頁變成只收不發，外觀完全
-        // 正常。它另外有一條不看那道閘門的「離開前補送」，掛在 window 的 pagehide 上。
-        //
-        // 所以每次寫完就補送一個 pagehide 事件，把剛寫的內容立刻推上伺服器，不要等
-        // 使用者哪天想到去按 F5。那個監聽器不檢查事件是不是真的來自瀏覽器。
-        //
-        // 它的補送有 48,000 字元上限、超過就靜默放棄，所以這不是根治 —— 但每寫完就推
-        // 一次，就不容易累積到那個上限。根治要請工具作者把上傳解開那道閘門。
-        try {{ window.dispatchEvent(new Event('pagehide')); }} catch (nudgeErr) {{}}
+        // 寫完立刻把內容推上伺服器（為什麼需要，見 COLLAB_EDIT_PRELUDE 的 nudgePush）。
+        nudgePush();
         var lineCount = importedText.split('\n').length;
         send({{ Ok: '已寫入 ' + lineCount + ' 行到文件最下方（其中 ' + headingCount + ' 行設為標題）。' }});
       }} catch (e) {{
         send({{ Err: String(e) }});
       }}
     }})();
-    "#
+    "#,
+        prelude = COLLAB_EDIT_PRELUDE
     )
 }
 
@@ -1708,30 +1724,6 @@ async fn append_to_collab_doc_checked(
     Ok(CheckedAppendDto { message: Some(r?), dropped: filtered.dropped })
 }
 
-#[tauri::command]
-async fn append_to_collab_doc(
-    window: tauri::Window,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    text: String,
-    log_note: Option<String>,
-) -> Result<String, String> {
-    require_main_window(&window)?;
-    if text.trim().is_empty() {
-        return Err("沒有可寫入的內容。".to_string());
-    }
-    let script = build_append_script(&text);
-    let r = eval_in_collab_and_wait(&app, &state, &script).await;
-    // 自動流程的寫入結果寫進決策紀錄：「沒寫入」時才查得到原因。
-    if let (Some(note), Some(dir)) = (&log_note, inews_log_dir()) {
-        match &r {
-            Ok(_) => inews::append_log(&dir, &format!("[寫入] 成功：{note}")),
-            Err(e) => inews::append_log(&dir, &format!("[寫入] 失敗：{note}｜{e}")),
-        }
-    }
-    r
-}
-
 /// 把協作文件裡幾行的時間換掉（v0.3.9）。每一行先重新定位：第 `line` 行的內容必須
 /// 跟讀文件時完全相同、舊時間還在原位，才只把那幾個字換掉（保留行內格式和該行的
 /// 標題格式），source 用 `"user"` 讓 Yjs 同步給其他人。對不上就放棄那一行。
@@ -1740,24 +1732,11 @@ fn build_correct_script(fixes: &[news_script_core::doc_match::TimeCorrection]) -
     format!(
         r#"
     (function() {{
-      function send(payload) {{
-        if (!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)) return;
-        window.__TAURI__.core.invoke('receive_scraped_text', {{ text: payload, id: window.__nstReqId }})
-          .catch(function(e) {{ console.error('[news-script-tool] reply failed', e); }});
-      }}
+{prelude}
       try {{
         window.__collabGuardIgnoreDomUntil = Date.now() + 3000;
-        if (typeof Quill === 'undefined' || !Quill.find) {{
-          send({{ Err: '協作工具頁面上找不到 Quill，無法校正時間。' }});
-          return;
-        }}
-        var container = document.querySelector('#editor');
-        if (!container) {{ send({{ Err: '找不到編輯器容器 #editor。' }}); return; }}
-        var q = Quill.find(container);
-        if (!q || typeof q.updateContents !== 'function') {{
-          send({{ Err: '取不到 Quill 編輯器實例，無法校正時間。' }});
-          return;
-        }}
+        var q = findQuill('校正時間', 'updateContents');
+        if (!q) return;
         var Delta = Quill.import('delta');
         var fixes = {payload};
         var results = fixes.map(function (f) {{
@@ -1779,15 +1758,15 @@ fn build_correct_script(fixes: &[news_script_core::doc_match::TimeCorrection]) -
             return {{ ok: false, reason: String(e) }};
           }}
         }});
-        // 跟寫入同一個理由：補送一個 pagehide，讓校正好的時間立刻推上伺服器。
-        // （為什麼需要這招，見 build_append_script 裡的說明。）
-        try {{ window.dispatchEvent(new Event('pagehide')); }} catch (nudgeErr) {{}}
+        // 跟寫入同一個理由：讓校正好的時間立刻推上伺服器。
+        nudgePush();
         send({{ Ok: JSON.stringify(results) }});
       }} catch (e) {{
         send({{ Err: String(e) }});
       }}
     }})();
-    "#
+    "#,
+        prelude = COLLAB_EDIT_PRELUDE
     )
 }
 
@@ -2129,7 +2108,6 @@ fn main() {
             compare_with_collab_doc,
             diagnose_collab_bridge,
             export_collab_text,
-            append_to_collab_doc,
             append_to_collab_doc_checked,
             compare_evening,
             generate_group_keywords,
@@ -2185,5 +2163,124 @@ mod lock_tests {
         assert_eq!(*lock_or_recover(&m), "設定還在");
         // 毒化不會自己消失，所以第二次也要能拿到。
         assert_eq!(*lock_or_recover(&m), "設定還在");
+    }
+}
+
+/// 寫入、時間校正注入腳本的 golden test（AUDIT_REPORT #1、#10）。
+///
+/// 腳本要在協作頁面裡跑才看得出對錯，所以這裡只負責「固定的輸入 → 產生腳本＋預期結果」，
+/// 寫到 `app/tests/generated/collab-cases.js`；`app/tests/fake-quill.html` 用假的 Quill
+/// 跑每一個腳本，比對文件文字、標題行、回覆。完全不碰真的協作文件。
+/// `check.ps1` 先跑 cargo test（產生檔案）再開那一頁。
+#[cfg(test)]
+mod collab_script_cases {
+    use super::{build_append_script, build_correct_script};
+    use news_script_core::doc_match::{plan_time_corrections, TimeRow};
+    use serde_json::{json, Value};
+
+    const DOC: &str = "==========1119==========\n合成昨天0800 SOT 08:05:52\n==========1120==========\n合成掃街0800 SOT 08:05:52 社會\n合成掃街標題\n內文";
+
+    fn row(slug: &str, time: &str) -> TimeRow {
+        TimeRow {
+            show: "0800".into(),
+            slug: slug.into(),
+            time: time.into(),
+            nominal: 8 * 3600,
+            start: 7 * 3600 + 30 * 60,
+            end: 8 * 3600 + 55 * 60,
+        }
+    }
+
+    fn cases() -> Vec<Value> {
+        let write = "==== 08 ====\n\n合成颱風0900 SOT 09:01:00 生活\n合成颱風標題\n合成內文\n#颱風";
+        let special = "合成引號0900 SOT 09:02:00\n\"雙引號\" '單引號' `反引號` ${x} \\反斜線 </script> \u{2028}行分隔";
+        let plan = plan_time_corrections(DOC, "1120", &[row("合成掃街0800", "08:01:51")], &["抓新".to_string()], 10);
+        assert_eq!(plan.corrections.len(), 1, "樣本文件要剛好有一行要校正");
+        let fixed_doc = DOC.replace("合成掃街0800 SOT 08:05:52 社會", "合成掃街0800 SOT 08:01:51 社會");
+        vec![
+            json!({
+                "name": "append：文件最下方空一行接上，時間行和分隔線設成標題",
+                "doc": DOC,
+                "script": build_append_script(write),
+                "expectDoc": format!("{DOC}\n\n{write}"),
+                "expectHeaders": ["==== 08 ====", "合成颱風0900 SOT 09:01:00 生活"],
+                "expectReply": { "Ok": "已寫入 6 行到文件最下方（其中 2 行設為標題）。" },
+                "expectPagehide": 1,
+            }),
+            json!({
+                "name": "append：空文件不加前導空行",
+                "doc": "",
+                "script": build_append_script("合成第一則0600 SOT 06:01:00"),
+                "expectDoc": "合成第一則0600 SOT 06:01:00",
+                "expectHeaders": ["合成第一則0600 SOT 06:01:00"],
+                "expectReply": { "Ok": "已寫入 1 行到文件最下方（其中 1 行設為標題）。" },
+                "expectPagehide": 1,
+            }),
+            json!({
+                "name": "append：引號、反斜線、</script>、行分隔字元原樣寫入",
+                "doc": DOC,
+                "script": build_append_script(special),
+                "expectDoc": format!("{DOC}\n\n{special}"),
+                "expectHeaders": ["合成引號0900 SOT 09:02:00"],
+                "expectReply": { "Ok": "已寫入 2 行到文件最下方（其中 1 行設為標題）。" },
+                "expectPagehide": 1,
+            }),
+            json!({
+                // #10：腳本是同步寫完才回覆的。回覆送不回來（App 端 10 秒逾時）時文件其實已經寫進去，
+                // 所以「逾時」不能當成「沒寫」——前端停掉自動刷新、靠寫入前重新比對擋重複。
+                "name": "append：回覆一直沒送回（逾時）時，文件已經寫進去了",
+                "doc": DOC,
+                "script": build_append_script(write),
+                "replyHangs": true,
+                "expectDoc": format!("{DOC}\n\n{write}"),
+                "expectHeaders": ["==== 08 ====", "合成颱風0900 SOT 09:01:00 生活"],
+                "expectReply": { "Ok": "已寫入 6 行到文件最下方（其中 2 行設為標題）。" },
+                "expectPagehide": 1,
+            }),
+            json!({
+                "name": "append：頁面沒有 Quill 時回錯誤、不動文件",
+                "doc": DOC,
+                "script": build_append_script(write),
+                "noQuill": true,
+                "expectDoc": DOC,
+                "expectHeaders": [],
+                "expectReply": { "Err": "協作工具頁面上找不到 Quill，無法寫入。" },
+                "expectPagehide": 0,
+            }),
+            json!({
+                "name": "correct：只換時間字串，行的標題格式保留",
+                "doc": DOC,
+                "headers": ["合成掃街0800 SOT 08:05:52 社會"],
+                "script": build_correct_script(&plan.corrections),
+                "expectDoc": fixed_doc,
+                "expectHeaders": ["合成掃街0800 SOT 08:01:51 社會"],
+                "expectReply": { "Ok": "[{\"ok\":true}]" },
+                "expectPagehide": 1,
+            }),
+            json!({
+                "name": "correct：讀文件之後那一行被改過，就放棄、不動文件",
+                "doc": DOC.replace("合成掃街0800 SOT 08:05:52 社會", "合成掃街0800 SOT 08:05:52 社會(勿上網)"),
+                "script": build_correct_script(&plan.corrections),
+                "expectDoc": DOC.replace("合成掃街0800 SOT 08:05:52 社會", "合成掃街0800 SOT 08:05:52 社會(勿上網)"),
+                "expectHeaders": [],
+                "expectReply": { "Ok": "[{\"ok\":false,\"reason\":\"該行內容已變動：合成掃街0800 SOT 08:05:52 社會(勿上網)\"}]" },
+                "expectPagehide": 1,
+            }),
+        ]
+    }
+
+    #[test]
+    fn collab_script_cases_are_written_for_the_fake_quill_page() {
+        let cases = cases();
+        let body = format!(
+            "// 自動產生：cargo test（main.rs collab_script_cases）。不要手改、不要 commit。\nwindow.__collabCases = {};\n",
+            serde_json::to_string_pretty(&cases).unwrap()
+        );
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("tests").join("generated");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("collab-cases.js");
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(body.as_str()) {
+            std::fs::write(&path, body).unwrap();
+        }
     }
 }

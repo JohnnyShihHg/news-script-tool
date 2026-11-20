@@ -1,0 +1,142 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fake quill: 寫入／時間校正腳本 golden test</title>
+<!-- AUDIT_REPORT #1、#10：main.rs 的 build_append_script／build_correct_script 在假的 Quill 上跑。
+     測試案例（輸入、產生的腳本、預期文件）由 cargo test 產生到 generated/collab-cases.js
+     （main.rs 的 collab_script_cases），這一頁只負責執行和比對。完全不碰真的協作文件。
+
+     假 Quill 是最小替身：只實作腳本用到的 API（getLength、getText、insertText、getLines、getIndex、
+     formatLine、getContents、updateContents、Quill.find、Quill.import('delta')），標題格式只記
+     「哪幾行是標題」，不模擬 Quill 換行時的格式繼承。它驗證的是腳本「插在哪、插什麼、把哪幾行設成標題、
+     改哪幾個字、回覆什麼」，不是協作工具本身的行為。
+
+     用法：check.ps1 會用 Edge headless 開這一頁；手動的話先 cargo test，再用 http 或直接開檔。 -->
+<pre id="out">running…</pre>
+<div id="editor"></div>
+<script src="generated/collab-cases.js"></script>
+<script>
+  class Delta {
+    constructor() { this.ops = []; }
+    retain(n) { this.ops.push({ retain: n }); return this; }
+    delete(n) { this.ops.push({ delete: n }); return this; }
+    insert(text, attributes) { this.ops.push({ insert: text, attributes }); return this; }
+  }
+
+  class FakeQuill {
+    constructor(doc, headers) {
+      this.text = doc + "\n"; // Quill 的文件永遠以換行結尾
+      this.headers = this.lineTexts().map((t) => headers.includes(t));
+      this.sources = [];
+    }
+    lineTexts() { return this.text.slice(0, -1).split("\n"); }
+    lineStart(n) {
+      let s = 0;
+      const lines = this.lineTexts();
+      for (let i = 0; i < n; i++) s += lines[i].length + 1;
+      return s;
+    }
+    lineOf(index) { return this.text.slice(0, index).split("\n").length - 1; }
+    line(n) { const len = this.lineTexts()[n].length + 1; return { n, length: () => len }; }
+    getLength() { return this.text.length; }
+    getText(index = 0, length = this.text.length - index) { return this.text.substr(index, length); }
+    insertText(index, str, source) {
+      this.sources.push(source);
+      const at = this.lineOf(index);
+      this.text = this.text.slice(0, index) + str + this.text.slice(index);
+      const added = (str.match(/\n/g) || []).length;
+      this.headers.splice(at + 1, 0, ...Array(added).fill(false));
+    }
+    getLines(index, length) {
+      const lines = this.lineTexts().map((_, n) => this.line(n));
+      if (index === undefined) return lines;
+      const end = index + Math.max(0, length);
+      return lines.filter((l) => {
+        const s = this.lineStart(l.n);
+        const e = s + l.length();
+        return length > 0 ? s < end && e > index : s <= index && index < e;
+      });
+    }
+    getIndex(line) { return this.lineStart(line.n); }
+    formatLine(index, length, name, value, source) {
+      this.sources.push(source);
+      if (name !== "header") throw new Error(`fake quill: formatLine(${name}) 沒有實作`);
+      for (const l of this.getLines(index, Math.max(1, length))) this.headers[l.n] = !!value;
+    }
+    getContents(index, length) { return { ops: [{ insert: this.text.substr(index, length) }] }; }
+    updateContents(delta, source) {
+      this.sources.push(source);
+      let pos = 0;
+      for (const op of delta.ops) {
+        if (op.retain) pos += op.retain;
+        else if (op.delete) this.text = this.text.slice(0, pos) + this.text.slice(pos + op.delete);
+        else if (op.insert !== undefined) {
+          if (op.insert.includes("\n")) throw new Error("fake quill: updateContents 插入換行沒有實作");
+          this.text = this.text.slice(0, pos) + op.insert + this.text.slice(pos);
+          pos += op.insert.length;
+        }
+      }
+    }
+  }
+
+  function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+
+  function runCase(c) {
+    const container = document.getElementById("editor");
+    const q = new FakeQuill(c.doc, c.headers || []);
+    const replies = [];
+    let pagehide = 0;
+    const onPagehide = () => pagehide++;
+    window.addEventListener("pagehide", onPagehide);
+    window.Quill = c.noQuill ? undefined : { find: (el) => (el === container ? q : null), import: (n) => (n === "delta" ? Delta : null) };
+    window.__TAURI__ = {
+      core: {
+        invoke: (cmd, args) => {
+          replies.push({ cmd, args });
+          // replyHangs：回覆送出去就石沉大海（App 那邊 10 秒逾時）。
+          return c.replyHangs ? new Promise(() => {}) : Promise.resolve();
+        },
+      },
+    };
+    window.__nstReqId = 7;
+    window.__collabGuardIgnoreDomUntil = 0;
+    const before = Date.now();
+    try {
+      (0, eval)(c.script);
+    } finally {
+      window.removeEventListener("pagehide", onPagehide);
+    }
+
+    const problems = [];
+    const doc = q.text.slice(0, -1);
+    if (doc !== c.expectDoc) problems.push(`文件不同\n  實際：${JSON.stringify(doc)}\n  預期：${JSON.stringify(c.expectDoc)}`);
+    const headers = q.lineTexts().filter((_, n) => q.headers[n]);
+    if (!same(headers, c.expectHeaders)) problems.push(`標題行不同\n  實際：${JSON.stringify(headers)}\n  預期：${JSON.stringify(c.expectHeaders)}`);
+    if (replies.length !== 1) problems.push(`回覆次數 ${replies.length}（應該剛好 1 次）`);
+    const r = replies[0];
+    if (r && (r.cmd !== "receive_scraped_text" || r.args.id !== 7)) problems.push(`回覆的指令或編號不對：${JSON.stringify(r)}`);
+    if (r && !same(r.args.text, c.expectReply)) problems.push(`回覆不同\n  實際：${JSON.stringify(r.args.text)}\n  預期：${JSON.stringify(c.expectReply)}`);
+    if (pagehide !== c.expectPagehide) problems.push(`pagehide 補送 ${pagehide} 次（預期 ${c.expectPagehide}）`);
+    if (q.sources.some((s) => s !== "user")) problems.push(`有改動不是 source "user"（Yjs 不會同步）：${JSON.stringify(q.sources)}`);
+    if (!c.noQuill && !(window.__collabGuardIgnoreDomUntil >= before)) problems.push("沒有先告訴守門員接下來的畫面變動是 App 寫的（__collabGuardIgnoreDomUntil）");
+    return problems;
+  }
+
+  const lines = [];
+  let failed = 0;
+  const cases = window.__collabCases;
+  if (!Array.isArray(cases) || !cases.length) {
+    failed = 1;
+    lines.push("FAIL 找不到 generated/collab-cases.js：先跑 cargo test --workspace 產生測試案例。");
+  } else {
+    for (const c of cases) {
+      let problems;
+      try { problems = runCase(c); } catch (e) { problems = [`例外：${e}`]; }
+      if (problems.length) { failed++; lines.push(`FAIL ${c.name}\n${problems.join("\n")}`); }
+      else lines.push(`ok   ${c.name}`);
+    }
+  }
+  const total = Array.isArray(cases) ? cases.length : 1;
+  lines.unshift(`${total - failed} passed, ${failed} failed (of ${total})`);
+  document.getElementById("out").textContent = lines.join("\n");
+  window.__result = { total, failed, lines };
+</script>
