@@ -1295,12 +1295,59 @@ const COLLAB_IDLE_SCRIPT: &str = r#"
 (function () {
   var t = window.__nstLastInputAt || 0;
   var secs = t ? Math.floor((Date.now() - t) / 1000) : 999999;
+  // 守門員 1.5.0：卡在待同步而自動重整過，就把那次的紀錄一起帶回來（讀走就清掉）。
+  var out = String(secs);
+  var g = window.__collabGuard;
+  if (g && g.autoReload) {
+    out += '|' + JSON.stringify(g.autoReload);
+    g.autoReload = null;
+  }
   if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
-    window.__TAURI__.core.invoke('receive_scraped_text', { text: { Ok: String(secs) }, id: window.__nstReqId })
+    window.__TAURI__.core.invoke('receive_scraped_text', { text: { Ok: out }, id: window.__nstReqId })
       .catch(function () {});
   }
 })();
 "#;
+
+/// `COLLAB_IDLE_SCRIPT` 的回覆：`秒數` 或 `秒數|守門員自動重整紀錄(JSON)`（v0.3.42）。
+fn split_idle_reply(text: &str) -> (Option<u64>, Option<String>) {
+    let text = text.trim();
+    match text.split_once('|') {
+        Some((secs, report)) => (secs.trim().parse().ok(), Some(report.to_string())),
+        None => (text.parse().ok(), None),
+    }
+}
+
+/// 守門員卡在「待同步」自動重整的那一行決策紀錄（v0.3.42）。11/20 App 寫進去的稿別人看不到，
+/// 要手動重整協作視窗才推上去；現在守門員會自己重整，這行讓事後查得到。
+fn auto_reload_log_line(report: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(report).unwrap_or(serde_json::Value::Null);
+    let num = |k: &str| v.get(k).and_then(|x| x.as_i64());
+    let at = v.get("at").and_then(|x| x.as_str()).unwrap_or("");
+    let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+    format!(
+        "[重整] 協作視窗卡在「{status}」{} 秒，守門員自動重整（上次推送 {} 秒前；重整時間 {at}）",
+        num("seconds").map_or("?".into(), |n| n.to_string()),
+        num("lastPushAgo").map_or("?".into(), |n| n.to_string()),
+    )
+}
+
+#[cfg(test)]
+mod idle_reply_tests {
+    use super::*;
+
+    #[test]
+    fn the_idle_reply_carries_the_guard_auto_reload_report() {
+        assert_eq!(split_idle_reply("42"), (Some(42), None));
+        let (secs, report) = split_idle_reply(r#"5|{"at":"2026-11-20T09:10:00.000Z","status":"待同步 3 筆","seconds":61,"lastPushAgo":75}"#);
+        assert_eq!(secs, Some(5));
+        let line = auto_reload_log_line(&report.unwrap());
+        assert!(line.starts_with("[重整] 協作視窗卡在「待同步 3 筆」61 秒"), "{line}");
+        assert!(line.contains("上次推送 75 秒前"), "{line}");
+        // 壞掉的 JSON 也要記一行，不能讓紀錄消失。
+        assert!(auto_reload_log_line("not json").starts_with("[重整]"));
+    }
+}
 
 /// 操作中暫停（v0.3.15）：協作視窗多久沒有操作（秒）。沒開協作視窗、別的協作操作正在
 /// 進行、或 3 秒內問不到，都回 None（當作沒在操作），不排隊等，免得拖慢每一輪。
@@ -1316,7 +1363,13 @@ async fn collab_idle_seconds(
     }
     let Ok(_turn) = state.collab_turn.try_lock() else { return Ok(None) };
     match tokio::time::timeout(std::time::Duration::from_secs(3), eval_in_collab_locked(&app, &state, COLLAB_IDLE_SCRIPT)).await {
-        Ok(Ok(text)) => Ok(text.trim().parse::<u64>().ok()),
+        Ok(Ok(text)) => {
+            let (secs, report) = split_idle_reply(&text);
+            if let (Some(line), Some(dir)) = (report.as_deref().map(auto_reload_log_line), inews_log_dir()) {
+                inews::append_log(&dir, &line);
+            }
+            Ok(secs)
+        }
         _ => Ok(None),
     }
 }

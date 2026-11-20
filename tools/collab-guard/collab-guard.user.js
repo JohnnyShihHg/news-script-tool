@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         協作工具守門員
 // @namespace    news-script-tool
-// @version      1.4.1
+// @version      1.5.0
 // @description  擋住協作工具的毛病：新分頁讀不完要手動重整、改動卡在本機沒上傳、重複行螢光閃爍、捲動被拉回去。只讀不改文件內容。
 // @match        https://*.chatgpt.site/*
 // @match        http://*.chatgpt.site/*
@@ -32,7 +32,10 @@
     scrollGuardMs: 1200,       // 使用者停止捲動後多久內的程式捲動視為「被拉走」
     scrollGuardMinJumpPx: 80,  // 跳超過這個距離才攔
     coldStartReloadSeconds: 20, // 新開分頁超過這麼久還在「正在載入共同文章」就自動重整一次。0 = 關閉
-    autoReloadAfterStuckSeconds: 0, // 0 = 關閉。設成例如 120 就會在卡住兩分鐘後自動重載
+    // 卡在「待同步」（改動沒推上去）超過這麼久、而且 10 秒沒人操作，就自動重整一次。0 = 關閉。
+    // 1.5.0 起預設開 60 秒：11/20 App 寫進去的稿別人看不到，要手動重整 App 的協作視窗才推上去。
+    // 重整後的上傳路徑沒有補送的 48,000 字上限。只看「待同步」：載入中、連線中、離線重整也沒用。
+    autoReloadAfterStuckSeconds: 60,
     reloadCooldownMinutes: 5,  // 兩次自動重載至少間隔這麼久，避免伺服器掛掉時無限重載
     staleSeconds: 90,          // 收到別人的更新、畫面卻一直沒變超過這麼久，就當作「接收停擺」
     staleMinUpdates: 3,        // 而且這段時間至少收到這麼多筆（避免一兩筆不顯示的小更新誤判）
@@ -58,10 +61,22 @@
   if (window.__collabGuardConfig) Object.assign(CONFIG, window.__collabGuardConfig);
 
   // 給 App 看的狀態（1.4.0）：開頁補讀完成之前，App 不比對、不寫入。
-  const publicState = { version: "1.4.1", coldBackfillDone: !CONFIG.coldBackfill, coldRequestedAt: 0, coldAttempts: 0, coldLastError: "" };
+  const publicState = { version: "1.5.0", coldBackfillDone: !CONFIG.coldBackfill, coldRequestedAt: 0, coldAttempts: 0, coldLastError: "", autoReload: null };
   window.__collabGuard = publicState;
 
   const RELOAD_MARK_KEY = "collabGuardReloadedAt";
+  // 1.5.0：卡在待同步而自動重整時，重整前記下原因；重整後放進 publicState.autoReload，
+  // App 讀走後寫進決策紀錄（讀走就清掉，只記一次）。
+  const AUTO_RELOAD_REPORT_KEY = "collabGuardAutoReloadReport";
+  try {
+    const report = sessionStorage.getItem(AUTO_RELOAD_REPORT_KEY);
+    if (report) {
+      sessionStorage.removeItem(AUTO_RELOAD_REPORT_KEY);
+      publicState.autoReload = JSON.parse(report);
+    }
+  } catch (e) {
+    console.warn("[守門員] 讀不到自動重整紀錄", e);
+  }
   const SCROLL_MARK_KEY = "collabGuardScrollTop";
 
   // 比對刻意放寬到整個 chatgpt.site：原本綁死 /helper4 這個路徑，只要網址帶了不同的
@@ -382,6 +397,12 @@
     } else {
       state.stuckSince = 0;
     }
+    // 自動重整只看「待同步」（1.5.0）：改動卡在本機沒推上去，重整才救得回來。
+    if (/待同步/.test(pageStatus)) {
+      if (!state.pushStuckSince) state.pushStuckSince = Date.now();
+    } else {
+      state.pushStuckSince = 0;
+    }
     // 紅框預設不顯示；唯一例外是「收不到別人的內容、你卻正在打字」—— 這時打的字可能被
     // 排到文件中間，要讓你知道（使用者 11/11 決定）。
     const typingWhileStalled = receiveStalled && Date.now() - state.lastUserInputAt < 30_000;
@@ -399,8 +420,10 @@
 
     if (
       CONFIG.autoReloadAfterStuckSeconds > 0 &&
-      state.stuckSince &&
-      Date.now() - state.stuckSince > CONFIG.autoReloadAfterStuckSeconds * 1000 &&
+      state.pushStuckSince &&
+      Date.now() - state.pushStuckSince > CONFIG.autoReloadAfterStuckSeconds * 1000 &&
+      // App 剛寫入或校正（會設 __collabGuardIgnoreDomUntil）的幾秒內不重整，免得寫到一半被打斷。
+      Date.now() > (window.__collabGuardIgnoreDomUntil || 0) + 5000 &&
       Date.now() - state.lastUserInputAt > 10_000
     ) {
       // 重載會走兩條上傳路徑：離開前補送，以及重載後 bootstrap 的分塊推送。
@@ -413,8 +436,16 @@
         try {
           sessionStorage.setItem(RELOAD_MARK_KEY, String(Date.now()));
           if (scroller) sessionStorage.setItem(SCROLL_MARK_KEY, String(scroller.scrollTop));
+          const report = {
+            at: new Date().toISOString(),
+            status: pageStatus,
+            seconds: Math.round((Date.now() - state.pushStuckSince) / 1000),
+            lastPushAgo: state.lastPushAt ? Math.round((Date.now() - state.lastPushAt) / 1000) : null,
+          };
+          sessionStorage.setItem(AUTO_RELOAD_REPORT_KEY, JSON.stringify(report));
+          logStaleEvent("卡在待同步，自動重整", report);
         } catch (e) {
-          /* 無痕模式之類的存不進去，不影響重載 */
+          console.warn("[守門員] 自動重整前記錄失敗（不影響重整）", e);
         }
         location.reload();
       }
