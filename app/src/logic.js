@@ -656,6 +656,139 @@
     );
   }
 
+  // --- 從 app.js 搬過來的寫入判斷（v0.3.44）。app.js 只帶入狀態、呼叫這些。---
+
+  /** `07:00` → 420；格式不對（含空白）→ null。 */
+  function hhmmToMinutes(text) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(text ?? "").trim());
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  }
+
+  /**
+   * 播出日裡的第幾分鐘（播出日從 `dayStartText` 開始，例 02:00）。設定格式錯時退回 02:00
+   * （設定頁會擋，這裡只防壞掉的 config.toml）；預設值本身在後端。
+   */
+  function broadcastMinute(minutes, dayStartText) {
+    const dayStart = hhmmToMinutes(dayStartText) ?? 120;
+    return (((minutes - dayStart) % 1440) + 1440) % 1440;
+  }
+
+  /** 每天開始寫入的時間在播出日裡的第幾分鐘；沒設（空白）→ null（不限制）。cfg：{ broadcast_day_start, write_start }。 */
+  function writeStartMinute(cfg) {
+    const start = hhmmToMinutes(cfg?.write_start);
+    return start === null ? null : broadcastMinute(start, cfg?.broadcast_day_start);
+  }
+
+  /** 現在（當天第幾分鐘）還沒到每天開始寫入的時間（v0.3.26）。 */
+  function isBeforeWriteStart(nowMinutes, cfg) {
+    const start = writeStartMinute(cfg);
+    return start !== null && broadcastMinute(nowMinutes, cfg?.broadcast_day_start) < start;
+  }
+
+  /** 這張 iNEWS 卡片屬於開始寫入時間以前的節次（例：開始時間 07:00，0600 節的稿）。手動載入的不算。 */
+  function isBeforeWriteStartShow(item, cfg) {
+    const start = writeStartMinute(cfg);
+    const show = item?.inews?.show ?? "";
+    if (start === null || !/^\d{4}$/.test(show) || item.inews?.manual) return false;
+    return broadcastMinute(Number(show.slice(0, 2)) * 60 + Number(show.slice(2)), cfg?.broadcast_day_start) < start;
+  }
+
+  /**
+   * 已收尾的節次欠著分隔線、即使沒有稿要一起寫（state：{ lastShow, closed, programs }）。
+   * 跟寫入時用同一個 composeInewsWrite 算，空的一批算得出文字就是欠著。
+   */
+  function isDividerOwed(items, writtenKeys, state, divider, toText) {
+    if (!state?.lastShow || !state.closed?.has(state.lastShow)) return false;
+    const pending = pendingShows(items, [], writtenKeys);
+    return composeInewsWrite([], { lastShow: state.lastShow, closed: state.closed, pending, programs: state.programs }, divider, toText).text.trim() !== "";
+  }
+
+  /** 這次寫入前要不要讀預列清單（v0.3.23）：後端說今天段落還空著，而且這個播出日還沒補過。 */
+  function needsPrelist(wanted, day, doneFor) {
+    return !!wanted && !!day && doneFor !== day;
+  }
+
+  /**
+   * 寫入結束後「哪個播出日已經補過預列」（v0.3.44）。以前一讀到預列清單就記成補過，那次寫入
+   * 若沒寫成（未就緒、逾時、失敗），當天就再也不補。改成寫入成功才記；沒寫成維持原樣，
+   * 下一輪再讀一次。文件裡已經有今天的內容（含別人先補的預列）時，比對和後端寫入前都會判斷
+   * 「不需要補」，不會重複。attemptedFor：這次寫入有讀預列清單的播出日（沒讀就是空字串）。
+   */
+  function prelistDoneAfterWrite(doneFor, attemptedFor, wrote) {
+    return wrote && attemptedFor ? attemptedFor : doneFor;
+  }
+
+  /**
+   * 讀到的預列清單 → 要寫進文件的行（`(X)slug<Tab>樣式`），並標出這一批裡剛好是預列稿的
+   * （寫入時加 (X)，會設 `prelisted = true`）。
+   */
+  function applyPrelist(list, outgoing, slugOf) {
+    const slugs = new Set((list ?? []).map((p) => String(p.slug ?? "").trim()));
+    for (const i of outgoing ?? []) if (slugs.has(String(slugOf(i) ?? "").trim())) i.prelisted = true;
+    return (list ?? []).map((p) => `(X)${p.slug}${p.style ? `\t${p.style}` : ""}`);
+  }
+
+  /** 自動寫入前再擋一次：同一個版本（或這次 session 寫過的 slug｜版本）不重複寫。 */
+  function freshForWrite(ready, writtenKeys, writtenSlugs, slugOf) {
+    return (ready ?? []).filter(
+      (i) => isPendingWrite(i, writtenKeys) && !writtenSlugs.has(`${slugOf(i)}|${i.inews?.version ?? ""}`)
+    );
+  }
+
+  /**
+   * 寫入成功後的狀態更新（自動、手動共用；v0.3.44 起手動寫入也走這裡）：記下寫過的版本、slug、稿（疑似誤寫用）、內容指紋，並把卡片
+   * 改成「已在文件、不勾選」—— 下一輪比對也會得到同樣的結果。rec：{ writtenKeys, writtenSlugs,
+   * writtenStories, writtenPrints }（都會被改）。
+   */
+  function recordAutoWrite(written, rec, slugOf) {
+    for (const i of written ?? []) {
+      const key = writtenKey(i);
+      if (key) rec.writtenKeys.add(key);
+      rec.writtenSlugs.add(slugOf(i));
+      rec.writtenSlugs.add(`${slugOf(i)}|${i.inews?.version ?? ""}`);
+      if (i.inews) rec.writtenStories.set(i.inews.key, { slug: slugOf(i), show: i.inews.show });
+      const print = contentPrint(i);
+      if (print) rec.writtenPrints.add(print);
+      i.included = false;
+      i.defaultIncluded = false;
+      delete i.userIncluded;
+      i.alreadyInDoc = true;
+    }
+  }
+
+  /** 寫進決策紀錄的一行：幾則、哪些 slug、分隔線、日期分隔線。 */
+  function writeLogNote(written, dividers, dateHeader, slugOf) {
+    const slugs = (written ?? []).map(slugOf);
+    return (
+      `${slugs.length} 則` +
+      (slugs.length ? `（${slugs.join("、")}）` : "") +
+      ((dividers ?? []).length ? `｜分隔線 ${dividers.join("、")}` : "") +
+      (dateHeader ? `｜日期分隔線 ${dateHeader}` : "")
+    );
+  }
+
+  /** 畫面上「等上一節補掃完」的說明。 */
+  function heldText(held, lastShow, sweepDelayMinutes) {
+    const shows = [...new Set((held ?? []).map((i) => i.inews?.show))].join("、");
+    return `${(held ?? []).length} 則 ${shows} 的稿等 ${lastShow} 節延遲補掃完成、寫完分隔線後再寫入（換節次後 ${sweepDelayMinutes} 分鐘）。`;
+  }
+
+  /**
+   * 同一種狀況只記一次（v0.3.40）：跟上次記的一樣就回 ""（不記）；`line` 傳空字串表示狀況解除，
+   * 下次再發生會再記。`last` 是 Map（kind → 上次的內容），會被改。回傳要記的那一行。
+   */
+  function noteChange(last, kind, line) {
+    if ((last.get(kind) ?? "") === line) return "";
+    last.set(kind, line);
+    return line;
+  }
+
+  /** 協作工具還在載入或沒連上時，讀取文件的腳本回傳的錯誤帶這個記號（v0.3.15）。 */
+  const COLLAB_NOT_READY = "[未就緒]";
+  function isCollabNotReady(err) {
+    return String(err).includes(COLLAB_NOT_READY);
+  }
+
   /**
    * Ticked, not handled in the doc, and this exact version not yet written. Covers
    * both "waiting for keywords" and "waiting to be written".
@@ -1088,6 +1221,22 @@
     reopenForRewrite,
     stuckReasons,
     heldReasonLine,
+    hhmmToMinutes,
+    broadcastMinute,
+    writeStartMinute,
+    isBeforeWriteStart,
+    isBeforeWriteStartShow,
+    isDividerOwed,
+    needsPrelist,
+    applyPrelist,
+    freshForWrite,
+    recordAutoWrite,
+    prelistDoneAfterWrite,
+    writeLogNote,
+    heldText,
+    noteChange,
+    COLLAB_NOT_READY,
+    isCollabNotReady,
     keywordCsv,
     pendingShows,
     isRerunStyle,

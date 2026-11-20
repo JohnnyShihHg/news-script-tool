@@ -59,6 +59,19 @@ const {
   restoreWriteSession,
   contentPrint,
   adoptWrittenPrints,
+  isBeforeWriteStart,
+  isBeforeWriteStartShow,
+  isDividerOwed,
+  needsPrelist,
+  applyPrelist,
+  freshForWrite,
+  recordAutoWrite,
+  prelistDoneAfterWrite,
+  writeLogNote: writeLogNoteFor,
+  heldText: heldTextFor,
+  noteChange,
+  COLLAB_NOT_READY,
+  isCollabNotReady,
 } = window.AppLogic;
 
 /** @type {Array<{dto: any, id: string, included: boolean, title: string, body: string, keywords: string, keywordStatus: string, keywordError: string}>} */
@@ -289,35 +302,16 @@ function keywordTargets() {
 // 設定 inews.write_start（預設 07:00）：播出日開始（02:00）到這個時間之前，自動流程照常讀 iNEWS、
 // 比對、產生關鍵字，但不寫入協作文件；時間到了才開始寫，而且只寫這個時間之後的節次 ——
 // 跟 07:00 才打開工具一樣。早上 06:00 到班就可以先開著。空白＝不限制。
-function hhmmToMinutes(text) {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(String(text ?? "").trim());
-  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
-}
-
-/** 播出日裡的第幾分鐘（播出日從 broadcast_day_start 開始）。 */
-function broadcastMinute(minutes) {
-  // 設定格式錯時退回 02:00（設定頁會擋，這裡只防壞掉的 config.toml）；預設值本身在後端。
-  const dayStart = hhmmToMinutes(inewsCfg.broadcast_day_start) ?? 120;
-  return (((minutes - dayStart) % 1440) + 1440) % 1440;
-}
-
-function writeStartMinute() {
-  const start = hhmmToMinutes(inewsCfg.write_start);
-  return start === null ? null : broadcastMinute(start);
-}
+// 判斷在 logic.js（isBeforeWriteStart／isBeforeWriteStartShow），這裡只帶入設定和現在時間。
 
 /** 現在還沒到每天開始寫入的時間。 */
 function beforeWriteStart(now = new Date()) {
-  const start = writeStartMinute();
-  return start !== null && broadcastMinute(now.getHours() * 60 + now.getMinutes()) < start;
+  return isBeforeWriteStart(now.getHours() * 60 + now.getMinutes(), inewsCfg);
 }
 
 /** 這張 iNEWS 卡片屬於開始寫入時間以前的節次（例：開始時間 07:00，0600 節的稿）。 */
 function beforeWriteStartShow(item) {
-  const start = writeStartMinute();
-  const show = item.inews?.show ?? "";
-  if (start === null || !/^\d{4}$/.test(show) || item.inews?.manual) return false;
-  return broadcastMinute(Number(show.slice(0, 2)) * 60 + Number(show.slice(2))) < start;
+  return isBeforeWriteStartShow(item, inewsCfg);
 }
 
 function loadSummary(summary) {
@@ -787,15 +781,16 @@ let guardWaitLogged = false;
 let vanishStreaks = new Map();
 const VANISH_ROUNDS = 3;
 let prelistDoneFor = "";
+/** 這次寫入有讀預列清單的播出日；寫入成功才記成「補過」（prelistDoneAfterWrite）。 */
+let prelistAttemptFor = "";
 
 async function prelistForWrite(outgoing) {
-  if (!prelistWanted || !compareDay || prelistDoneFor === compareDay) return [];
+  prelistAttemptFor = "";
+  if (!needsPrelist(prelistWanted, compareDay, prelistDoneFor)) return [];
   try {
     const list = await invoke("fetch_prelist");
-    prelistDoneFor = compareDay;
-    const slugs = new Set(list.map((p) => p.slug.trim()));
-    for (const i of outgoing) if (slugs.has(slugOf(i).trim())) i.prelisted = true;
-    return list.map((p) => `(X)${p.slug}${p.style ? `\t${p.style}` : ""}`);
+    prelistAttemptFor = compareDay;
+    return applyPrelist(list, outgoing, slugOf);
   } catch (err) {
     logDecision(`[預列] 讀不到預列清單，這次先不補：${err}`);
     return [];
@@ -892,17 +887,14 @@ async function writeBackToCollab() {
     });
     const msg = res.message ?? "整批都已經在文件裡了，這次沒有寫入。";
     dateHeaderWritten();
-    outgoing.forEach((i) => {
-      writtenSlugs.add(slugOf(i));
-      const key = writtenKey(i);
-      if (key) writtenKeys.add(key);
-      const print = contentPrint(i);
-      if (print) writtenPrints.add(print);
-      // 寫過了：手動勾選的記憶清掉，下一次比對照文件狀態重算（不然會一直勾著）。
-      delete i.userIncluded;
-    });
+    prelistDoneFor = prelistDoneAfterWrite(prelistDoneFor, prelistAttemptFor, true);
+    // 寫過了：跟自動寫入記一樣的東西（v0.3.44），卡片改成「已在文件、不勾選」。
+    // 「上一則寫到哪一節」不動：手動可以任意勾不同節次的稿，拿來推進會讓中間節次的分隔線被跳過。
+    recordAutoWrite(outgoing, { writtenKeys, writtenSlugs, writtenStories, writtenPrints }, slugOf);
     saveWriteSession();
     status.textContent = `✅ ${msg}`;
+    renderFunnel();
+    render();
   } catch (err) {
     status.className = "compare-status error";
     status.textContent = `⚠ 寫入失敗：${err}`;
@@ -1228,9 +1220,8 @@ function stopInewsAuto(message) {
  */
 const lastNotes = new Map();
 function noteOnce(kind, line) {
-  if ((lastNotes.get(kind) ?? "") === line) return;
-  lastNotes.set(kind, line);
-  if (line) logDecision(line);
+  const changed = noteChange(lastNotes, kind, line);
+  if (changed) logDecision(changed);
 }
 
 async function runInewsPipeline() {
@@ -1354,23 +1345,22 @@ function inewsWriteText(ready) {
 
 /// A closed show's divider is due even when no story comes with it.
 function dividerOwed() {
-  return !!lastWrittenShow && closedShows.has(lastWrittenShow) && inewsWriteText([]).text.trim() !== "";
+  return isDividerOwed(
+    items,
+    writtenKeys,
+    { lastShow: lastWrittenShow, closed: closedShows, programs: programDividers },
+    { format: inewsCfg.divider_format, position: inewsCfg.divider_position },
+    (group) => buildOutputText(group.map(outputFieldsOf))
+  );
 }
 
 function heldText(held) {
-  const shows = [...new Set(held.map((i) => i.inews?.show))].join("、");
-  return `${held.length} 則 ${shows} 的稿等 ${lastWrittenShow} 節延遲補掃完成、寫完分隔線後再寫入（換節次後 ${inewsCfg.sweep_delay_minutes} 分鐘）。`;
+  return heldTextFor(held, lastWrittenShow, inewsCfg.sweep_delay_minutes);
 }
 
 /// 寫進決策紀錄的一行：幾則、哪些 slug、分隔線。
 function writeLogNote(written, dividers) {
-  const slugs = written.map(slugOf);
-  return (
-    `${written.length} 則` +
-    (slugs.length ? `（${slugs.join("、")}）` : "") +
-    (dividers.length ? `｜分隔線 ${dividers.join("、")}` : "") +
-    (dateHeaderOwed ? `｜日期分隔線 ${dateHeaderOwed}` : "")
-  );
+  return writeLogNoteFor(written, dividers, dateHeaderOwed, slugOf);
 }
 
 /**
@@ -1437,7 +1427,7 @@ function hideInewsConfirm() {
 
 async function writeInewsItems(ready) {
   // 寫入前再擋一次：同一個版本（或這次 session 寫過的 slug）不重複寫入。
-  const fresh = ready.filter((i) => isPendingWrite(i, writtenKeys) && !writtenSlugs.has(`${slugOf(i)}|${i.inews?.version ?? ""}`));
+  const fresh = freshForWrite(ready, writtenKeys, writtenSlugs, slugOf);
   const { text, pieces, lastShow, written, held, dividers } = inewsWriteText(fresh);
   if (!text.trim()) {
     if (held.length) showHeldNotice(held);
@@ -1464,20 +1454,9 @@ async function writeInewsItems(ready) {
       inewsStatus(`寫入前重新比對，已略過文件裡已有的 ${res.dropped.length} 則：${res.dropped.join("、")}`, "warn");
     }
     dateHeaderWritten();
-    for (const i of written) {
-      const key = writtenKey(i);
-      if (key) writtenKeys.add(key);
-      writtenSlugs.add(slugOf(i));
-      writtenSlugs.add(`${slugOf(i)}|${i.inews?.version ?? ""}`);
-      if (i.inews) writtenStories.set(i.inews.key, { slug: slugOf(i), show: i.inews.show });
-      const print = contentPrint(i);
-      if (print) writtenPrints.add(print);
-      // 已經在文件裡了：取消勾選，下一輪比對也會得到同樣的結果。
-      i.included = false;
-      i.defaultIncluded = false;
-      delete i.userIncluded;
-      i.alreadyInDoc = true;
-    }
+    prelistDoneFor = prelistDoneAfterWrite(prelistDoneFor, prelistAttemptFor, true);
+    // 記下寫過的，卡片改成「已在文件、不勾選」：下一輪比對也會得到同樣的結果。
+    recordAutoWrite(written, { writtenKeys, writtenSlugs, writtenStories, writtenPrints }, slugOf);
     lastWrittenShow = lastShow;
     saveWriteSession();
     hideInewsConfirm();
@@ -1824,11 +1803,6 @@ function cardStateOf(slug) {
 
 el("rundownSearchBtn")?.addEventListener("click", openRundownSearch);
 
-/** 協作工具還在載入或沒連上時，讀取文件的腳本回傳的錯誤帶這個記號（v0.3.15）。 */
-const COLLAB_NOT_READY = "[未就緒]";
-function isCollabNotReady(err) {
-  return String(err).includes(COLLAB_NOT_READY);
-}
 
 async function confirmInewsWrite() {
   const btn = el("inewsConfirmBtn");

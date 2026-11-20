@@ -1492,3 +1492,172 @@ test("TEL stories get no keywords and are written without waiting for them", () 
   assert.deepEqual(L.selectKeywordTargets(items, ""), []);
   assert.deepEqual(L.autoWriteCandidates(items, new Set(), "").map((i) => i.id), ["inews-A:1", "inews-A:2"]);
 });
+
+// --- 從 app.js 搬過來的寫入判斷（v0.3.44）：每個都看「重開 App 之後」和「換播出日」---
+
+const appSlugOf = (item) => (item.dto[item.kind] ?? item.dto).slug; // 同 app.js 的 slugOf
+const START_CFG = { broadcast_day_start: "02:00", write_start: "07:00" };
+const at = (hhmm) => L.hhmmToMinutes(hhmm);
+
+test("write start: before 07:00 of the broadcast day nothing is written; 00:00–01:59 still belongs to yesterday", () => {
+  assert.equal(L.hhmmToMinutes("07:00"), 420);
+  assert.equal(L.hhmmToMinutes(" 7:05 "), 425);
+  assert.equal(L.hhmmToMinutes(""), null);
+  assert.equal(L.hhmmToMinutes("7點"), null);
+  assert.equal(L.broadcastMinute(at("02:00"), "02:00"), 0);
+  assert.equal(L.broadcastMinute(at("01:59"), "02:00"), 1439);
+  assert.equal(L.isBeforeWriteStart(at("06:59"), START_CFG), true);
+  assert.equal(L.isBeforeWriteStart(at("07:00"), START_CFG), false);
+  assert.equal(L.isBeforeWriteStart(at("23:30"), START_CFG), false);
+  // 換播出日：01:30 還是前一天（照寫）；02:00 新的播出日開始，又回到「還沒到開始時間」。
+  assert.equal(L.isBeforeWriteStart(at("01:30"), START_CFG), false);
+  assert.equal(L.isBeforeWriteStart(at("02:00"), START_CFG), true);
+  // 空白＝不限制；播出日分界寫壞了退回 02:00。
+  assert.equal(L.isBeforeWriteStart(at("03:00"), { ...START_CFG, write_start: "" }), false);
+  assert.equal(L.isBeforeWriteStart(at("06:00"), { broadcast_day_start: "壞掉", write_start: "07:00" }), true);
+  // 重開 App：只看設定（從後端重新讀到的同一份），不靠記憶體裡的狀態。
+  const reloaded = JSON.parse(JSON.stringify(START_CFG));
+  assert.equal(L.isBeforeWriteStart(at("06:59"), reloaded), true);
+  assert.equal(L.writeStartMinute(reloaded), 300);
+  assert.equal(L.writeStartMinute({ ...START_CFG, write_start: "" }), null);
+});
+
+test("write start per show: 0600 waits, 0700 and the midnight shows of the day before do not, manual cards never wait", () => {
+  const card = (show, extra = {}) => ({ inews: { show, ...extra } });
+  assert.equal(L.isBeforeWriteStartShow(card("0600"), START_CFG), true);
+  assert.equal(L.isBeforeWriteStartShow(card("0700"), START_CFG), false);
+  // 換播出日的那幾節：2400（午夜那節）、0100 屬於前一天，照寫。
+  assert.equal(L.isBeforeWriteStartShow(card("2400"), START_CFG), false);
+  assert.equal(L.isBeforeWriteStartShow(card("0100"), START_CFG), false);
+  assert.equal(L.isBeforeWriteStartShow(card("0200"), START_CFG), true);
+  assert.equal(L.isBeforeWriteStartShow(card("0600", { manual: true }), START_CFG), false);
+  assert.equal(L.isBeforeWriteStartShow(card(""), START_CFG), false);
+  assert.equal(L.isBeforeWriteStartShow({}, START_CFG), false);
+  assert.equal(L.isBeforeWriteStartShow(card("0600"), { ...START_CFG, write_start: "" }), false);
+  // 重開 App：同一張卡、重新讀到的設定，結果一樣。
+  assert.equal(L.isBeforeWriteStartShow(card("0600"), JSON.parse(JSON.stringify(START_CFG))), true);
+});
+
+test("divider owed: a closed show's divider is due with no story, and survives a restart only through the saved session", () => {
+  const owed = (state, items = [], written = new Set()) => L.isDividerOwed(items, written, state, AFTER, toText);
+  const programs = new Map();
+  assert.equal(owed({ lastShow: "0800", closed: new Set(["0800"]), programs }), true);
+  // 還沒補掃完（沒收尾）、或還沒寫過任何稿：不欠。
+  assert.equal(owed({ lastShow: "0800", closed: new Set(), programs }), false);
+  assert.equal(owed({ lastShow: "", closed: new Set(["0800"]), programs }), false);
+  // 0800 還有稿在等關鍵字：分隔線等它，先不欠。
+  const waiting = heldCard("等關鍵字0800", "0800");
+  assert.equal(owed({ lastShow: "0800", closed: new Set(["0800"]), programs }, [waiting]), false);
+  assert.equal(owed({ lastShow: "0800", closed: new Set(["0800"]), programs }, [waiting], new Set([L.writtenKey(waiting)])), true);
+  // 重開 App：沒有存檔的話上一則寫到的節次是空的 → 不知道欠分隔線（v0.3.38 以前就是這樣漏寫）。
+  assert.equal(owed({ lastShow: "", closed: new Set(), programs: new Map() }), false);
+  // 有存檔、同一個播出日：接回來，照樣欠著。
+  const saved = JSON.parse(JSON.stringify(L.writeSessionSnapshot("1120", "0800", new Set(["0800"]), programs)));
+  const r = L.restoreWriteSession(saved, { day: "1120", show: "0900", previous_show: "0800" });
+  assert.equal(owed({ lastShow: r.lastShow, closed: new Set(r.closed), programs: new Map(r.programs) }), true);
+  // 換播出日：前一天的存檔不接 → 不欠前一天的分隔線。
+  assert.equal(L.restoreWriteSession(saved, { day: "1121", show: "0600" }), null);
+});
+
+test("prelist: read once per broadcast day; a restart reads again, a new day reads again", () => {
+  assert.equal(L.needsPrelist(true, "1120", ""), true);
+  assert.equal(L.needsPrelist(true, "1120", "1120"), false);
+  assert.equal(L.needsPrelist(false, "1120", ""), false);
+  assert.equal(L.needsPrelist(true, "", ""), false);
+  // 換播出日：昨天補過不算今天。
+  assert.equal(L.needsPrelist(true, "1121", "1120"), true);
+  // 重開 App：記憶體裡的「補過了」沒了，再讀一次（後端寫入當下會再確認今天段落是不是還空著）。
+  assert.equal(L.needsPrelist(true, "1120", ""), true);
+
+  const out = [heldCard("早安預列0600", "0600"), heldCard("一般0600", "0600")];
+  const lines = L.applyPrelist([{ slug: " 早安預列0600 ", style: "SOT" }, { slug: "空樣式", style: "" }], out, appSlugOf);
+  assert.deepEqual(lines, ["(X) 早安預列0600 \tSOT", "(X)空樣式"]);
+  assert.equal(out[0].prelisted, true, "前後空白不算");
+  assert.equal(out[1].prelisted, undefined);
+  assert.deepEqual(L.applyPrelist([], out, appSlugOf), []);
+});
+
+test("auto write bookkeeping: a written version is never fresh again this session; after a restart only the doc compare holds it back", () => {
+  const rec = () => ({ writtenKeys: new Set(), writtenSlugs: new Set(), writtenStories: new Map(), writtenPrints: new Set() });
+  const [card] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲0800", key: "A:1", version: "v1" }]));
+  card.matchStatus = "to_cut";
+  card.keywords = "#甲";
+  const r = rec();
+  assert.deepEqual(L.freshForWrite([card], r.writtenKeys, r.writtenSlugs, appSlugOf), [card]);
+  L.recordAutoWrite([card], r, appSlugOf);
+  assert.ok(r.writtenKeys.has("A:1|v1"));
+  assert.ok(r.writtenSlugs.has("甲0800") && r.writtenSlugs.has("甲0800|v1"));
+  assert.deepEqual(r.writtenStories.get("A:1"), { slug: "甲0800", show: "0800" });
+  assert.equal(r.writtenPrints.size, 1);
+  assert.equal(card.included, false);
+  assert.equal(card.defaultIncluded, false);
+  assert.equal(card.alreadyInDoc, true);
+  assert.deepEqual(L.freshForWrite([card], r.writtenKeys, r.writtenSlugs, appSlugOf), []);
+  // 同一版本換了 key（iNEWS 存檔）：slug｜版本還認得。
+  const [rekeyed] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲0800", key: "A:9", version: "v1" }]));
+  assert.deepEqual(L.freshForWrite([rekeyed], r.writtenKeys, r.writtenSlugs, appSlugOf), []);
+  // 重開 App：這些集合只在記憶體（內容指紋另外存檔），新卡片又是「新的」，靠比對文件擋。
+  const restarted = rec();
+  const [again] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲0800", key: "A:1", version: "v1" }]));
+  assert.deepEqual(L.freshForWrite([again], restarted.writtenKeys, restarted.writtenSlugs, appSlugOf), [again]);
+  // 換播出日：明天同一個 slug 的新版本照寫。
+  const [tomorrow] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "甲0800", key: "B:1", version: "v7" }]));
+  assert.deepEqual(L.freshForWrite([tomorrow], r.writtenKeys, r.writtenSlugs, appSlugOf), [tomorrow]);
+});
+
+test("a manual write records the same as the auto write (v0.3.44): a re-keyed same version is not fresh again", () => {
+  const r = { writtenKeys: new Set(), writtenSlugs: new Set(), writtenStories: new Map(), writtenPrints: new Set() };
+  const [card] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "乙0800", key: "A:2", version: "v1" }]));
+  card.userIncluded = true;
+  L.recordAutoWrite([card], r, appSlugOf);
+  assert.equal(L.recordManualWrite, undefined, "手動、自動只剩一套記錄");
+  assert.ok(r.writtenSlugs.has("乙0800|v1"), "手動寫入也記 slug｜版本");
+  assert.deepEqual(r.writtenStories.get("A:2"), { slug: "乙0800", show: "0800" }, "手動寫入也進疑似誤寫的比對");
+  assert.equal(card.userIncluded, undefined);
+  assert.equal(card.included, false);
+  assert.equal(card.alreadyInDoc, true);
+  // 以前手動寫完、iNEWS 存檔換了 key，同一版本在寫入前那道擋不住。
+  const [rekeyed] = L.inewsItemsFromSummary(inewsSummary("0800", [{ slug: "乙0800", key: "A:7", version: "v1" }]));
+  assert.deepEqual(L.freshForWrite([rekeyed], r.writtenKeys, r.writtenSlugs, appSlugOf), []);
+});
+
+test("prelist is marked done only after the write succeeds (v0.3.44)", () => {
+  // 第一次寫入讀了預列清單，但寫入沒成（未就緒）：維持沒補過，下一輪還會再讀。
+  let done = "";
+  assert.equal(L.needsPrelist(true, "1120", done), true);
+  done = L.prelistDoneAfterWrite(done, "1120", false);
+  assert.equal(done, "");
+  assert.equal(L.needsPrelist(true, "1120", done), true, "沒寫成 → 下一輪再補");
+  // 寫成了才記補過。
+  done = L.prelistDoneAfterWrite(done, "1120", true);
+  assert.equal(L.needsPrelist(true, "1120", done), false);
+  // 這次沒讀預列（例如文件已經有今天的內容）：寫入成功也不改。
+  assert.equal(L.prelistDoneAfterWrite("1119", "", true), "1119");
+  // 換播出日：前一天補過不算今天。
+  assert.equal(L.needsPrelist(true, "1121", done), true);
+  // 文件裡已經有今天的內容（含別人先補的預列）：比對說不需要補，就不讀。
+  assert.equal(L.needsPrelist(false, "1121", ""), false);
+});
+
+test("log note, held text, note-once and the not-ready marker", () => {
+  const w = [heldCard("甲0900", "0900"), heldCard("乙0900", "0900")];
+  assert.equal(L.writeLogNote(w, ["==== 08 ===="], "==========1120==========", appSlugOf),
+    "2 則（甲0900、乙0900）｜分隔線 ==== 08 ====｜日期分隔線 ==========1120==========");
+  assert.equal(L.writeLogNote([], [], "", appSlugOf), "0 則");
+  // 換播出日的第一次寫入會帶日期分隔線；同一天之後就不帶。
+  assert.equal(L.writeLogNote(w.slice(0, 1), [], "", appSlugOf), "1 則（甲0900）");
+  assert.equal(L.heldText(w, "0800", 10), "2 則 0900 的稿等 0800 節延遲補掃完成、寫完分隔線後再寫入（換節次後 10 分鐘）。");
+
+  const last = new Map();
+  assert.equal(L.noteChange(last, "confirm", "[等待確認] A"), "[等待確認] A");
+  assert.equal(L.noteChange(last, "confirm", "[等待確認] A"), "", "一樣的不再記");
+  assert.equal(L.noteChange(last, "other", "[等待確認] A"), "[等待確認] A", "不同種類各記各的");
+  assert.equal(L.noteChange(last, "confirm", ""), "", "解除不記");
+  assert.equal(L.noteChange(last, "confirm", "[等待確認] A"), "[等待確認] A", "解除後再發生會再記");
+  // 重開 App：記憶是空的，同一個狀況會再記一次（紀錄裡看得到重開後還卡著）。
+  assert.equal(L.noteChange(new Map(), "confirm", "[等待確認] A"), "[等待確認] A");
+
+  assert.equal(L.isCollabNotReady("Error: [未就緒] 協作工具還在載入"), true);
+  assert.equal(L.isCollabNotReady(new Error("逾時")), false);
+  assert.equal(L.COLLAB_NOT_READY, "[未就緒]");
+});
