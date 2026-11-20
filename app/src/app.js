@@ -1191,7 +1191,21 @@ function stopInewsAuto(message) {
   el("inewsAutoToggle").checked = false;
   clearTimeout(inewsTimer);
   inewsTimer = null;
-  if (message) inewsStatus(message, "error");
+  if (message) {
+    inewsStatus(message, "error");
+    // 停掉自動刷新也記進紀錄（v0.3.40）：以前只有畫面上的紅字，人不在就查不到。
+    logDecision(`[停止] 自動刷新已停止：${String(message).replace(/^⚠\s*/, "").replace(/\n+/g, " ")}`);
+  }
+}
+
+/**
+ * 同一種狀況只記一次（v0.3.40）：內容跟上次一樣就不記；傳空字串表示狀況解除，下次再發生會再記。
+ */
+const lastNotes = new Map();
+function noteOnce(kind, line) {
+  if ((lastNotes.get(kind) ?? "") === line) return;
+  lastNotes.set(kind, line);
+  if (line) logDecision(line);
 }
 
 async function runInewsPipeline() {
@@ -1261,8 +1275,10 @@ async function runInewsPipeline() {
   if (beforeWriteStart()) {
     hideInewsConfirm();
     inewsStatus(`⏳ 每天 ${inewsCfg.write_start} 才開始寫入協作文件；在那之前照常讀 iNEWS、比對、產生關鍵字。`, "warn");
+    noteOnce("before-start", `[等待寫入] 還沒到每天開始寫入的時間 ${inewsCfg.write_start}，先不寫`);
     return;
   }
+  noteOnce("before-start", "");
   const ready = autoWriteCandidates(items, writtenKeys, noUploadLabel).filter((i) => !beforeWriteStartShow(i));
   const plan = inewsWriteText(ready);
   logHeld(plan.held, ready, plan.written.length === 0 && !plan.text.trim());
@@ -1271,8 +1287,18 @@ async function runInewsPipeline() {
     if (plan.held.length) showHeldNotice(plan.held);
     return;
   }
-  if (inewsCfg.auto_write && !compareHoldsAutoWrite) await writeInewsItems(ready);
-  else showInewsConfirm(plan);
+  if (inewsCfg.auto_write && !compareHoldsAutoWrite) {
+    noteOnce("confirm", "");
+    await writeInewsItems(ready);
+  } else {
+    // 改成等人按確認也記原因（v0.3.40）：以前只在畫面上跳確認列，紀錄裡看起來就是「沒寫」。
+    noteOnce(
+      "confirm",
+      `[等待確認] ${plan.written.length} 則等人按確認才寫：` +
+        (!inewsCfg.auto_write ? "設定裡的「自動寫入」沒開" : "協作文件找不到前一天的段落，跨天比對做不了，改成等人確認")
+    );
+    showInewsConfirm(plan);
+  }
 }
 
 /// Shows that still have entries waiting for keywords or a compare: their divider
@@ -1787,7 +1813,16 @@ function scheduleInewsRound(delayMs) {
   clearTimeout(inewsTimer);
   if (!el("inewsAutoToggle").checked) return;
   inewsTimer = setTimeout(async () => {
-    await inewsRound();
+    // 這一輪出錯也要排下一輪（v0.3.40）：以前錯誤往外丟，下一輪不會再排，自動刷新默默停掉，
+    // 開關卻還是開著，紀錄也什麼都沒有。
+    try {
+      await inewsRound();
+      noteOnce("round-error", "");
+    } catch (err) {
+      console.error(err);
+      inewsStatus(`⚠ 自動刷新這一輪出錯（下一輪會再試）：${err}`, "error");
+      noteOnce("round-error", `[錯誤] 自動刷新這一輪出錯（下一輪會再試）：${String(err?.stack ?? err).split("\n").slice(0, 3).join(" ← ")}`);
+    }
     const secs = Math.max(3, Number(inewsCfg.poll_seconds) || 10);
     scheduleInewsRound(secs * 1000);
   }, delayMs);
