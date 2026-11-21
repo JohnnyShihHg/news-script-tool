@@ -27,7 +27,17 @@ $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 $failures = New-Object System.Collections.Generic.List[string]
 $notes = New-Object System.Collections.Generic.List[string]
 function Step($name) { Write-Host ""; Write-Host "== $name ==" -ForegroundColor Cyan }
-function Fail($msg) { $failures.Add($msg); Write-Host "FAIL $msg" -ForegroundColor Red }
+function Fail($msg) {
+  $failures.Add($msg)
+  Write-Host "FAIL $msg" -ForegroundColor Red
+  # 在 GitHub Actions 上另外印成 annotation：沒登入也能從公開 API 讀到失敗原因
+  # （0.3.43、0.3.46 的 Release 都在 check.ps1 失敗、同一個 commit 的 Check 卻通過，看不到 log）。
+  if ($env:GITHUB_ACTIONS) {
+    $one = ("$msg" -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A')
+    if ($one.Length -gt 3000) { $one = $one.Substring(0, 3000) }
+    Write-Host "::error title=check.ps1::$one"
+  }
+}
 function Pass($msg) { Write-Host "ok   $msg" -ForegroundColor Green }
 
 $toolchain = @()

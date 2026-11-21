@@ -5,7 +5,7 @@
      ?mode=stuck 一直停在載入中（應該剛好自動重整一次）
      ?mode=ok    3 秒後讀完（不重整，記一筆約 3 秒）
      &nostorage=1 模擬網站儲存被封鎖：sessionStorage 一碰就丟錯（應該還是只重整一次）
-     卡住幾秒才重整在這一頁縮短成 4 秒（正式值 20 秒不動）。
+     卡住幾秒才重整在這一頁縮短成 4 秒（ok 模式 10 秒，留空間給慢機器；正式值 20 秒不動）。
      載入後 15 秒自動判 PASS/FAIL，寫在 #verdict 和 window.__verdict（check.ps1 用 Edge headless 讀）。 -->
 <div id="bar"><span id="s">正在載入共同文章</span></div>
 <div class="ql-editor"><p>測試</p></div>
@@ -20,7 +20,9 @@
     Object.defineProperty(window, "sessionStorage", { get() { throw new DOMException("blocked", "SecurityError"); } });
   }
   if (mode === "ok") setTimeout(() => { document.getElementById("s").textContent = "已同步"; }, 3000);
-  window.__collabGuardTestConfig = { coldStartReloadSeconds: 4 };
+  // ok 模式 3 秒讀完、重整門檻要留足空間：以前兩種都設 4 秒，只差 1 秒，GitHub 的機器一慢
+  // 就先觸發重整（0.3.43、0.3.46 的 Release 都因為 ok／ok+nostorage「被重整了」失敗）。
+  window.__collabGuardTestConfig = { coldStartReloadSeconds: mode === "ok" ? 10 : 4 };
 </script>
 <script src="../collab-guard.user.js"></script>
 <pre id="verdict">judging…</pre>
@@ -53,7 +55,7 @@
         verdict([
           [n === 1, "沒有重整"],
           [log.length === 1 && log[0].reloaded === false, "記一筆、沒有重整"],
-          [log.length === 1 && log[0].seconds >= 2.5 && log[0].seconds <= 5, "讀取秒數約 3 秒"],
+          [log.length === 1 && log[0].seconds >= 2.5 && log[0].seconds <= 8, "讀取秒數約 3 秒"],
         ]);
       } else {
         show(`FAIL ${tag}：沒有這個 mode 的判定`);
