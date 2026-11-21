@@ -1247,7 +1247,29 @@
       .map(([key, w]) => ({ key, ...w }));
   }
 
+  /**
+   * 最上面狀態列要顯示的字（改版）：純顯示，不參與任何寫入判斷。
+   * now：Date；auto：自動刷新開著沒；show：iNEWS 目前節次；nextRoundAt：下一輪的毫秒時間（沒排就 null）；
+   * lastWrite：{ at: 毫秒, count: 則數 } 或 null。
+   */
+  function statusBarView({ now, auto, show, nextRoundAt, lastWrite }) {
+    const pad = (n) => String(n).padStart(2, "0");
+    const hms = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const left = auto && nextRoundAt ? Math.max(0, Math.ceil((nextRoundAt - now.getTime()) / 1000)) : null;
+    let tally = "自動刷新關閉";
+    if (auto) tally = show ? `ON AIR ${show}` : "連線 iNEWS 中";
+    else if (show) tally = `${show}・自動刷新關閉`;
+    return {
+      clock: hms(now),
+      tally,
+      live: !!(auto && show),
+      next: left === null ? "—" : `${Math.floor(left / 60)}:${pad(left % 60)}`,
+      lastWrite: lastWrite ? `${hms(new Date(lastWrite.at))} · ${lastWrite.count} 則` : "—",
+    };
+  }
+
   return {
+    statusBarView,
     writeParts,
     unknownReviewTargets,
     vanishedWrites,

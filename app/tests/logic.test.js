@@ -1720,3 +1720,21 @@ test("log note, held text, note-once and the not-ready marker", () => {
   assert.equal(L.isCollabNotReady(new Error("逾時")), false);
   assert.equal(L.COLLAB_NOT_READY, "[未就緒]");
 });
+
+// --- 改版狀態列：只是顯示，但開關、倒數、沒寫過的樣子要對 ---
+
+test("status bar shows ON AIR only while auto refresh runs and a show is known", () => {
+  const now = new Date(2026, 10, 21, 17, 53, 2);
+  const at = now.getTime();
+  const live = L.statusBarView({ now, auto: true, show: "1800", nextRoundAt: at + 42000, lastWrite: { at: at - 32000, count: 4 } });
+  assert.deepEqual(live, { clock: "17:53:02", tally: "ON AIR 1800", live: true, next: "0:42", lastWrite: "17:52:30 · 4 則" });
+
+  const off = L.statusBarView({ now, auto: false, show: "1800", nextRoundAt: at + 42000, lastWrite: null });
+  assert.equal(off.live, false);
+  assert.equal(off.tally, "1800・自動刷新關閉");
+  assert.equal(off.next, "—", "no countdown while auto refresh is off, even if a stale timer time is left");
+  assert.equal(off.lastWrite, "—");
+
+  assert.equal(L.statusBarView({ now, auto: true, show: "", nextRoundAt: null, lastWrite: null }).tally, "連線 iNEWS 中");
+  assert.equal(L.statusBarView({ now, auto: true, show: "1800", nextRoundAt: at - 5000, lastWrite: null }).next, "0:00", "an overdue round never counts negative");
+});

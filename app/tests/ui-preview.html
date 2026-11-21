@@ -1,0 +1,83 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ui preview</title>
+<!-- 主畫面預覽（沒有 Tauri 的瀏覽器用）：假的 invoke 回一份合成稿件，載入真的 index.html／app.js，
+     把幾則設成「已在文件中」、自動刷新開著，用來看改版後的版面。不連 iNEWS、不寫協作文件。
+     要用 http 開（python -m http.server，從 nst-dev 起），網址 /app/tests/ui-preview.html。
+     ?theme=dark 之類可以換主題；?evening=1 切到晚報。設定視窗用 settings-preview.html 看。 -->
+<link rel="stylesheet" href="../src/styles.css" />
+<body>
+<script>
+  const q = new URLSearchParams(location.search);
+  const entry = (kind, slug, time, style, group, title, body) => ({
+    kind,
+    [kind]: { slug, time, style, group, title, body, file_name: `${slug}.txt`, warnings: [] },
+  });
+  const entries = [
+    entry("Passed", "合成颱風路徑1800", "17:44:10", "SOT", "氣象", "颱風路徑北修 北部明起防豪雨", "合成內文：颱風路徑往北修正，北部明天起要注意豪雨。"),
+    entry("Passed", "合成高鐵延誤1800", "17:46:32", "SL", "交通", "高鐵號誌故障 南下班次延誤", "合成內文：高鐵號誌故障，南下班次延誤約二十分鐘。"),
+    entry("Passed", "合成利率決議1800", "17:51:05", "SOT", "財經", "央行維持利率不變", "合成內文：央行今天召開理監事會，決議維持政策利率不變。"),
+    entry("Passed", "合成食安抽驗1800", "17:52:40", "SOT", "生活", "夜市食安抽驗 3 攤不合格", "合成內文：衛生局抽驗夜市攤商，三攤不合格。"),
+    entry("FilteredByStyle", "合成天氣BS1800", "17:50:00", "BS", "氣象", "天氣快報", ""),
+    entry("UnknownStyle", "合成直播連線1800", "17:55:00", "LIVE", "政治", "立院直播連線", "合成內文：立法院現場連線。"),
+  ];
+  const config = {
+    config_version: 17,
+    gemini: { model: "gemini-2.5-flash", max_per_run: 12 },
+    import: { default_folder: "D:\\demo\\今日" },
+    inews: { poll_seconds: 10, divider_format: "==== {hh} ====", write_start: "06:00" },
+    filter: {}, annotations: { no_upload_label: "(勿上網)" }, evening: { anchors: ["合成主播"] },
+    clean: {}, markers: {}, punctuation: { map: {} }, output: { keyword_count: 4, keyword_separator: " ", entry_blank_lines: 1 },
+    ui: { theme: q.get("theme") || "light" },
+  };
+  window.__TAURI__ = {
+    core: {
+      invoke: async (cmd) => {
+        if (cmd === "get_config") return JSON.parse(JSON.stringify(config));
+        if (cmd === "get_api_key_status") return { has_key: true, source: "keyring" };
+        if (cmd === "get_inews_credential_status") return { has_credentials: true, username: "demo" };
+        if (cmd === "import_folder") {
+          return { entries, passed: 4, unknown: 1, needs_manual: 0, filtered: 1, failed: 0 };
+        }
+        throw new Error(`preview: ${cmd} 沒有假資料`);
+      },
+    },
+    event: { listen: async () => () => {} },
+    app: { getVersion: async () => "preview" },
+  };
+  (async () => {
+    const html = await (await fetch("../src/index.html")).text();
+    const body = new DOMParser().parseFromString(html, "text/html").body;
+    body.querySelectorAll("script").forEach((s) => s.remove());
+    document.body.insertAdjacentHTML("afterbegin", body.innerHTML);
+    for (const src of ["../src/logic.js", "../src/app.js"]) {
+      await new Promise((ok, bad) => {
+        const s = document.createElement("script");
+        s.src = src;
+        s.onload = ok;
+        s.onerror = bad;
+        document.body.append(s);
+      });
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    // 模擬「已比對、兩則已寫入、自動刷新開著」的樣子（只改畫面用的狀態）。
+    items.forEach((i, n) => {
+      if (n < 2) { i.alreadyInDoc = true; i.included = false; i.matchStatus = "to_cut"; i.matchedLine = `${i.time.slice(0, 5).replace(":", "")} ${i.dto[i.kind].slug} 寫入的那一行`; }
+      else if (i.bucket === "passed") i.matchStatus = "to_cut";
+    });
+    items[2].collapsed = false;
+    hasCompared = true;
+    inewsShow = "1800";
+    el("inewsAutoToggle").checked = true;
+    nextRoundAt = Date.now() + 42000;
+    lastWriteShown = { at: Date.now() - 32000, count: 4 };
+    el("writeBackBtn").disabled = false;
+    inewsStatus("iNEWS 1800 節（現在 17:53）：有效範圍 17:43:30 ～ 18:58:00。已播出 6 則、範圍內尚未播出 3 則；本輪讀取 9 / 24 則。");
+    renderFunnel();
+    render();
+    renderStatusBar();
+    if (q.get("evening")) setMode("evening");
+    window.__ready = true;
+  })().catch((e) => { window.__error = String(e?.stack ?? e); });
+</script>
+</body>

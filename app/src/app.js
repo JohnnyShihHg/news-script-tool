@@ -3,6 +3,7 @@ const { listen } = window.__TAURI__.event;
 // Pure decision rules live in logic.js so they can be unit-tested without a DOM;
 // this file keeps only wiring, rendering and IPC. See app/tests/logic.test.js.
 const {
+  statusBarView,
   itemFromDto,
   sortByTime,
   sortForDisplay,
@@ -171,6 +172,7 @@ function clearCards() {
   hideInewsConfirm();
   hasCompared = false;
   el("summary").classList.add("hidden");
+  el("listHead").classList.add("hidden");
   el("emptyState").classList.remove("hidden");
   el("list").innerHTML = "";
   el("compareBtn").disabled = true;
@@ -203,7 +205,7 @@ async function clearFolder() {
 }
 
 const THEMES = [
-  { id: "light", name: "預設（白底黑字）" },
+  { id: "light", name: "預設（墨藍＋紙色）" },
   { id: "dark", name: "深色" },
   { id: "warm", name: "暖色護眼" },
   { id: "slate", name: "石墨藍" },
@@ -334,6 +336,7 @@ function loadSummary(summary) {
   el("statFiltered").textContent = summary.filtered;
   el("statFailed").textContent = summary.failed;
   el("summary").classList.remove("hidden");
+  el("listHead").classList.toggle("hidden", items.length === 0);
   el("emptyState").classList.toggle("hidden", items.length > 0);
 
   el("clearCardsBtn").disabled = items.length === 0;
@@ -420,7 +423,11 @@ function cardHtml(item) {
           <input type="checkbox" class="include-cb" data-id="${id}" ${item.included ? "checked" : ""} />
           輸出
         </label>
-        <span class="slug">${escapeHtml(fields.slug)}</span>
+        <span class="c-time mono">${escapeHtml(fields.time)}</span>
+        <span class="slug mono" title="${escapeHtml(item.matchedLine ?? "")}">${escapeHtml(fields.slug)}</span>
+        <span class="c-style">${escapeHtml(fields.style)}</span>
+        <span class="c-group">${escapeHtml(fields.group)}</span>
+        <span class="head-rest">
         <span class="badge ${bucket}">${badgeLabel}</span>
         ${marker ? `<span class="badge marker">${escapeHtml(marker)}</span>` : ""}
         ${matchLabel ? `<span class="badge ${matchClass}" title="${escapeHtml(item.matchedLine ?? "")}">${matchLabel}</span>` : ""}
@@ -428,12 +435,10 @@ function cardHtml(item) {
         ${holdLabel(item) ? `<span class="badge ${item.inews.hold === "suspect" ? "failed" : "marker"}">${holdLabel(item)}</span>` : ""}
         ${item.inews?.recheck ? `<span class="badge marker">複查補寫</span>` : ""}
         ${item.inews?.manual ? `<span class="badge manual-badge" title="從「搜尋 rundown」手動載入，換節次後清掉">手動載入</span>` : ""}
-        <span>${escapeHtml(fields.style)}</span>
-        <span>${escapeHtml(fields.time)}</span>
-        <span>${escapeHtml(fields.group)}</span>
         ${item.collapsed ? `<span class="peek">${escapeHtml(item.title)}</span>` : ""}
         <span class="file-name">${escapeHtml(fields.file_name)}</span>
         ${hasDiff ? `<button class="diff-toggle" data-id="${id}">顯示轉換前後</button>` : ""}
+        </span>
       </div>
 
       <div class="card-body">
@@ -824,6 +829,18 @@ el("copyBtn").addEventListener("click", copyAll);
 el("saveBtn").addEventListener("click", saveAll);
 el("genAllKeywordsBtn").addEventListener("click", generateKeywordsForAllIncluded);
 el("settingsBtn").addEventListener("click", openSettings);
+
+// 「更多」選單：點了裡面的按鈕、或點選單以外的地方就收起來。
+document.querySelectorAll("details.more").forEach((menu) => {
+  menu.querySelector(".menu").addEventListener("click", (e) => {
+    if (e.target.closest("button")) menu.open = false;
+  });
+});
+document.addEventListener("click", (e) => {
+  document.querySelectorAll("details.more[open]").forEach((menu) => {
+    if (!menu.contains(e.target)) menu.open = false;
+  });
+});
 el("openCollabBtn").addEventListener("click", () => openCollab());
 el("compareBtn").addEventListener("click", compareWithCollabDoc);
 el("writeBackBtn").addEventListener("click", writeBackToCollab);
@@ -894,6 +911,7 @@ async function writeBackToCollab() {
     // 「上一則寫到哪一節」不動：手動可以任意勾不同節次的稿，拿來推進會讓中間節次的分隔線被跳過。
     recordAutoWrite(outgoing, { writtenKeys, writtenSlugs, writtenStories, writtenPrints }, slugOf);
     saveWriteSession();
+    if (res.message) noteWriteForStatusBar(outgoing.length);
     status.textContent = `✅ ${msg}`;
     renderFunnel();
     render();
@@ -988,6 +1006,30 @@ const writtenStories = new Map();
 /** The last 疑似誤寫 report, shown under the round status until the next 定時複查. */
 let misfires = [];
 let inewsTimer = null;
+// 狀態列（改版）用的兩個顯示值：下一輪什麼時候跑、上次寫入幾點幾則。只給畫面看，不參與判斷。
+let nextRoundAt = null;
+let lastWriteShown = null;
+
+function renderStatusBar() {
+  const v = statusBarView({
+    now: new Date(),
+    auto: el("inewsAutoToggle").checked,
+    show: inewsShow,
+    nextRoundAt,
+    lastWrite: lastWriteShown,
+  });
+  el("sbClock").textContent = v.clock;
+  el("sbTally").textContent = v.tally;
+  el("sbTally").classList.toggle("live", v.live);
+  el("sbNext").textContent = v.next;
+  el("sbLastWrite").textContent = v.lastWrite;
+}
+setInterval(renderStatusBar, 1000);
+
+function noteWriteForStatusBar(count) {
+  if (count > 0) lastWriteShown = { at: Date.now(), count };
+  renderStatusBar();
+}
 let inewsBusy = false;
 /** Keyword runs that hit the per-minute cap (or left entries over) wait this long. */
 let keywordCooldownUntil = 0;
@@ -1045,6 +1087,7 @@ function updateStatsFromItems() {
   el("statFiltered").textContent = count("filtered");
   el("statFailed").textContent = count("failed");
   el("summary").classList.toggle("hidden", items.length === 0);
+  el("listHead").classList.toggle("hidden", items.length === 0);
   el("emptyState").classList.toggle("hidden", items.length > 0);
   el("clearCardsBtn").disabled = items.length === 0;
   el("compareBtn").disabled = items.length === 0;
@@ -1470,6 +1513,7 @@ async function writeInewsItems(ready) {
     recordAutoWrite(written, { writtenKeys, writtenSlugs, writtenStories, writtenPrints }, slugOf);
     lastWrittenShow = lastShow;
     saveWriteSession();
+    noteWriteForStatusBar(written.length);
     hideInewsConfirm();
     status.textContent = (written.length ? `✅ 自動寫入 ${written.length} 則：${msg}` : `✅ 已寫入節次分隔線：${msg}`) +
       (held.length ? `\n⏸ ${heldText(held)}` : "");
@@ -1833,8 +1877,11 @@ async function confirmInewsWrite() {
 
 function scheduleInewsRound(delayMs) {
   clearTimeout(inewsTimer);
+  nextRoundAt = null;
   if (!el("inewsAutoToggle").checked) return;
+  nextRoundAt = Date.now() + delayMs;
   inewsTimer = setTimeout(async () => {
+    nextRoundAt = null;
     // 這一輪出錯也要排下一輪（v0.3.40）：以前錯誤往外丟，下一輪不會再排，自動刷新默默停掉，
     // 開關卻還是開著，紀錄也什麼都沒有。
     try {
@@ -2672,6 +2719,8 @@ function setMode(mode) {
   const evening = mode === "evening";
   el("scriptToolbar").classList.toggle("hidden", evening);
   el("eveningToolbar").classList.toggle("hidden", !evening);
+  el("scriptStatus").classList.toggle("hidden", evening);
+  el("eveningStatus").classList.toggle("hidden", !evening);
   el("scriptView").classList.toggle("hidden", evening);
   el("eveningView").classList.toggle("hidden", !evening);
   el("modeScriptBtn").classList.toggle("active", !evening);
@@ -2957,13 +3006,16 @@ function eveningCardHtml(item) {
           <input type="checkbox" class="ev-include" data-id="${item.id}" ${item.included ? "checked" : ""} />
           列入
         </label>
-        <span class="slug">${escapeHtml(item.slug)}</span>
+        <span class="c-time mono">${escapeHtml(item.time)}</span>
+        <span class="slug mono" title="${escapeHtml(item.matchedLine ?? "")}">${escapeHtml(item.slug)}</span>
+        <span class="c-style">${escapeHtml(item.style)}</span>
+        <span class="c-group"></span>
+        <span class="head-rest">
         <span class="badge ${statusClass}" title="${escapeHtml(item.matchedLine ?? "")}">${statusLabel}</span>
         ${marker ? `<span class="badge marker">${escapeHtml(marker)}</span>` : ""}
-        <span>${escapeHtml(item.style)}</span>
-        <span>${escapeHtml(item.time)}</span>
         ${item.collapsed === false ? "" : `<span class="peek">${escapeHtml(item.title)}</span>`}
         <span class="file-name">${escapeHtml(item.fileName)}</span>
+        </span>
       </div>
       <div class="card-body">
         <div class="field">
