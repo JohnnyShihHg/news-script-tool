@@ -2463,9 +2463,10 @@ ${sec("evening", "晚報", `
             ${styleField("不上晚報的樣式", "evening.blocked_styles", config.evening.blocked_styles)}
             ${styleField("不上晚報的專題標記", "evening.excluded_terms", config.evening.excluded_terms)}
             <div class="muted">只收今天段落裡有上網的稿；只影響晚報。</div>
-            ${text("從紀錄抓的時段：開始（HH:MM）", "evening.window_start", config.evening.window_start)}
-            ${text("從紀錄抓的時段：結束（HH:MM，兩端都算）", "evening.window_end", config.evening.window_end)}
-            <div class="muted">晚報按「從紀錄抓」時，從 App 的本地紀錄挑這段時間播出的稿（保留 14 天）。</div>`)}
+            ${text("晚報時段：開始（HH:MM）", "evening.window_start", config.evening.window_start)}
+            ${text("晚報時段：結束（HH:MM，兩端都算）", "evening.window_end", config.evening.window_end)}
+            ${text("本地沒紀錄時讀 iNEWS 的哪一節", "evening.inews_show", config.evening.inews_show)}
+            <div class="muted">按「抓晚報稿」時，先從這台電腦的本地紀錄挑這段時間播出的稿（保留 14 天）；沒有的話直接讀 iNEWS 這一節，挑這段時間已經播出的稿（只限今天）。兩個都沒有才要用「更多 → 匯入資料夾」。</div>`)}
 ${sec("misc", "提醒、外觀與維護", `
             <h4 class="settings-sub">審查與提示音</h4>
             ${check("inews.unknown_review", s.unknown_review, "未知樣式跳出審查視窗（寫入或略過）")}
@@ -2894,7 +2895,7 @@ async function importEvening() {
   await applyEveningSummary(summary, date, "");
 }
 
-/// 晚報「從紀錄抓」（v0.3.30，預設）：App 的本地紀錄裡，那天晚報時段播出的稿，用存下來的
+/// 晚報「抓晚報稿」（v0.3.30 從紀錄抓，v0.3.50 沒紀錄改讀 iNEWS）：App 的本地紀錄裡，那天晚報時段播出的稿，用存下來的
 /// 原文產生卡片，接著照原本的規則比對。「匯入資料夾」保留當備用。
 async function importEveningFromRecords() {
   const date = el("evDate").value;
@@ -2902,7 +2903,7 @@ async function importEveningFromRecords() {
     evStatus("⚠ 請先選擇日期。", true);
     return;
   }
-  evStatus("從本地紀錄抓晚報時段的稿…");
+  evStatus("抓晚報稿中：先找這台電腦的紀錄，沒有的話直接讀 iNEWS…");
   let res;
   try {
     res = await invoke("load_evening_from_records", { date });
@@ -2911,7 +2912,8 @@ async function importEveningFromRecords() {
     return;
   }
   const note =
-    `從紀錄抓 ${res.from}～${res.to}：${res.picked} 列` +
+    (res.fallback_reason ? `${res.fallback_reason}，改從 ${res.source} 抓。` : "") +
+    `從${res.source}抓 ${res.from}～${res.to}：${res.picked} 列` +
     (res.missing.length ? `（${res.missing.length} 則本地沒有原文：${res.missing.join("、")}）` : "") +
     "。";
   await applyEveningSummary(res.summary, date, note);

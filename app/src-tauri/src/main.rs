@@ -561,29 +561,26 @@ struct EveningRecordsDto {
     missing: Vec<String>,
     from: String,
     to: String,
+    /// 這次稿從哪來（v0.3.50）：「本地紀錄」或「iNEWS 1800 節」。
+    source: String,
+    /// 改走 iNEWS 的原因（本地紀錄為什麼不能用）；走本地紀錄時是空的。
+    fallback_reason: String,
 }
 
-/// 晚報「從紀錄抓」（v0.3.30）：讀那一天的本地搜尋紀錄，挑播出時間在晚報時段內的稿，用存下
-/// 來的原文走跟「匯入資料夾」一模一樣的匯入流程，回傳一樣的匯入結果。前端接著照原本的規則
-/// 比對協作文件。那天 App 沒開著跟 1800 就沒有紀錄，前端會請使用者改用匯入資料夾。
-#[tauri::command]
-async fn load_evening_from_records(
-    window: tauri::Window,
-    state: tauri::State<'_, AppState>,
-    date: String,
-) -> Result<EveningRecordsDto, String> {
-    require_main_window(&window)?;
-    let cfg = lock_or_recover(&state.config).clone();
-    let day = chrono::NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").map_err(|_| format!("日期格式不對：{date}"))?;
+/// 本地紀錄這條路：有稿回 Ok(Some)，沒有紀錄或時段內沒稿回 Ok(None) 加原因，讀不懂紀錄回 Err。
+type EveningPick = (Vec<(String, String)>, usize, Vec<String>);
+
+fn evening_from_records(cfg: &Config, day: chrono::NaiveDate, from: &str, to: &str) -> Result<Result<EveningPick, String>, String> {
+    let date = day.format("%Y-%m-%d");
     let dir = inews_search_dir().ok_or_else(|| "找不到搜尋紀錄資料夾路徑".to_string())?;
     let path = dir.join(day.format("%Y%m%d").to_string()).join("index.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|_| format!("{date} 沒有本地紀錄（那天 App 沒開著，或已超過保留天數），請改用「匯入資料夾」。"))?;
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Err(format!("這台電腦沒有 {date} 的本地紀錄（那天 App 沒開著，或已超過保留天數）")));
+    };
     let search_day = news_script_core::search::SearchDay::from_json(&text).map_err(|e| format!("讀不懂 {}：{e}", path.display()))?;
-    let (from, to) = (cfg.evening.window_start.trim().to_string(), cfg.evening.window_end.trim().to_string());
-    let picked = news_script_core::search::stories_in_window(&search_day, &from, &to);
+    let picked = news_script_core::search::stories_in_window(&search_day, from, to);
     if picked.is_empty() {
-        return Err(format!("{date} 的本地紀錄裡沒有 {from}～{to} 播出的稿（那段時間 App 可能沒開著），請改用「匯入資料夾」。"));
+        return Ok(Err(format!("這台電腦 {date} 的本地紀錄裡沒有 {from}～{to} 播出的稿（那段時間 App 可能沒開著）")));
     }
     let mut files = Vec::new();
     let mut missing = Vec::new();
@@ -600,15 +597,101 @@ async fn load_evening_from_records(
         }
     }
     let file_names = news_script_core::inews::unique_file_names(&names);
+    Ok(Ok((file_names.into_iter().zip(files).collect(), picked.len(), missing)))
+}
+
+/// 晚報「抓晚報稿」（v0.3.30 從紀錄抓；v0.3.50 加第二條路）。一個按鈕，背後依序試：
+/// 1. 這台電腦的本地搜尋紀錄（App 那天開著就有，含原文）。
+/// 2. 沒有的話，直接讀 iNEWS 的晚報節次（設定 `evening.inews_show`，預設 1800），用跟自動刷新
+///    同一套方法算播出時間，挑時段內、已經播出的稿。只限今天的播出日：iNEWS 上的節次 rundown
+///    每天沿用，過了那天讀到的就是別天的稿。
+/// 兩條都不行才請使用者用「匯入資料夾」。結果走跟「匯入資料夾」一模一樣的匯入流程，前端接著
+/// 照原本的規則比對協作文件。
+#[tauri::command]
+async fn load_evening_from_records(
+    window: tauri::Window,
+    state: tauri::State<'_, AppState>,
+    date: String,
+) -> Result<EveningRecordsDto, String> {
+    require_main_window(&window)?;
+    let cfg = lock_or_recover(&state.config).clone();
+    let day = chrono::NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").map_err(|_| format!("日期格式不對：{date}"))?;
+    let (from, to) = (cfg.evening.window_start.trim().to_string(), cfg.evening.window_end.trim().to_string());
+    let log = |line: String| {
+        if let Some(log_dir) = inews_log_dir() {
+            inews::append_log(&log_dir, &line);
+        }
+    };
+
+    // 1. 本地紀錄
+    let reason = match evening_from_records(&cfg, day, &from, &to)? {
+        Ok((files, picked, missing)) => {
+            let summary = import_texts(&files, &cfg).await;
+            log(format!("[晚報] 從紀錄抓 {date} {from}～{to}：{picked} 則，缺原文 {} 則", missing.len()));
+            return Ok(EveningRecordsDto {
+                summary,
+                picked,
+                missing,
+                from,
+                to,
+                source: "本地紀錄".into(),
+                fallback_reason: String::new(),
+            });
+        }
+        Err(reason) => reason,
+    };
+
+    // 2. 直接讀 iNEWS（只限今天的播出日）
+    let fail = |why: String| {
+        let msg = format!("{reason}；{why}。請改用「更多 → 匯入資料夾」匯入從 iNEWS 匯出的晚報稿。");
+        log(format!("[晚報] {date} 抓不到：{msg}"));
+        msg
+    };
+    let now = inews::taipei_now();
+    let today = inews::broadcast_date(now, &cfg.inews.broadcast_day_start);
+    if day != today {
+        return Err(fail(format!("iNEWS 上只有今天（{}）的 rundown，讀不到 {date} 的稿", today.format("%Y-%m-%d"))));
+    }
+    let creds = inews_credentials().map_err(|e| fail(format!("也沒辦法連 iNEWS（{e}）")))?;
+    let show = cfg.evening.inews_show.trim().to_string();
+    let shared = state.inews.clone();
+    let inews_cfg = cfg.inews.clone();
+    let show2 = show.clone();
+    let rows = tauri::async_runtime::spawn_blocking(move || {
+        let mut st = shared.lock().unwrap_or_else(|p| p.into_inner());
+        st.read_show_with_air_times(&inews_cfg, &creds, &show2)
+    })
+    .await
+    .map_err(|e| fail(format!("讀 iNEWS {show} 節時出錯（{e}）")))?
+    .map_err(|e| fail(format!("讀 iNEWS {show} 節失敗（{e}）")))?;
+    let now_secs = i64::from(inews::taipei_seconds_of_day());
+    let picked: Vec<_> = rows
+        .into_iter()
+        .filter(|(t, secs, _)| news_script_core::search::air_time_in_window(t, &from, &to) && *secs <= now_secs)
+        .collect();
+    if picked.is_empty() {
+        return Err(fail(format!("iNEWS {show} 節裡也還沒有 {from}～{to} 已播出的稿")));
+    }
+    let mut files = Vec::new();
+    let mut names = Vec::new();
+    for (t, _, story) in &picked {
+        let fill = cfg.inews.fill_computed_time.then_some(t.as_str());
+        files.push(news_script_core::inews::story_to_text(story, fill));
+        names.push(story.title().to_string());
+    }
+    let file_names = news_script_core::inews::unique_file_names(&names);
     let files: Vec<(String, String)> = file_names.into_iter().zip(files).collect();
     let summary = import_texts(&files, &cfg).await;
-    if let Some(log_dir) = inews_log_dir() {
-        inews::append_log(
-            &log_dir,
-            &format!("[晚報] 從紀錄抓 {date} {from}～{to}：{} 則，缺原文 {} 則", picked.len(), missing.len()),
-        );
-    }
-    Ok(EveningRecordsDto { summary, picked: picked.len(), missing, from, to })
+    log(format!("[晚報] {reason}，改從 iNEWS {show} 節抓 {date} {from}～{to} 已播出的稿：{} 則", picked.len()));
+    Ok(EveningRecordsDto {
+        summary,
+        picked: picked.len(),
+        missing: Vec::new(),
+        from,
+        to,
+        source: format!("iNEWS {show} 節"),
+        fallback_reason: reason,
+    })
 }
 
 #[derive(Serialize)]

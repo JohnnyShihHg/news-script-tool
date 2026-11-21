@@ -678,6 +678,55 @@ impl InewsState {
         }
     }
 
+    /// 晚報第二條路（v0.3.50）：本地紀錄沒有時，直接讀一節的 rundown，用跟搜尋紀錄同一套
+    /// `compute_cume` 算每則的播出時間。回傳 (播出時間 `HH:MM:SS`、當天第幾秒、稿件)，只收有
+    /// slug、不是分頁列的稿（跟 `story_record` 一樣），算不出時間的不收。連線斷了重連再試一次。
+    pub fn read_show_with_air_times(
+        &mut self,
+        cfg: &InewsConfig,
+        creds: &Credentials,
+        show: &str,
+    ) -> Result<Vec<(String, i64, NsmlStory)>, String> {
+        match self.read_show_with_air_times_once(cfg, creds, show) {
+            Ok(r) => Ok(r),
+            Err(FtpError::Io(_)) | Err(FtpError::Protocol(_)) if self.session.is_some() => {
+                self.drop_session();
+                self.read_show_with_air_times_once(cfg, creds, show).map_err(|e| e.to_string())
+            }
+            Err(FtpError::Reply { ref reply, .. }) if self.session.is_some() && matches!(reply.code, 421 | 530) => {
+                self.drop_session();
+                self.read_show_with_air_times_once(cfg, creds, show).map_err(|e| e.to_string())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn read_show_with_air_times_once(
+        &mut self,
+        cfg: &InewsConfig,
+        creds: &Credentials,
+        show: &str,
+    ) -> FtpResult<Vec<(String, i64, NsmlStory)>> {
+        let path = format!("{}.{}.{}", cfg.root, show, cfg.queue);
+        let mut retrieved = 0;
+        let r = self.read_queue(cfg, creds, &path, &mut retrieved)?;
+        let rows: Vec<RundownRow> = r.iter().map(|(e, s)| RundownRow::from_story(s, e.floated)).collect();
+        let cume = inews::compute_cume(&rows);
+        Ok(r
+            .into_iter()
+            .zip(cume)
+            .filter_map(|((e, s), c)| {
+                // float 的框沒有播，跟自動刷新一樣不收。
+                if e.floated {
+                    return None;
+                }
+                rundown::story_record(&e, &s)?;
+                let t = c?;
+                Some((clock(t), t, s))
+            })
+            .collect())
+    }
+
     /// 預列清單（v0.3.23）：讀一個 queue 最上面那一段，回傳 (slug, 樣式) 和一行讀取過程
     /// （寫進決策紀錄）。最多看 30 列。連線斷了重連再試一次，跟 `fetch_story` 一樣。
     ///
@@ -1994,6 +2043,25 @@ mod tests {
         assert_eq!(*crate::lock_or_recover(&server.retrs), 9);
         let lists = server.commands().iter().filter(|c| *c == "LIST").count();
         assert_eq!(lists, 5, "root once (cached), both queues once per round");
+    }
+
+    #[test]
+    fn evening_fallback_reads_one_show_with_the_same_air_times_as_the_records() {
+        // 晚報第二條路（v0.3.50）：沒有本地紀錄時直接讀那一節，時間要跟自動刷新算的一樣。
+        let server = two_shows(None);
+        let mut state = InewsState::default();
+        let rows = state.read_show_with_air_times(&cfg(server.port), &creds("secret"), "0800").unwrap();
+        let got: Vec<(&str, &str)> = rows.iter().map(|(t, _, s)| (s.title(), t.as_str())).collect();
+        assert!(got.contains(&("合成早安稿0800", "07:56:00")), "{got:?}");
+        assert!(got.contains(&("合成第二則0800", "07:58:00")), "{got:?}");
+        let (_, secs, _) = rows.iter().find(|(_, _, s)| s.title() == "合成早安稿0800").unwrap();
+        assert_eq!(*secs, 7 * 3600 + 56 * 60);
+        let window: Vec<&str> = rows
+            .iter()
+            .filter(|(t, _, _)| news_script_core::search::air_time_in_window(t, "07:56", "07:58"))
+            .map(|(_, _, s)| s.title())
+            .collect();
+        assert_eq!(window, ["合成早安稿0800", "合成第二則0800"], "the floated 合成框 never aired");
     }
 
     #[test]

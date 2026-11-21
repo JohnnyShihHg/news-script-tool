@@ -91,12 +91,18 @@ impl SearchDay {
 /// 晚報用（v0.3.30）：這一天播出時間落在 `from`～`to`（`HH:MM`，兩端都算）的稿，照播出時間
 /// 排。同一節同 slug（搬過位置、換過 ID）只取 iNEWS 修改時間最新的一筆，跟搜尋一致。沒有
 /// 播出時間的不算。
+/// 播出時間（`HH:MM:SS`）是不是在晚報時段 `from`～`to`（`HH:MM`，兩端都算，只看到分）。
+/// 本地紀錄和直接讀 iNEWS 兩條路共用這一條（v0.3.50）。
+pub fn air_time_in_window(air_time: &str, from: &str, to: &str) -> bool {
+    let minute = air_time.get(..5).unwrap_or("");
+    minute.len() == 5 && minute >= from && minute <= to
+}
+
 pub fn stories_in_window(day: &SearchDay, from: &str, to: &str) -> Vec<(String, SearchEntry)> {
     let mut out: Vec<(String, SearchEntry)> = Vec::new();
     for (show, stories) in &day.shows {
         for s in stories {
-            let minute = s.air_time.get(..5).unwrap_or("");
-            if minute.len() != 5 || minute < from || minute > to {
+            if !air_time_in_window(&s.air_time, from, to) {
                 continue;
             }
             let key = fold_for_search(&s.slug);

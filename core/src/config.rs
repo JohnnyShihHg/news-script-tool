@@ -381,6 +381,14 @@ pub struct EveningConfig {
     pub window_start: String,
     #[serde(default = "default_evening_window_end")]
     pub window_end: String,
+    /// 「抓晚報稿」本地紀錄沒有時，直接讀 iNEWS 的哪一節（v0.3.50）。只用在今天的播出日：
+    /// iNEWS 上的節次 rundown 每天沿用，過了那天就是別天的稿。
+    #[serde(default = "default_evening_inews_show")]
+    pub inews_show: String,
+}
+
+fn default_evening_inews_show() -> String {
+    "1800".into()
 }
 
 fn default_evening_window_start() -> String {
@@ -420,6 +428,7 @@ impl Default for EveningConfig {
             excluded_terms: default_evening_excluded_terms(),
             window_start: default_evening_window_start(),
             window_end: default_evening_window_end(),
+            inews_show: default_evening_inews_show(),
         }
     }
 }
