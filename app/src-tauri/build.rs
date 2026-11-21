@@ -49,6 +49,7 @@ fn main() {
             "load_evening_from_records",
             "load_write_session",
             "save_write_session",
+            "set_window_size",
         ])),
     )
     .expect("failed to run tauri-build");

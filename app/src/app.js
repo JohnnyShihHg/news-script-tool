@@ -8,6 +8,7 @@ const {
   sortByTime,
   rundownRows,
   defaultSelection,
+  sortSearchHits,
   isAlreadyInDoc,
   isNoUpload,
   canOutputBucket,
@@ -175,7 +176,8 @@ function clearCards() {
   el("summary").classList.add("hidden");
   el("listHead").classList.add("hidden");
   el("emptyState").classList.remove("hidden");
-  el("list").innerHTML = "";
+  el("listRows").innerHTML = "";
+  placeGlide();
   el("compareBtn").disabled = true;
   el("copyBtn").disabled = true;
   el("saveBtn").disabled = true;
@@ -519,6 +521,66 @@ let selectedId = null;
 let selectedByUser = false;
 /// 這一次畫出來的表格順序（給 ↑↓ 換選取用）。
 let visibleOrder = [];
+/// 選取光影（v0.3.52）：一塊半透明的「玻璃」墊在選到的那一列下面。換選取時滑到新的那一列，
+/// 落地時輕輕彈一下。它不在 #listRows 裡，所以每輪重畫表格都不會被砍掉，位置不變就不動。
+let glideFor = null;
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+function placeGlide() {
+  const glide = el("selGlide");
+  const row = el("listRows").querySelector(".card.selected");
+  if (!row) {
+    glide.classList.remove("show");
+    glideFor = null;
+    return;
+  }
+  const first = !glide.classList.contains("show");
+  if (first) glide.classList.add("instant");
+  glide.style.transform = `translateY(${row.offsetTop}px)`;
+  glide.style.height = `${row.offsetHeight}px`;
+  glide.classList.add("show");
+  if (first) {
+    void glide.offsetWidth; // 先落在位置上，之後的移動才有動畫
+    glide.classList.remove("instant");
+  }
+  if (glideFor !== null && glideFor !== row.dataset.id && !reduceMotion.matches) {
+    glide.querySelector(".glide-inner").animate(
+      [
+        { transform: "scale(0.97, 0.8)", opacity: 0.6 },
+        { transform: "scale(1.012, 1.06)", opacity: 1, offset: 0.65 },
+        { transform: "scale(1, 1)", opacity: 1 },
+      ],
+      { duration: 460, easing: "cubic-bezier(.2, .8, .2, 1)" },
+    );
+  }
+  glideFor = row.dataset.id;
+}
+
+/// 表格排序（v0.3.51）：點欄位標題切換，同一欄再點一次反過來。預設照時間、後播的在上。
+let listSort = { key: "time", dir: "desc" };
+
+/// 欄位標題上的 ▲▼，跟目前的排序一致。主表格和搜尋 rundown 共用。
+function markSortHeads(root, sort) {
+  root.querySelectorAll(".sort-th").forEach((b) => {
+    const on = b.dataset.sort === sort.key;
+    b.classList.toggle("on", on);
+    b.dataset.dir = on ? sort.dir : "";
+    b.setAttribute("aria-sort", on ? (sort.dir === "desc" ? "descending" : "ascending") : "none");
+  });
+}
+
+/// 點同一欄＝反過來；換欄＝時間預設新的在上，其他欄預設由小到大。
+function nextSort(sort, key) {
+  if (sort.key === key) return { key, dir: sort.dir === "desc" ? "asc" : "desc" };
+  return { key, dir: key === "time" ? "desc" : "asc" };
+}
+
+el("listHead").addEventListener("click", (e) => {
+  const th = e.target.closest(".sort-th");
+  if (!th) return;
+  listSort = nextSort(listSort, th.dataset.sort);
+  render();
+});
 
 function isTypingInList() {
   const a = document.activeElement;
@@ -573,15 +635,17 @@ function render() {
   renderDeferred = false;
   const shown = activeFilter === "all" ? items : items.filter((i) => i.bucket === activeFilter);
   // 照播出時間排、節次之間插分隔列（v0.3.49）；只影響畫面，`items` 本身的順序不動。
-  const rows = rundownRows(shown);
+  const rows = rundownRows(shown, listSort);
+  markSortHeads(el("listHead"), listSort);
   visibleOrder = rows.filter((r) => r.item).map((r) => r.item.id);
   if (!visibleOrder.includes(selectedId)) selectedByUser = false;
   if (!selectedByUser) selectedId = defaultSelection(rows.filter((r) => r.item).map((r) => r.item));
-  el("list").innerHTML = rows
+  el("listRows").innerHTML = rows
     .map((r) => (r.divider
       ? `<div class="rundown-divider"><span class="mono">==== ${escapeHtml(r.divider.slice(0, 2))} ====</span><span>${escapeHtml(r.divider)} 節</span></div>`
       : cardHtml(r.item).row))
     .join("");
+  placeGlide();
   const sel = items.find((i) => i.id === selectedId);
   el("editor").innerHTML = sel
     ? cardHtml(sel).editor
@@ -1844,23 +1908,8 @@ async function runRundownSearch() {
       out.innerHTML = `<p class="search-empty">找不到符合的 slug。</p>`;
       return;
     }
-    searchHits = r.hits.slice(0, SEARCH_MAX_ROWS);
-    const rows = searchHits.map((h, n) => `
-      <tr>
-        <td>${escapeHtml(h.show)}</td>
-        <td>${escapeHtml(h.air_time || "—")}</td>
-        <td>${escapeHtml(h.slug)}</td>
-        <td>${escapeHtml(h.style || "—")}</td>
-        <td>${escapeHtml((h.updated || "").slice(11) || "—")}</td>
-        <td>${escapeHtml(cardStateOf(h.slug))}</td>
-        <td><button class="search-load" data-hit="${n}">載入</button></td>
-      </tr>`).join("");
-    out.innerHTML =
-      `<p class="search-meta">找到 ${r.hits.length} 則${r.hits.length > SEARCH_MAX_ROWS ? `，只顯示前 ${SEARCH_MAX_ROWS} 則` : ""}。</p>` +
-      `<table class="search-table"><thead><tr><th>節次</th><th>播出時間</th><th>slug</th><th>樣式</th><th>iNEWS 修改</th><th>畫面上的卡片</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-    out.querySelectorAll(".search-load").forEach((btn) => {
-      btn.addEventListener("click", () => loadSearchHit(searchHits[Number(btn.dataset.hit)], btn));
-    });
+    searchAllHits = r.hits;
+    renderSearchHits();
   } catch (err) {
     if (seq !== searchSeq) return;
     meta.textContent = `⚠ 搜尋失敗：${err}`;
@@ -1869,6 +1918,40 @@ async function runRundownSearch() {
 }
 
 let searchHits = [];
+/// 這次搜尋的全部結果（排序後才截前 SEARCH_MAX_ROWS 則顯示）。
+let searchAllHits = [];
+/// 搜尋 rundown 的排序（v0.3.51），規則跟主表格一樣。
+let searchSort = { key: "time", dir: "desc" };
+
+function renderSearchHits() {
+  const out = el("searchResults");
+  const sorted = sortSearchHits(searchAllHits, searchSort, inewsCfg.broadcast_day_start, cardStateOf);
+  searchHits = sorted.slice(0, SEARCH_MAX_ROWS);
+  const rows = searchHits.map((h, n) => `
+      <tr>
+        <td class="mono">${escapeHtml(h.show)}</td>
+        <td class="mono">${escapeHtml(h.air_time || "—")}</td>
+        <td class="mono">${escapeHtml(h.slug)}</td>
+        <td>${escapeHtml(h.style || "—")}</td>
+        <td class="mono">${escapeHtml((h.updated || "").slice(11) || "—")}</td>
+        <td>${escapeHtml(cardStateOf(h.slug))}</td>
+        <td><button class="search-load" data-hit="${n}">載入</button></td>
+      </tr>`).join("");
+  const th = (key, label) => `<th><button class="sort-th" data-sort="${key}">${label}</button></th>`;
+  out.innerHTML =
+    `<p class="search-meta">找到 ${searchAllHits.length} 則${searchAllHits.length > SEARCH_MAX_ROWS ? `，只顯示前 ${SEARCH_MAX_ROWS} 則` : ""}。點欄位標題可以排序。</p>` +
+    `<table class="search-table"><thead><tr>${th("show", "節次")}${th("time", "播出時間")}${th("slug", "slug")}${th("style", "樣式")}${th("updated", "iNEWS 修改")}${th("card", "畫面上的卡片")}<th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  markSortHeads(out, searchSort);
+  out.querySelectorAll(".search-load").forEach((btn) => {
+    btn.addEventListener("click", () => loadSearchHit(searchHits[Number(btn.dataset.hit)], btn));
+  });
+  out.querySelectorAll(".sort-th").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      searchSort = nextSort(searchSort, btn.dataset.sort);
+      renderSearchHits();
+    });
+  });
+}
 
 /**
  * 把一則搜尋結果載入成卡片（v0.3.15）：後端先讀搜尋紀錄存的原文，沒有才到 iNEWS 讀。
@@ -2491,6 +2574,17 @@ ${sec("misc", "提醒、外觀與維護", `
               </select>
               <div class="muted">立即預覽，按「儲存設定」才固定。</div>
             </div>
+            <h4 class="settings-sub">視窗大小</h4>
+            <div class="field">
+              <div class="keywords-row" id="windowSizeBtns">
+                <button type="button" data-size="auto">自動（螢幕小一級）</button>
+                <button type="button" data-size="1280x720">1280×720</button>
+                <button type="button" data-size="1920x1080">1920×1080</button>
+                <button type="button" data-size="2560x1440">2560×1440</button>
+                <button type="button" data-size="3840x2160">3840×2160</button>
+              </div>
+              <div class="muted" id="windowSizeNote">按了馬上套用。用滑鼠拉視窗邊框也可以；關掉 App 時會記住目前的大小，下次照這個大小開。</div>
+            </div>
             <h4 class="settings-sub">協作工具與紀錄</h4>
             <div class="field">
               <div class="keywords-row">
@@ -2705,6 +2799,15 @@ async function openSettings() {
   });
 
   el("diagnoseCollabBtn").addEventListener("click", diagnoseCollab);
+  el("windowSizeBtns").addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-size]");
+    if (!btn) return;
+    try {
+      el("windowSizeNote").textContent = `✅ ${await invoke("set_window_size", { preset: btn.dataset.size })}`;
+    } catch (err) {
+      el("windowSizeNote").textContent = `⚠ 調整視窗大小失敗：${err}`;
+    }
+  });
   el("exportCollabBtn").addEventListener("click", exportCollabText);
   el("checkUpdateBtn").addEventListener("click", () => checkForUpdate({ silent: false }));
   showCurrentVersion();
@@ -2797,6 +2900,10 @@ function setMode(mode) {
   el("eveningToolbar").classList.toggle("hidden", !evening);
   el("scriptStatus").classList.toggle("hidden", evening);
   el("eveningStatus").classList.toggle("hidden", !evening);
+  // 文稿頁整頁不捲、表格自己捲（v0.3.51）；晚報頁照舊整頁捲。
+  document.body.classList.toggle("script-mode", !evening);
+  // 表格藏起來時量不到位置，回到文稿頁再對準一次選取光影。
+  if (!evening) placeGlide();
   el("scriptView").classList.toggle("hidden", evening);
   el("eveningView").classList.toggle("hidden", !evening);
   el("modeScriptBtn").classList.toggle("active", !evening);

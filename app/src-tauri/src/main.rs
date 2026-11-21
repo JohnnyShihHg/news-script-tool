@@ -383,6 +383,119 @@ fn save_write_session(window: tauri::Window, json: String) -> Result<(), String>
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
+// --- 視窗大小（v0.3.51） ------------------------------------------------------------------
+// 預設：螢幕（實際像素）小一級的常見尺寸；設定頁可以直接選；手動拉也行。關 App 時記住大小，
+// 下次照這個大小開（記住的比現在的螢幕大，就改用自動）。
+
+const WINDOW_PRESETS: [(u32, u32); 4] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
+
+/// 寬高都比螢幕小的最大一級。1080 的螢幕 → 1280×720；4K → 2560×1440。
+/// 720 的螢幕沒有更小的一級，回 None＝最大化。
+fn auto_window_size(screen: (u32, u32)) -> Option<(u32, u32)> {
+    WINDOW_PRESETS.iter().rev().copied().find(|&(w, h)| w < screen.0 && h < screen.1)
+}
+
+/// 開 App 時用哪個大小：記住的放得進螢幕就用它，否則用自動。
+fn initial_window_size(remembered: Option<(u32, u32)>, screen: (u32, u32)) -> Option<(u32, u32)> {
+    match remembered {
+        Some((w, h)) if w <= screen.0 && h <= screen.1 => Some((w, h)),
+        _ => auto_window_size(screen),
+    }
+}
+
+/// 設定頁的選項：`auto` 或 `1920x1080`。
+fn parse_window_preset(preset: &str, screen: (u32, u32)) -> Result<Option<(u32, u32)>, String> {
+    if preset == "auto" {
+        return Ok(auto_window_size(screen));
+    }
+    let (w, h) = preset.split_once('x').ok_or_else(|| format!("看不懂的視窗大小：{preset}"))?;
+    let size = (w.parse::<u32>().map_err(|e| e.to_string())?, h.parse::<u32>().map_err(|e| e.to_string())?);
+    if !WINDOW_PRESETS.contains(&size) {
+        return Err(format!("不支援的視窗大小：{preset}"));
+    }
+    Ok(Some(size))
+}
+
+fn window_size_file() -> Option<std::path::PathBuf> {
+    inews_state_file().map(|p| p.with_file_name("window.json"))
+}
+
+fn load_window_size() -> Option<(u32, u32)> {
+    let text = std::fs::read_to_string(window_size_file()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let size = (u32::try_from(v["width"].as_u64()?).ok()?, u32::try_from(v["height"].as_u64()?).ok()?);
+    (size.0 >= 640 && size.1 >= 400).then_some(size)
+}
+
+fn save_window_size(size: (u32, u32)) -> Result<(), String> {
+    let path = window_size_file().ok_or_else(|| "找不到狀態存放路徑".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::json!({ "width": size.0, "height": size.1 }).to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+/// 視窗相關的錯誤不影響使用，記進決策紀錄就好。
+fn log_window_error(what: &str, e: impl std::fmt::Display) {
+    if let Some(dir) = inews_log_dir() {
+        inews::append_log(&dir, &format!("[視窗] {what}失敗：{e}"));
+    }
+}
+
+/// 拉視窗時最後的大小（最大化、最小化不算），關 App 時寫檔。
+static WINDOW_PENDING: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+
+macro_rules! screen_of {
+    ($w:expr) => {{
+        let monitor = match $w.current_monitor() {
+            Ok(Some(m)) => Some(m),
+            _ => $w.primary_monitor().ok().flatten(),
+        };
+        monitor.map(|m| (m.size().width, m.size().height))
+    }};
+}
+
+macro_rules! apply_window_size {
+    ($w:expr, $size:expr) => {{
+        match $size {
+            Some((w, h)) => {
+                if let Err(e) = $w.unmaximize() {
+                    log_window_error("取消最大化", e);
+                }
+                if let Err(e) = $w.set_size(tauri::PhysicalSize::new(w, h)) {
+                    log_window_error("調整大小", e);
+                }
+                if let Err(e) = $w.center() {
+                    log_window_error("置中", e);
+                }
+            }
+            None => {
+                if let Err(e) = $w.maximize() {
+                    log_window_error("最大化", e);
+                }
+            }
+        }
+    }};
+}
+
+#[tauri::command]
+fn set_window_size(window: tauri::Window, preset: String) -> Result<String, String> {
+    require_main_window(&window)?;
+    let screen = screen_of!(window).ok_or_else(|| "讀不到螢幕大小".to_string())?;
+    let size = parse_window_preset(preset.trim(), screen)?;
+    apply_window_size!(window, size);
+    match size {
+        Some(s) => {
+            *lock_or_recover(&WINDOW_PENDING) = Some(s);
+            save_window_size(s)?;
+            Ok(format!("視窗改成 {}×{}（螢幕 {}×{}），下次開 App 也是這個大小。", s.0, s.1, screen.0, screen.1))
+        }
+        None => Ok(format!("螢幕 {}×{} 沒有更小一級的尺寸，視窗改成最大化。", screen.0, screen.1)),
+    }
+}
+
 /// 決策紀錄資料夾：`%APPDATA%\\ebc\\news-script-tool\\logs`（設定檔在同一層的 `config`）。
 fn inews_log_dir() -> Option<std::path::PathBuf> {
     directories::ProjectDirs::from("tw", "ebc", "news-script-tool")
@@ -2245,6 +2358,35 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            if let Some(w) = app.get_webview_window("main") {
+                if let Some(screen) = screen_of!(w) {
+                    apply_window_size!(w, initial_window_size(load_window_size(), screen));
+                }
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                tauri::WindowEvent::Resized(size) => {
+                    let skip = window.is_maximized().unwrap_or(false) || window.is_minimized().unwrap_or(false);
+                    if !skip && size.width > 0 && size.height > 0 {
+                        *lock_or_recover(&WINDOW_PENDING) = Some((size.width, size.height));
+                    }
+                }
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    if let Some(s) = *lock_or_recover(&WINDOW_PENDING) {
+                        if let Err(e) = save_window_size(s) {
+                            log_window_error("記住視窗大小", e);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        })
         .manage(AppState {
             config: Mutex::new(load_config_from_disk_or_default()),
             scrape_reply: Mutex::new(None),
@@ -2295,7 +2437,8 @@ fn main() {
             set_autostart,
             load_evening_from_records,
             load_write_session,
-            save_write_session
+            save_write_session,
+            set_window_size
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2449,5 +2592,37 @@ mod collab_script_cases {
         if std::fs::read_to_string(&path).ok().as_deref() != Some(body.as_str()) {
             std::fs::write(&path, body).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod window_size_tests {
+    use super::{auto_window_size, initial_window_size, parse_window_preset};
+
+    #[test]
+    fn the_default_window_is_one_preset_smaller_than_the_screen() {
+        assert_eq!(auto_window_size((1920, 1080)), Some((1280, 720)));
+        assert_eq!(auto_window_size((2560, 1440)), Some((1920, 1080)));
+        assert_eq!(auto_window_size((3840, 2160)), Some((2560, 1440)));
+        // 1920×1200 之類的螢幕：寬高都要放得下。
+        assert_eq!(auto_window_size((1920, 1200)), Some((1280, 720)));
+        // 720 的螢幕沒有更小一級：最大化。
+        assert_eq!(auto_window_size((1280, 720)), None);
+    }
+
+    #[test]
+    fn a_remembered_size_wins_unless_it_no_longer_fits_the_screen() {
+        assert_eq!(initial_window_size(Some((1500, 900)), (1920, 1080)), Some((1500, 900)));
+        // 上次在 4K 螢幕拉大的，換到 1080 的螢幕就改回自動。
+        assert_eq!(initial_window_size(Some((2560, 1440)), (1920, 1080)), Some((1280, 720)));
+        assert_eq!(initial_window_size(None, (2560, 1440)), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn settings_presets_parse_and_reject_unknown_sizes() {
+        assert_eq!(parse_window_preset("1920x1080", (3840, 2160)), Ok(Some((1920, 1080))));
+        assert_eq!(parse_window_preset("auto", (1920, 1080)), Ok(Some((1280, 720))));
+        assert!(parse_window_preset("1000x500", (1920, 1080)).is_err());
+        assert!(parse_window_preset("big", (1920, 1080)).is_err());
     }
 }

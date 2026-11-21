@@ -22,6 +22,13 @@
     entry("FilteredByStyle", "合成天氣BS1800", "17:50:00", "BS", "氣象", "天氣快報", ""),
     entry("UnknownStyle", "合成直播連線1800", "17:55:00", "LIVE", "政治", "立院直播連線", "合成內文：立法院現場連線。"),
   ];
+  // ?many=1：多塞幾十則，看表格自己捲動、整頁不捲。
+  if (q.get("many")) {
+    for (let n = 0; n < 30; n++) {
+      const m = String(10 + n).padStart(2, "0");
+      entries.push(entry("Passed", `合成多則${n}2000`, `20:${m}:00`, n % 3 ? "SOT" : "SL", n % 2 ? "社會" : "政治", `合成標題 ${n}`, `合成內文 ${n}。`));
+    }
+  }
   const config = {
     config_version: 17,
     gemini: { model: "gemini-2.5-flash", max_per_run: 12 },
@@ -40,6 +47,13 @@
         if (cmd === "import_folder") {
           return { entries, passed: 4, unknown: 1, needs_manual: 0, filtered: 1, failed: 0 };
         }
+        if (cmd === "search_rundown_slugs") {
+          const hits = entries.map((e) => {
+            const f = e[e.kind];
+            return { show: f.time < "17:43:30" ? "1700" : f.time < "19:55:00" ? "1800" : "2000", air_time: f.time, slug: f.slug, style: f.style, updated: "2026-11-21 17:00:00" };
+          });
+          return { date: "2026-11-21", shows: 3, stories: hits.length, hits };
+        }
         throw new Error(`preview: ${cmd} 沒有假資料`);
       },
     },
@@ -51,6 +65,7 @@
     const body = new DOMParser().parseFromString(html, "text/html").body;
     body.querySelectorAll("script").forEach((s) => s.remove());
     document.body.insertAdjacentHTML("afterbegin", body.innerHTML);
+    document.body.className = body.className; // 文稿頁的固定版面（script-mode）掛在 <body> 上
     for (const src of ["../src/logic.js", "../src/app.js"]) {
       await new Promise((ok, bad) => {
         const s = document.createElement("script");
@@ -63,7 +78,7 @@
     await new Promise((r) => setTimeout(r, 300));
     // 模擬「已比對、兩則已寫入、自動刷新開著」的樣子（只改畫面用的狀態）。
     items.forEach((i, n) => {
-      i.inews = { show: i.time < "17:43:30" ? "1700" : "1800", hold: null };
+      i.inews = { show: i.time < "17:43:30" ? "1700" : i.time < "19:55:00" ? "1800" : "2000", hold: null };
       if (n < 3) { i.alreadyInDoc = true; i.included = false; i.matchStatus = "to_cut"; i.matchedLine = `${i.time.slice(0, 5).replace(":", "")} ${i.dto[i.kind].slug} 寫入的那一行`; }
       else if (i.bucket === "passed") i.matchStatus = "to_cut";
     });

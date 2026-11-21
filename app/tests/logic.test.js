@@ -454,13 +454,41 @@ test("rundownRows keeps running order whatever is ticked and puts a divider befo
     { slug: "b18", time: "17:44:00", included: false, inews: { show: "1800" } },
     { slug: "x", time: "", included: true, inews: { show: "1800" } },
   ];
-  const rows = L.rundownRows(items).map((r) => r.divider ? `==${r.divider}` : r.item.slug);
+  const show = (rows) => rows.map((r) => r.divider ? `==${r.divider}` : r.item.slug);
+  const asc = show(L.rundownRows(items, { key: "time", dir: "asc" }));
   // 1700 的稿沒勾也排在前面：畫面順序跟寫進文件的順序一樣，分隔列才不會誤導。
-  assert.deepEqual(rows, ["==1700", "a17", "==1800", "b18", "c18", "x"]);
+  assert.deepEqual(asc, ["==1700", "a17", "==1800", "b18", "c18", "x"]);
+  // v0.3.51 預設倒序：後播的在上面，節次分隔列跟著倒過來；沒有時間的還是排最後。
+  assert.deepEqual(show(L.rundownRows(items)), ["==1800", "c18", "b18", "==1700", "a17", "==1800", "x"]);
   // Display only: the input's own order is untouched.
   assert.deepEqual(items.map((i) => i.slug), ["c18", "a17", "b18", "x"]);
   // 資料夾匯入的稿沒有節次：不插分隔列。
   assert.deepEqual(L.rundownRows([{ slug: "f", time: "09:00:00" }]).map((r) => r.item.slug), ["f"]);
+});
+
+test("rundownRows sorts by a clicked column like a spreadsheet, without show dividers", () => {
+  const items = [
+    { slug: "乙", time: "17:46:00", style: "SOT", inews: { show: "1800" } },
+    { slug: "甲", time: "17:44:00", style: "SL", inews: { show: "1800" } },
+    { slug: "丙", time: "16:58:00", style: "SOT", inews: { show: "1700" } },
+  ];
+  const rows = L.rundownRows(items, { key: "style", dir: "asc" });
+  assert.ok(rows.every((r) => r.item), "no dividers when not sorted by time");
+  // 樣式一樣的照播出時間（先播的在前）。
+  assert.deepEqual(rows.map((r) => r.item.slug), ["甲", "丙", "乙"]);
+  assert.deepEqual(L.rundownRows(items, { key: "style", dir: "desc" }).map((r) => r.item.slug), ["丙", "乙", "甲"]);
+});
+
+test("search hits sort newest first by default, and a story after midnight counts as the end of the day", () => {
+  const hits = [
+    { slug: "a", show: "0900", air_time: "09:10:00" },
+    { slug: "b", show: "0000", air_time: "00:20:00" },
+    { slug: "c", show: "2200", air_time: "22:05:00" },
+    { slug: "d", show: "0900", air_time: "" },
+  ];
+  assert.deepEqual(L.sortSearchHits(hits, undefined, "02:00").map((h) => h.slug), ["b", "c", "a", "d"]);
+  assert.deepEqual(L.sortSearchHits(hits, { key: "time", dir: "asc" }, "02:00").map((h) => h.slug), ["a", "c", "b", "d"]);
+  assert.deepEqual(L.sortSearchHits(hits, { key: "slug", dir: "desc" }).map((h) => h.slug), ["d", "c", "b", "a"]);
 });
 
 // --- itemFromDto: the layer v0.1.9's tests skipped over ---

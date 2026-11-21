@@ -5,7 +5,7 @@
   <title>新聞文稿整理工具</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body>
+<body class="script-mode">
   <header class="topbar">
     <div class="statusbar">
       <span class="mode-switch">
@@ -106,8 +106,8 @@
 
   <div class="rundown-split">
     <div class="rundown-main">
-      <div id="listHead" class="list-head hidden"><span></span><span>輸出</span><span>時間</span><span>SLUG</span><span>樣式</span><span>組別</span><span>狀態</span></div>
-      <main id="list"></main>
+      <div id="listHead" class="list-head hidden"><span></span><button class="sort-th" data-sort="included">輸出</button><button class="sort-th" data-sort="time">時間</button><button class="sort-th" data-sort="slug">SLUG</button><button class="sort-th" data-sort="style">樣式</button><button class="sort-th" data-sort="group">組別</button><button class="sort-th" data-sort="status">狀態</button></div>
+      <main id="list"><div id="selGlide" class="sel-glide" aria-hidden="true"><span class="glide-inner"></span></div><div id="listRows"></div></main>
 
       <footer id="emptyState" class="empty-state">
         尚未匯入任何檔案。先從「從 iNEWS 匯入」讀稿；要用資料夾的話，先到「設定」綁定預設匯入資料夾，再點「更多 → 匯入資料夾」。

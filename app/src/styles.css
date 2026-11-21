@@ -478,7 +478,7 @@ button.cta:disabled { opacity: .35; }
   padding: 10px 16px 40px;
 }
 .rundown-main { min-width: 0; }
-#list { padding: 0; }
+#list { padding: 0; position: relative; background: var(--panel); }
 .editor-panel {
   position: sticky;
   top: calc(var(--top-h, 92px) + 10px);
@@ -556,13 +556,13 @@ main { padding: 0 16px 60px; display: flex; flex-direction: column; }
   border-left: 4px solid transparent;
   padding: 7px 12px;
 }
-#list > :first-child, #evList .card:first-child { border-top: 1px solid var(--border); }
-#list > :last-child, #evList .card:last-child { border-radius: 0 0 6px 6px; }
+#listRows > :first-child, #evList .card:first-child { border-top: 1px solid var(--border); }
+#listRows > :last-child, #evList .card:last-child { border-radius: 0 0 6px 6px; }
 #evList .card:first-child { border-radius: 6px 6px 0 0; }
 #evList .card:not(.collapsed) { background: var(--input-bg); box-shadow: inset 0 0 0 1px var(--accent); }
 #list .card { cursor: pointer; }
 #list .card:hover { background: var(--subtle); }
-#list .card.selected, #list .card.selected:hover { background: var(--sel); box-shadow: inset 0 0 0 1px var(--accent); }
+#list .card.selected, #list .card.selected:hover { background: transparent; }
 #list .card.selected .card-head { opacity: 1; }
 .sel-mark { color: var(--accent); font-size: var(--fs-s); text-align: center; }
 .card.passed { border-left-color: var(--ok); }
@@ -796,3 +796,127 @@ select {
 .ev-tagline { width: 100%; margin-top: 4px; border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: var(--fs-l); background: var(--input-bg); color: var(--text); }
 .ev-slugs .ev-pre { font-family: var(--mono); color: var(--muted); font-size: var(--fs-m); }
 @media (max-width: 760px) { .ev-output { grid-template-columns: 1fr; } }
+
+/* ---------- 可排序的欄位標題（v0.3.51，主表格和搜尋 rundown 共用） ---------- */
+.sort-th {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sort-th:hover:not(:disabled) { color: var(--accent); border: 0; }
+.sort-th.on { color: var(--accent); font-weight: 600; }
+.sort-th.on::after { content: " ▲"; font-size: .85em; }
+.sort-th.on[data-dir="desc"]::after { content: " ▼"; }
+
+/* ---------- 文稿頁固定版面（v0.3.51）：整頁不捲，表格自己捲、捲軸不顯示；
+   右邊編輯欄撐滿剩下的高度，視窗多大都看得到。晚報頁照舊整頁捲。 ---------- */
+body.script-mode { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+body.script-mode .topbar { flex: none; }
+body.script-mode #progressWrap { flex: none; }
+body.script-mode #scriptView { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+body.script-mode #scriptView > :not(.rundown-split) { flex: none; }
+body.script-mode #inewsStatus { max-height: 7.8em; overflow-y: auto; scrollbar-width: thin; }
+body.script-mode .rundown-split {
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  padding-bottom: 12px;
+}
+body.script-mode .rundown-main { display: flex; flex-direction: column; min-height: 0; }
+body.script-mode .list-head { flex: none; }
+body.script-mode #list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0 0 6px 6px;
+}
+body.script-mode #list::-webkit-scrollbar { display: none; }
+body.script-mode #listRows > :last-child { border-radius: 0; }
+body.script-mode .editor-panel {
+  position: static;
+  max-height: none;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+body.script-mode .editor-head { flex: none; }
+body.script-mode .editor-body { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+body.script-mode .editor-body .field:has(textarea) { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 140px; }
+body.script-mode .editor-body .field textarea { flex: 1 1 auto; min-height: 100px; resize: none; }
+@media (max-width: 1000px) {
+  body.script-mode .rundown-split { grid-template-rows: minmax(0, 3fr) minmax(0, 2fr); }
+}
+
+/* ---------- 動畫（v0.3.52） ---------- */
+
+/* ON AIR 呼吸：燈號慢慢亮暗，外圈光暈一收一放。 */
+@keyframes onair-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--onair) 0%, transparent), 0 0 6px color-mix(in srgb, var(--onair) 35%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--onair) 22%, transparent), 0 0 18px color-mix(in srgb, var(--onair) 60%, transparent); }
+}
+@keyframes onair-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .5; transform: scale(.75); }
+}
+.tally.live { animation: onair-breathe 2.8s ease-in-out infinite; }
+.tally.live::before { animation: onair-dot 2.8s ease-in-out infinite; }
+
+/* 選取光影：墊在列下面的一塊玻璃，換選取時滑過去（帶一點回彈），落地輕彈。
+   列本身是透明的（#list 的底色在後面），所以看得到下面的玻璃。 */
+#listRows { position: relative; z-index: 1; }
+#listRows .card { background: transparent; }
+#listRows .card:hover:not(.selected) { background: var(--subtle); }
+#listRows .rundown-divider { position: relative; }
+.sel-glide {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    transform .48s cubic-bezier(.34, 1.32, .5, 1),
+    height .3s ease,
+    opacity .2s ease;
+}
+.sel-glide.show { opacity: 1; }
+.sel-glide.instant { transition: none; }
+.glide-inner {
+  position: absolute;
+  inset: 1px 2px;
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #fff 55%, transparent) 0%, color-mix(in srgb, #fff 0%, transparent) 55%),
+    color-mix(in srgb, var(--accent) 16%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 70%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--accent) 18%, transparent),
+    0 6px 18px color-mix(in srgb, var(--accent) 22%, transparent);
+  backdrop-filter: blur(8px) saturate(1.5);
+}
+[data-theme="dark"] .glide-inner, [data-theme="control"] .glide-inner {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #fff 14%, transparent) 0%, color-mix(in srgb, #fff 0%, transparent) 60%),
+    color-mix(in srgb, var(--accent) 22%, var(--panel));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 22%, transparent),
+    0 6px 18px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tally.live, .tally.live::before { animation: none; }
+  .sel-glide { transition: none; }
+}

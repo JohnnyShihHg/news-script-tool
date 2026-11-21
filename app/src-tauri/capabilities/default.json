@@ -51,6 +51,7 @@
     "allow-set-autostart",
     "allow-load-evening-from-records",
     "allow-load-write-session",
-    "allow-save-write-session"
+    "allow-save-write-session",
+    "allow-set-window-size"
   ]
 }

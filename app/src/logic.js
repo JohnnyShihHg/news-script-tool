@@ -247,16 +247,81 @@
    * （{ divider: "1800" }），跟協作文件的 ==== 18 ==== 對得起來。以前是「勾選的排前面」，
    * 順序跟節次不一致，沒辦法加分隔列。資料夾匯入的稿沒有節次，就不插分隔列。
    */
-  function rundownRows(items) {
+  /**
+   * v0.3.51：可以照欄位排序（像 Excel 點欄位標題）。預設 { key: "time", dir: "desc" }＝後播的
+   * 在上面。只有照時間排才插節次分隔列（照 slug、樣式排的時候節次是亂的，插了會誤導）。
+   * 沒有播出時間的稿一律排最後。其他欄位一樣的，照播出時間（先播的在前）排。
+   */
+  const BUCKET_RANK = { passed: 0, unknown: 1, manual: 2, filtered: 3, failed: 4 };
+  function sortValue(item, key) {
+    const f = item.dto?.[item.kind] ?? item;
+    switch (key) {
+      case "included": return item.included ? "0" : "1";
+      case "status": return `${BUCKET_RANK[item.bucket] ?? 9}${item.alreadyInDoc ? 1 : 0}`;
+      case "slug": return String(f.slug ?? item.slug ?? "");
+      case "style": return String(f.style ?? item.style ?? "");
+      case "group": return String(f.group ?? item.group ?? "");
+      default: return "";
+    }
+  }
+
+  function rundownRows(items, sort = { key: "time", dir: "desc" }) {
+    const desc = sort?.dir === "desc";
+    const key = sort?.key ?? "time";
+    const byTime = sortByTime(items);
+    if (key !== "time") {
+      const rank = new Map(byTime.map((item, n) => [item, n]));
+      const sorted = [...items].sort((a, b) => {
+        const c = sortValue(a, key).localeCompare(sortValue(b, key), "zh-Hant");
+        return (desc ? -c : c) || rank.get(a) - rank.get(b);
+      });
+      return sorted.map((item) => ({ item }));
+    }
+    const timed = (i) => /^\d{1,2}:\d{2}:\d{2}$/.test((i.time ?? "").trim());
+    const ordered = desc ? [...byTime.filter(timed).reverse(), ...byTime.filter((i) => !timed(i))] : byTime;
     const rows = [];
     let last = null;
-    for (const item of sortByTime(items)) {
+    for (const item of ordered) {
       const show = item.inews?.show ?? "";
       if (show && show !== last) rows.push({ divider: show });
       if (show) last = show;
       rows.push({ item });
     }
     return rows;
+  }
+
+  /**
+   * 搜尋 rundown 的結果排序（v0.3.51），規則跟主表格一樣：預設照播出時間、後播的在上。
+   * 播出時間在播出日開始（`dayStart`，例 02:00）以前的算隔天，排在當天最後。沒有時間的排最後。
+   */
+  function sortSearchHits(hits, sort = { key: "time", dir: "desc" }, dayStart = "02:00", cardStateOf = () => "") {
+    const desc = sort?.dir === "desc";
+    const key = sort?.key ?? "time";
+    const timeKey = (h) => {
+      const t = (h.air_time ?? "").trim();
+      if (!/^\d{1,2}:\d{2}:\d{2}$/.test(t)) return null;
+      const p = t.padStart(8, "0");
+      return p < dayStart.padStart(5, "0") ? `1${p}` : `0${p}`;
+    };
+    const value = (h) => {
+      switch (key) {
+        case "show": return String(h.show ?? "");
+        case "slug": return String(h.slug ?? "");
+        case "style": return String(h.style ?? "");
+        case "updated": return String(h.updated ?? "");
+        case "card": return String(cardStateOf(h.slug) ?? "");
+        default: return timeKey(h);
+      }
+    };
+    return hits
+      .map((h, n) => ({ h, n, v: value(h) }))
+      .sort((a, b) => {
+        if (a.v === null || a.v === "") return b.v === null || b.v === "" ? a.n - b.n : 1;
+        if (b.v === null || b.v === "") return -1;
+        const c = a.v.localeCompare(b.v, "zh-Hant");
+        return (desc ? -c : c) || a.n - b.n;
+      })
+      .map((w) => w.h);
   }
 
   /**
@@ -1361,6 +1426,7 @@
     sortByTime,
     rundownRows,
     defaultSelection,
+    sortSearchHits,
     OUTPUT_BUCKETS,
     isOutputBucket,
     canOutputBucket,
