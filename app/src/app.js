@@ -6,7 +6,8 @@ const {
   statusBarView,
   itemFromDto,
   sortByTime,
-  sortForDisplay,
+  rundownRows,
+  defaultSelection,
   isAlreadyInDoc,
   isNoUpload,
   canOutputBucket,
@@ -207,6 +208,7 @@ async function clearFolder() {
 const THEMES = [
   { id: "light", name: "預設（墨藍＋紙色）" },
   { id: "dark", name: "深色" },
+  { id: "control", name: "主控室（深色）" },
   { id: "warm", name: "暖色護眼" },
   { id: "slate", name: "石墨藍" },
   { id: "contrast", name: "高對比" },
@@ -415,10 +417,21 @@ function cardHtml(item) {
   const marker = (item.slug_marker ?? "").trim();
   const noUpload = isNoUpload(item, noUploadLabel);
 
-  return `
-    <div class="card ${bucket} ${item.collapsed ? "collapsed" : ""} ${item.alreadyInDoc ? "done" : ""} ${item.inews?.manual ? "manual-loaded" : ""}" data-bucket="${bucket}" data-id="${id}">
+  const badges = `
+        <span class="badge ${bucket}">${badgeLabel}</span>
+        ${marker ? `<span class="badge marker">${escapeHtml(marker)}</span>` : ""}
+        ${matchLabel ? `<span class="badge ${matchClass}" title="${escapeHtml(item.matchedLine ?? "")}">${matchLabel}</span>` : ""}
+        ${item.crossDay ? `<span class="badge marker" title="${escapeHtml(item.matchedLine ?? "")}">前一天已上傳的重播</span>` : ""}
+        ${holdLabel(item) ? `<span class="badge ${item.inews.hold === "suspect" ? "failed" : "marker"}">${holdLabel(item)}</span>` : ""}
+        ${item.inews?.recheck ? `<span class="badge marker">複查補寫</span>` : ""}
+        ${item.inews?.manual ? `<span class="badge manual-badge" title="從「搜尋 rundown」手動載入，換節次後清掉">手動載入</span>` : ""}`;
+  const selected = id === selectedId;
+
+  // 表格的一列（v0.3.49）：編輯欄不再展開在列下面，點一列就換右邊編輯欄的內容。
+  const row = `
+    <div class="card ${bucket} ${selected ? "selected" : ""} ${item.alreadyInDoc ? "done" : ""} ${item.inews?.manual ? "manual-loaded" : ""}" data-bucket="${bucket}" data-id="${id}">
       <div class="card-head">
-        <button class="collapse-toggle" data-id="${id}" title="展開／收合">${item.collapsed ? "▶" : "▼"}</button>
+        <span class="sel-mark" aria-hidden="true">${selected ? "▶" : ""}</span>
         <label class="include-toggle">
           <input type="checkbox" class="include-cb" data-id="${id}" ${item.included ? "checked" : ""} />
           輸出
@@ -428,20 +441,28 @@ function cardHtml(item) {
         <span class="c-style">${escapeHtml(fields.style)}</span>
         <span class="c-group">${escapeHtml(fields.group)}</span>
         <span class="head-rest">
-        <span class="badge ${bucket}">${badgeLabel}</span>
-        ${marker ? `<span class="badge marker">${escapeHtml(marker)}</span>` : ""}
-        ${matchLabel ? `<span class="badge ${matchClass}" title="${escapeHtml(item.matchedLine ?? "")}">${matchLabel}</span>` : ""}
-        ${item.crossDay ? `<span class="badge marker" title="${escapeHtml(item.matchedLine ?? "")}">前一天已上傳的重播</span>` : ""}
-        ${holdLabel(item) ? `<span class="badge ${item.inews.hold === "suspect" ? "failed" : "marker"}">${holdLabel(item)}</span>` : ""}
-        ${item.inews?.recheck ? `<span class="badge marker">複查補寫</span>` : ""}
-        ${item.inews?.manual ? `<span class="badge manual-badge" title="從「搜尋 rundown」手動載入，換節次後清掉">手動載入</span>` : ""}
-        ${item.collapsed ? `<span class="peek">${escapeHtml(item.title)}</span>` : ""}
+        ${badges}
+        <span class="peek">${escapeHtml(item.title)}</span>
         <span class="file-name">${escapeHtml(fields.file_name)}</span>
-        ${hasDiff ? `<button class="diff-toggle" data-id="${id}">顯示轉換前後</button>` : ""}
         </span>
       </div>
+    </div>`;
 
-      <div class="card-body">
+  const editor = `
+      <div class="editor-head">
+        <div class="editor-slug mono" title="${escapeHtml(item.matchedLine ?? "")}">${escapeHtml(fields.slug)}</div>
+        <div class="editor-meta"><span class="mono">${escapeHtml(fields.time)}</span><span>${escapeHtml(fields.style)}</span><span>${escapeHtml(fields.group)}</span></div>
+        <div class="editor-badges">${badges}</div>
+        ${item.matchedLine ? `<div class="editor-line mono" title="協作文件裡找到的那一行">${escapeHtml(item.matchedLine)}</div>` : ""}
+        <div class="editor-file"><span class="file-name">${escapeHtml(fields.file_name)}</span>
+        ${hasDiff ? `<button class="diff-toggle" data-id="${id}">顯示轉換前後</button>` : ""}</div>
+      </div>`;
+
+  return { row, editor: editor + cardBodyHtml() };
+
+  function cardBodyHtml() {
+  return `
+      <div class="editor-body">
       <div class="field">
         <label>標題</label>
         <input type="text" class="edit-title" data-id="${id}" value="${escapeHtml(item.title)}" />
@@ -482,7 +503,8 @@ function cardHtml(item) {
           ${fields.warnings.map((w) => `<div class="w">⚠ ${escapeHtml(w)}</div>`).join("")}
         </div>` : ""}
       </div>
-    </div>`;
+    `;
+  }
 }
 
 /// True while an automatic iNEWS round is running. Re-rendering rebuilds every input,
@@ -490,14 +512,57 @@ function cardHtml(item) {
 let inewsRoundActive = false;
 let renderDeferred = false;
 
+/// 右邊編輯欄現在顯示哪一則（v0.3.49）。只有畫面用；重開或換一批稿就重新挑。
+let selectedId = null;
+/// 使用者自己點過（或在編輯欄打過字）就不再自動換；沒點過時跟著 defaultSelection 走，
+/// 這樣比對完、寫入後，右邊會自動換到下一則還要寫的稿。
+let selectedByUser = false;
+/// 這一次畫出來的表格順序（給 ↑↓ 換選取用）。
+let visibleOrder = [];
+
 function isTypingInList() {
   const a = document.activeElement;
-  return !!(a && el("list").contains(a) && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && a.type === "text")));
+  // 編輯欄搬到右邊後不在 #list 裡面，也要算「正在打字」，不然自動刷新一輪會把正在打的字蓋掉。
+  const inCards = a && (el("list").contains(a) || el("editor").contains(a));
+  return !!(inCards && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && a.type === "text")));
 }
 
-el("list").addEventListener("focusout", () => {
-  // Wait for focus to land: tabbing between two fields of one card is still typing.
-  setTimeout(() => { if (renderDeferred && !isTypingInList()) render(); }, 0);
+el("editor").addEventListener("focusin", () => { selectedByUser = true; });
+
+for (const id of ["list", "editor"]) {
+  el(id).addEventListener("focusout", () => {
+    // Wait for focus to land: tabbing between two fields of one card is still typing.
+    setTimeout(() => { if (renderDeferred && !isTypingInList()) render(); }, 0);
+  });
+}
+
+function selectCard(id, { scroll = false } = {}) {
+  if (!id) return;
+  selectedByUser = true;
+  if (id === selectedId) return;
+  selectedId = id;
+  render();
+  if (scroll) document.querySelector(`#list .card[data-id="${id}"]`)?.scrollIntoView({ block: "nearest" });
+}
+
+// 點表格的一列就換右邊編輯欄；點勾選框、按鈕不算（那些有自己的動作）。
+el("list").addEventListener("click", (e) => {
+  const row = e.target.closest(".card");
+  if (!row || e.target.closest("input, label, button")) return;
+  selectCard(row.dataset.id);
+});
+
+// ↑↓ 換上一則／下一則（游標在輸入框、選單或彈出視窗裡時不搶按鍵）。
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  if (viewMode !== "script" || document.querySelector(".modal-backdrop")) return;
+  const a = document.activeElement;
+  if (a && (a.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(a.tagName) || a.closest("details.more"))) return;
+  const at = visibleOrder.indexOf(selectedId);
+  const next = visibleOrder[at + (e.key === "ArrowDown" ? 1 : -1)];
+  if (!next) return;
+  e.preventDefault();
+  selectCard(next, { scroll: true });
 });
 
 function render() {
@@ -507,10 +572,20 @@ function render() {
   }
   renderDeferred = false;
   const shown = activeFilter === "all" ? items : items.filter((i) => i.bucket === activeFilter);
-  // Ticked cards first so they don't have to be scrolled for; display only -- `items`
-  // itself stays in running order, which is what the output follows.
-  const visible = sortForDisplay(shown);
-  el("list").innerHTML = visible.map(cardHtml).join("");
+  // 照播出時間排、節次之間插分隔列（v0.3.49）；只影響畫面，`items` 本身的順序不動。
+  const rows = rundownRows(shown);
+  visibleOrder = rows.filter((r) => r.item).map((r) => r.item.id);
+  if (!visibleOrder.includes(selectedId)) selectedByUser = false;
+  if (!selectedByUser) selectedId = defaultSelection(rows.filter((r) => r.item).map((r) => r.item));
+  el("list").innerHTML = rows
+    .map((r) => (r.divider
+      ? `<div class="rundown-divider"><span class="mono">==== ${escapeHtml(r.divider.slice(0, 2))} ====</span><span>${escapeHtml(r.divider)} 節</span></div>`
+      : cardHtml(r.item).row))
+    .join("");
+  const sel = items.find((i) => i.id === selectedId);
+  el("editor").innerHTML = sel
+    ? cardHtml(sel).editor
+    : `<div class="editor-empty">${items.length ? "點左邊任一則稿，標題、內文、關鍵字會在這裡編輯。也可以用 ↑↓ 換。" : "還沒有稿件。"}</div>`;
 
   document.querySelectorAll(".edit-title").forEach((elm) => {
     elm.addEventListener("input", (e) => {
@@ -549,7 +624,7 @@ function render() {
       }
       renderFunnel();
       updateKeywordButton();
-      // Move the card into the ticked/unticked group straight away.
+      // 重畫一次：漏斗、色條、按鈕數字跟著勾選變。
       render();
     });
   });
@@ -565,14 +640,6 @@ function render() {
   });
   document.querySelectorAll(".normalize-btn").forEach((elm) => {
     elm.addEventListener("click", (e) => normalizeOne(e.target.dataset.id));
-  });
-  document.querySelectorAll(".collapse-toggle").forEach((elm) => {
-    elm.addEventListener("click", (e) => {
-      const item = items.find((i) => i.id === e.target.dataset.id);
-      if (!item) return;
-      item.collapsed = !item.collapsed;
-      render();
-    });
   });
   // The button carries a live count of what a run would send, so it has to be
   // recomputed by the one path every state change already goes through -- and so do
@@ -1025,6 +1092,11 @@ function renderStatusBar() {
   el("sbLastWrite").textContent = v.lastWrite;
 }
 setInterval(renderStatusBar, 1000);
+
+// 右邊編輯欄黏在狀態列＋工具列下面：量它們的高度給 CSS 用（視窗變窄、工具列換行時會變）。
+new ResizeObserver(([entry]) => {
+  document.documentElement.style.setProperty("--top-h", `${Math.ceil(entry.target.getBoundingClientRect().height)}px`);
+}).observe(document.querySelector(".topbar"));
 
 function noteWriteForStatusBar(count) {
   if (count > 0) lastWriteShown = { at: Date.now(), count };
@@ -1835,6 +1907,9 @@ async function loadSearchHit(hit, btn) {
     }
     items = sortByTime([...items, item]);
     hasCompared = false;
+    // 手動載入的那則直接顯示在右邊編輯欄。
+    selectedId = item.id;
+    selectedByUser = true;
     updateStatsFromItems();
     renderFunnel();
     render();

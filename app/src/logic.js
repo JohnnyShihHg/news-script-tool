@@ -243,12 +243,30 @@
   }
 
   /**
-   * Card order on screen: ticked entries first, unticked after, each group still in
-   * running order. Stable, so it never reshuffles entries within a group.
+   * 畫面上的 rundown 表格（v0.3.49）：一律照播出時間排，節次換了就插一列分隔
+   * （{ divider: "1800" }），跟協作文件的 ==== 18 ==== 對得起來。以前是「勾選的排前面」，
+   * 順序跟節次不一致，沒辦法加分隔列。資料夾匯入的稿沒有節次，就不插分隔列。
    */
-  function sortForDisplay(items) {
-    const sorted = sortByTime(items);
-    return [...sorted.filter((i) => i.included), ...sorted.filter((i) => !i.included)];
+  function rundownRows(items) {
+    const rows = [];
+    let last = null;
+    for (const item of sortByTime(items)) {
+      const show = item.inews?.show ?? "";
+      if (show && show !== last) rows.push({ divider: show });
+      if (show) last = show;
+      rows.push({ item });
+    }
+    return rows;
+  }
+
+  /**
+   * 右邊編輯欄預設顯示哪一則（v0.3.49）：還沒選、或選的那則不在畫面上時才用。
+   * 先挑第一則「會寫出去、還不在文件裡」的（最可能要改的），沒有就第一則，沒稿就 null。
+   * 使用者自己點過的不會被換掉（app.js 只在選取消失時才呼叫）。
+   */
+  function defaultSelection(items) {
+    const pending = items.find((i) => i.included && !i.alreadyInDoc);
+    return (pending ?? items[0])?.id ?? null;
   }
 
   /** The backend enum tag carried on every entry DTO. */
@@ -1341,7 +1359,8 @@
     bucketOf,
     itemFromDto,
     sortByTime,
-    sortForDisplay,
+    rundownRows,
+    defaultSelection,
     OUTPUT_BUCKETS,
     isOutputBucket,
     canOutputBucket,

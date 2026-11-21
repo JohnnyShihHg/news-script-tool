@@ -14,6 +14,7 @@
     [kind]: { slug, time, style, group, title, body, file_name: `${slug}.txt`, warnings: [] },
   });
   const entries = [
+    entry("Passed", "合成冠軍賽1700", "16:58:20", "SOT", "體育", "職棒冠軍賽 主場搶下聽牌", "合成內文：職棒冠軍賽第五戰，主場球隊搶下聽牌。"),
     entry("Passed", "合成颱風路徑1800", "17:44:10", "SOT", "氣象", "颱風路徑北修 北部明起防豪雨", "合成內文：颱風路徑往北修正，北部明天起要注意豪雨。"),
     entry("Passed", "合成高鐵延誤1800", "17:46:32", "SL", "交通", "高鐵號誌故障 南下班次延誤", "合成內文：高鐵號誌故障，南下班次延誤約二十分鐘。"),
     entry("Passed", "合成利率決議1800", "17:51:05", "SOT", "財經", "央行維持利率不變", "合成內文：央行今天召開理監事會，決議維持政策利率不變。"),
@@ -62,10 +63,10 @@
     await new Promise((r) => setTimeout(r, 300));
     // 模擬「已比對、兩則已寫入、自動刷新開著」的樣子（只改畫面用的狀態）。
     items.forEach((i, n) => {
-      if (n < 2) { i.alreadyInDoc = true; i.included = false; i.matchStatus = "to_cut"; i.matchedLine = `${i.time.slice(0, 5).replace(":", "")} ${i.dto[i.kind].slug} 寫入的那一行`; }
+      i.inews = { show: i.time < "17:43:30" ? "1700" : "1800", hold: null };
+      if (n < 3) { i.alreadyInDoc = true; i.included = false; i.matchStatus = "to_cut"; i.matchedLine = `${i.time.slice(0, 5).replace(":", "")} ${i.dto[i.kind].slug} 寫入的那一行`; }
       else if (i.bucket === "passed") i.matchStatus = "to_cut";
     });
-    items[2].collapsed = false;
     hasCompared = true;
     inewsShow = "1800";
     el("inewsAutoToggle").checked = true;

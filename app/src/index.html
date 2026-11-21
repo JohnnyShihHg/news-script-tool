@@ -104,12 +104,17 @@
   <div id="compareStatus" class="compare-status hidden"></div>
 
 
-  <div id="listHead" class="list-head hidden"><span></span><span>輸出</span><span>時間</span><span>SLUG</span><span>樣式</span><span>組別</span><span>狀態</span></div>
-  <main id="list"></main>
+  <div class="rundown-split">
+    <div class="rundown-main">
+      <div id="listHead" class="list-head hidden"><span></span><span>輸出</span><span>時間</span><span>SLUG</span><span>樣式</span><span>組別</span><span>狀態</span></div>
+      <main id="list"></main>
 
-  <footer id="emptyState" class="empty-state">
-    尚未匯入任何檔案。先到「設定」綁定存放 iNews txt 的預設匯入資料夾，再點左上角「匯入資料夾」。
-  </footer>
+      <footer id="emptyState" class="empty-state">
+        尚未匯入任何檔案。先從「從 iNEWS 匯入」讀稿；要用資料夾的話，先到「設定」綁定預設匯入資料夾，再點「更多 → 匯入資料夾」。
+      </footer>
+    </div>
+    <aside id="editor" class="editor-panel" aria-label="編輯選取的稿"></aside>
+  </div>
   </div>
 
   <div id="eveningView" class="view hidden">

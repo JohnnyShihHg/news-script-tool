@@ -87,6 +87,38 @@
   --bar-bg: #081a30;
 }
 
+/* 主控室：照外觀方案 A 的深色播出監看風格，寫入鍵用監看藍。 */
+[data-theme="control"] {
+  color-scheme: dark;
+  --bg: #0d1015;
+  --panel: #151a21;
+  --subtle: #1b212a;
+  --input-bg: #10141a;
+  --info-bg: #12243a;
+  --border: #252c36;
+  --text: #d6dce4;
+  --muted: #7f8a98;
+  --accent: #5aa6ff;
+  --accent-fg: #04101f;
+  --sel: #16263a;
+  --ok: #3ccf7e;
+  --ok-bg: #0f2a1c;
+  --warn: #f5b83d;
+  --warn-bg: #33270c;
+  --danger: #ef4444;
+  --danger-bg: #3a1416;
+  --unknown: #a78bfa;
+  --unknown-bg: #241c3a;
+  --bar-deep: #090b0f;
+  --bar-bg: #151a21;
+  --bar-line: #252c36;
+  --bar-fg: #e8edf3;
+  --bar-muted: #7f8a98;
+  --cta: #5aa6ff;
+  --cta-fg: #04101f;
+  --onair: #ef4444;
+}
+
 [data-theme="warm"] {
   color-scheme: light;
   --subtle: #efe7d8;
@@ -436,8 +468,72 @@ button.cta:disabled { opacity: .35; }
   align-items: center;
   column-gap: 10px;
 }
+/* 左邊 rundown 表格、右邊編輯欄（v0.3.49）。編輯欄黏在畫面上，捲表格時不會跑掉；
+   --top-h 是上面狀態列＋工具列的高度，由 app.js 量好設進來。 */
+.rundown-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 36%);
+  gap: 14px;
+  align-items: start;
+  padding: 10px 16px 40px;
+}
+.rundown-main { min-width: 0; }
+#list { padding: 0; }
+.editor-panel {
+  position: sticky;
+  top: calc(var(--top-h, 92px) + 10px);
+  max-height: calc(100vh - var(--top-h, 92px) - 20px);
+  overflow-y: auto;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: 6px;
+  min-width: 0;
+}
+.editor-panel:empty { display: none; }
+.editor-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.editor-slug { font-size: var(--fs-l); font-weight: 600; color: var(--text); word-break: break-all; }
+.editor-meta { display: flex; gap: 12px; color: var(--muted); }
+.editor-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.editor-line {
+  font-size: var(--fs-s);
+  color: var(--muted);
+  background: var(--subtle);
+  padding: 4px 8px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+.editor-file { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.editor-body { padding: 12px 14px 4px; }
+.editor-body .field textarea { min-height: 220px; }
+.editor-empty { padding: 40px 20px; color: var(--muted); text-align: center; }
+@media (max-width: 1000px) {
+  .rundown-split { grid-template-columns: minmax(0, 1fr); }
+  .editor-panel { position: static; max-height: none; }
+}
+
+.rundown-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px 4px 16px;
+  background: var(--subtle);
+  border: 1px solid var(--border);
+  border-top: 0;
+  color: var(--muted);
+  font-size: var(--fs-s);
+  letter-spacing: .06em;
+}
+.rundown-divider .mono { color: var(--accent); font-weight: 600; }
+
 .list-head {
-  margin: 10px 16px 0;
   padding: 6px 12px 6px 16px;
   font-size: var(--fs-s);
   color: var(--muted);
@@ -460,10 +556,15 @@ main { padding: 0 16px 60px; display: flex; flex-direction: column; }
   border-left: 4px solid transparent;
   padding: 7px 12px;
 }
-#list .card:first-child, #evList .card:first-child { border-top: 1px solid var(--border); }
-#list .card:last-child, #evList .card:last-child { border-radius: 0 0 6px 6px; }
+#list > :first-child, #evList .card:first-child { border-top: 1px solid var(--border); }
+#list > :last-child, #evList .card:last-child { border-radius: 0 0 6px 6px; }
 #evList .card:first-child { border-radius: 6px 6px 0 0; }
-.card:not(.collapsed) { background: var(--input-bg); box-shadow: inset 0 0 0 1px var(--accent); }
+#evList .card:not(.collapsed) { background: var(--input-bg); box-shadow: inset 0 0 0 1px var(--accent); }
+#list .card { cursor: pointer; }
+#list .card:hover { background: var(--subtle); }
+#list .card.selected, #list .card.selected:hover { background: var(--sel); box-shadow: inset 0 0 0 1px var(--accent); }
+#list .card.selected .card-head { opacity: 1; }
+.sel-mark { color: var(--accent); font-size: var(--fs-s); text-align: center; }
 .card.passed { border-left-color: var(--ok); }
 .card.unknown { border-left-color: var(--unknown); }
 .card.manual { border-left-color: var(--warn); }

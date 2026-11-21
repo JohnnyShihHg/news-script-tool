@@ -445,19 +445,22 @@ test("the marker never becomes part of the slug used for doc matching", () => {
   assert.equal(item.slug, "合成焦點報導1800");
 });
 
-// --- sortForDisplay: ticked cards on top, running order kept inside each group ---
+// --- rundownRows: running order regardless of ticks, a divider row whenever the show changes ---
 
-test("sortForDisplay puts ticked entries first and keeps time order within each group", () => {
+test("rundownRows keeps running order whatever is ticked and puts a divider before each show", () => {
   const items = [
-    { slug: "a", time: "10:00:00", included: false },
-    { slug: "b", time: "09:00:00", included: true },
-    { slug: "c", time: "08:00:00", included: false },
-    { slug: "d", time: "11:00:00", included: true },
-    { slug: "e", time: "", included: true },
+    { slug: "c18", time: "17:46:00", included: true, inews: { show: "1800" } },
+    { slug: "a17", time: "16:58:00", included: false, inews: { show: "1700" } },
+    { slug: "b18", time: "17:44:00", included: false, inews: { show: "1800" } },
+    { slug: "x", time: "", included: true, inews: { show: "1800" } },
   ];
-  assert.deepEqual(L.sortForDisplay(items).map((i) => i.slug), ["b", "d", "e", "c", "a"]);
+  const rows = L.rundownRows(items).map((r) => r.divider ? `==${r.divider}` : r.item.slug);
+  // 1700 的稿沒勾也排在前面：畫面順序跟寫進文件的順序一樣，分隔列才不會誤導。
+  assert.deepEqual(rows, ["==1700", "a17", "==1800", "b18", "c18", "x"]);
   // Display only: the input's own order is untouched.
-  assert.deepEqual(items.map((i) => i.slug), ["a", "b", "c", "d", "e"]);
+  assert.deepEqual(items.map((i) => i.slug), ["c18", "a17", "b18", "x"]);
+  // 資料夾匯入的稿沒有節次：不插分隔列。
+  assert.deepEqual(L.rundownRows([{ slug: "f", time: "09:00:00" }]).map((r) => r.item.slug), ["f"]);
 });
 
 // --- itemFromDto: the layer v0.1.9's tests skipped over ---
@@ -1737,4 +1740,15 @@ test("status bar shows ON AIR only while auto refresh runs and a show is known",
 
   assert.equal(L.statusBarView({ now, auto: true, show: "", nextRoundAt: null, lastWrite: null }).tally, "連線 iNEWS 中");
   assert.equal(L.statusBarView({ now, auto: true, show: "1800", nextRoundAt: at - 5000, lastWrite: null }).next, "0:00", "an overdue round never counts negative");
+});
+
+test("the editor panel opens on the first story that will still be written, not one already in the doc", () => {
+  const items = [
+    { id: "a", included: false, alreadyInDoc: true },
+    { id: "b", included: true, alreadyInDoc: true },
+    { id: "c", included: true, alreadyInDoc: false },
+  ];
+  assert.equal(L.defaultSelection(items), "c");
+  assert.equal(L.defaultSelection([{ id: "x", included: false }]), "x", "nothing pending: first row");
+  assert.equal(L.defaultSelection([]), null);
 });
