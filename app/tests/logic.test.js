@@ -1621,6 +1621,36 @@ test("a manual write records the same as the auto write (v0.3.44): a re-keyed sa
   assert.deepEqual(L.freshForWrite([rekeyed], r.writtenKeys, r.writtenSlugs, appSlugOf), []);
 });
 
+test("a story released for rewrite is fresh again, so its show can close (11/21 1400 stall, v0.3.45)", () => {
+  const rec = { writtenKeys: new Set(), writtenSlugs: new Set(), writtenStories: new Map(), writtenPrints: new Set() };
+  // 12:03 寫了 1200 的 (寰)川逼烏俄和1100。
+  const [old] = L.inewsItemsFromSummary(inewsSummary("1200", [{ slug: "(寰)合成國際1100", key: "A:1", version: "v1" }]));
+  old.matchStatus = "to_cut";
+  old.keywords = "#國際";
+  L.recordAutoWrite([old], rec, appSlugOf);
+  // 12:45 文件裡連續 3 次找不到 → [重寫]。
+  L.releaseForRewrite("A:1|v1", old, rec, appSlugOf);
+  assert.equal(L.isPendingWrite(old, rec.writtenKeys), true);
+  // 以前 writtenSlugs 還留著「slug｜版本」，這裡會是 []：寫入前默默濾掉、也不記紀錄。
+  assert.deepEqual(L.freshForWrite([old], rec.writtenKeys, rec.writtenSlugs, appSlugOf), [old]);
+  // 14:05 補掃 1200 完：1400 的稿跟 1200 那則一起寫，1200 收得了尾，1400 不再被擋。
+  const [next] = L.inewsItemsFromSummary(inewsSummary("1400", [{ slug: "合成國道1400", key: "B:1", version: "v1" }]));
+  next.matchStatus = "to_cut";
+  next.keywords = "#國道";
+  const fresh = L.freshForWrite([old, next], rec.writtenKeys, rec.writtenSlugs, appSlugOf);
+  const plan = L.composeInewsWrite(
+    fresh,
+    { lastShow: "1200", closed: new Set(["1200"]), pending: L.pendingShows([old, next], fresh, rec.writtenKeys), programs: new Map() },
+    { format: "==== {hh} ====", position: "before" },
+    (g) => g.map(appSlugOf).join("\n")
+  );
+  assert.deepEqual(plan.held, []);
+  assert.deepEqual(plan.written.map(appSlugOf), ["(寰)合成國際1100", "合成國道1400"]);
+  assert.deepEqual(plan.dividers, ["==== 14 ===="]);
+  // 重開 App 之後：集合都是空的，本來就不會擋（14:18 重開後就寫了）。
+  assert.deepEqual(L.freshForWrite([old], new Set(), new Set(), appSlugOf), [old]);
+});
+
 test("prelist is marked done only after the write succeeds (v0.3.44)", () => {
   // 第一次寫入讀了預列清單，但寫入沒成（未就緒）：維持沒補過，下一輪還會再讀。
   let done = "";

@@ -67,6 +67,7 @@ const {
   freshForWrite,
   recordAutoWrite,
   prelistDoneAfterWrite,
+  releaseForRewrite,
   writeLogNote: writeLogNoteFor,
   heldText: heldTextFor,
   noteChange,
@@ -1250,11 +1251,9 @@ async function runInewsPipeline() {
     const v = vanishedWrites(items, writtenKeys, vanishStreaks, VANISH_ROUNDS);
     vanishStreaks = v.streaks;
     for (const key of v.release) {
-      writtenKeys.delete(key);
       const item = items.find((i) => writtenKey(i) === key);
-      // 指紋也要拿掉，不然下面的 adoptWrittenPrints 會馬上把它認回「已寫過」（v0.3.41）。
-      if (item) writtenPrints.delete(contentPrint(item));
-      reopenForRewrite(item);
+      // 版本 key、指紋、slug｜版本全部拿掉（v0.3.45），不然寫入前會被當成寫過、默默濾掉。
+      releaseForRewrite(key, item, { writtenKeys, writtenSlugs, writtenPrints }, slugOf);
       logDecision(`[重寫] ${item ? slugOf(item) : key}：工具寫過，但文件今天的段落連續 ${VANISH_ROUNDS} 次比對都找不到，重新寫入`);
     }
   }
@@ -1430,9 +1429,18 @@ async function writeInewsItems(ready) {
   const fresh = freshForWrite(ready, writtenKeys, writtenSlugs, slugOf);
   const { text, pieces, lastShow, written, held, dividers } = inewsWriteText(fresh);
   if (!text.trim()) {
+    // 以前這裡什麼都不記：11/21 0800、1400 換節各卡十幾分鐘，紀錄一片空白（v0.3.45）。
+    const dropped = ready.filter((i) => !fresh.includes(i));
+    noteOnce(
+      "fresh-empty",
+      `[等待寫入] 寫入前再擋一次後沒有可寫的` +
+        (dropped.length ? `：${dropped.length} 則這次 session 已寫過同一版本（${dropped.map(slugOf).join("、")}）` : "") +
+        (held.length ? `；${held.length} 則等 ${lastWrittenShow} 節收尾` : "")
+    );
     if (held.length) showHeldNotice(held);
     return;
   }
+  noteOnce("fresh-empty", "");
   const status = el("compareStatus");
   status.classList.remove("hidden");
   status.className = "compare-status";

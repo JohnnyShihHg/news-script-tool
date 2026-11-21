@@ -2015,7 +2015,9 @@ mod tests {
     fn switching_shows_does_a_final_sync_of_the_old_one_then_sweeps_it_ten_minutes_later() {
         let server = two_shows(None);
         let mut state = InewsState::default();
-        let c = cfg(server.port);
+        let mut c = cfg(server.port);
+        // 這個測試的時間軸照「換節後 10 分鐘」寫（預設 11/21 起改成 5 分鐘，這裡明確設回 10）。
+        c.sweep_delay_minutes = 10;
         let auto = |start| FetchMode::Auto { session_start: start };
         // 08:51 開始自動刷新：0800，=CM 3==（08:50）剛播。
         let r = state.fetch(&c, &creds("secret"), 8 * 3600 + 51 * 60, auto(true)).unwrap();

@@ -561,7 +561,9 @@ impl Default for InewsConfig {
                 .into_iter()
                 .map(|(a, b)| (a.to_string(), b.to_string()))
                 .collect(),
-            sweep_delay_minutes: 10,
+            // 11/21 每次換節新一節的稿都要等滿 10 分鐘（0900、1000、1400 各卡約 10 分）才寫，改 5 分。
+            // 補掃之後才出現的晚播稿交給定時複查補寫。
+            sweep_delay_minutes: 5,
             cutoff_by_marker: false,
             broadcast_day_start: "02:00".into(),
             auto_date_header: true,
@@ -933,7 +935,7 @@ theme = "warm"
         assert!(cfg.inews.auto_write);
         assert_eq!(cfg.inews.slot_spans.get("1200").map(String::as_str), Some("1400"));
         assert_eq!(cfg.inews.slot_spans.get("1800").map(String::as_str), Some("2000"));
-        assert_eq!(cfg.inews.sweep_delay_minutes, 10);
+        assert_eq!(cfg.inews.sweep_delay_minutes, 5, "沒寫的欄位用預設值（11/21 起 5 分鐘）");
         assert!(!cfg.inews.cutoff_by_marker);
         // And it round-trips with the new keys.
         let back = load_from_str(&toml::to_string(&cfg).unwrap()).unwrap();

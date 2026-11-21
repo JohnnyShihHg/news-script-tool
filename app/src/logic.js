@@ -613,6 +613,23 @@
   }
 
   /**
+   * 放行重寫時，把「這次 session 寫過」的記錄全部拿掉（v0.3.45）：版本 key、內容指紋，
+   * 還有 writtenSlugs 的「slug｜版本」。以前漏了 writtenSlugs：寫入前那道 freshForWrite 會把
+   * 這則默默濾掉、不寫也不記；它又還算「待寫」，上一節永遠收不了尾，下一節整批卡住，
+   * 直到有人手動寫入或重開 App（11/21 07:58～08:14 的 0800、14:05～14:18 的 1400；
+   * 11/20 09 卡 30 分鐘推測也是）。rec：{ writtenKeys, writtenSlugs, writtenPrints }。
+   */
+  function releaseForRewrite(key, item, rec, slugOf) {
+    rec.writtenKeys.delete(key);
+    if (item) {
+      rec.writtenPrints.delete(contentPrint(item));
+      rec.writtenSlugs.delete(slugOf(item));
+      rec.writtenSlugs.delete(`${slugOf(item)}|${item.inews?.version ?? ""}`);
+    }
+    reopenForRewrite(item);
+  }
+
+  /**
    * 這一輪「有稿在等、卻什麼都沒寫」時，逐則說明在等什麼（v0.3.39）。11/20 09:06～09:36 0900
    * 整節沒寫，紀錄只有比對，查不到卡在哪。回傳 [{ slug, why }]，只列還沒寫、這一輪也不能寫的。
    */
@@ -1232,6 +1249,7 @@
     freshForWrite,
     recordAutoWrite,
     prelistDoneAfterWrite,
+    releaseForRewrite,
     writeLogNote,
     heldText,
     noteChange,
