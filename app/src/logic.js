@@ -168,6 +168,20 @@
     return (items ?? []).filter((i) => canOutputBucket(i.bucket) && i.included);
   }
 
+  /**
+   * 表格一列的樣子（v0.3.54），四種：
+   * - "out"：準備寫入（跟「寫入」鍵、漏斗的「N 則寫入」同一套：可以輸出的分類而且有勾）→ 白字＋向上箭頭動畫。
+   * - "written"：文件裡已經有了（已在文件中）→ 白字。
+   * - "removed"：文件裡有、但被加標記剔除 → 70%。
+   * - "dim"：其他（沒勾、文件裡也沒有：已濾除、未知樣式、待補稿、解析失敗、手動取消勾選）→ 35%。
+   */
+  function rowTone(item) {
+    if (canOutputBucket(item.bucket) && item.included) return "out";
+    if (item.alreadyInDoc) return "written";
+    if (item.matchStatus === "removed") return "removed";
+    return "dim";
+  }
+
   /** Numbers behind the "N 則待處理 → N 則略過 → N 則寫入" line. */
   function computeFunnel(items) {
     // Filtered entries only enter the count once rescued, so the everyday numbers are
@@ -1438,6 +1452,7 @@
     splitKeywordRun,
     isRateLimitError,
     computeFunnel,
+    rowTone,
     outgoingItems,
     buildOutputText,
   };

@@ -1780,3 +1780,21 @@ test("the editor panel opens on the first story that will still be written, not 
   assert.equal(L.defaultSelection([{ id: "x", included: false }]), "x", "nothing pending: first row");
   assert.equal(L.defaultSelection([]), null);
 });
+
+test("row look: ready-to-write gets the arrow and matches the funnel, written is white, marked 70%, the rest 35%", () => {
+  const out = { bucket: "passed", included: true, matchStatus: "to_cut" };
+  const inDoc = { bucket: "passed", included: false, alreadyInDoc: true };
+  const marked = { bucket: "passed", included: false, matchStatus: "removed" };
+  const refresh = { bucket: "passed", included: true, matchStatus: "keep_refresh" };
+  const rescued = { bucket: "filtered", included: true };
+  const filtered = { bucket: "filtered", included: false };
+  const unknown = { bucket: "unknown", included: false };
+  const unticked = { bucket: "passed", included: false, matchStatus: "to_cut" };
+  assert.deepEqual(
+    [out, inDoc, marked, refresh, rescued, filtered, unknown, unticked].map(L.rowTone),
+    ["out", "written", "removed", "out", "out", "dim", "dim", "dim"],
+  );
+  // 準備寫入（有箭頭）的數量＝漏斗的「N 則寫入」。
+  const all = [out, inDoc, marked, refresh, rescued, filtered, unknown, unticked];
+  assert.equal(all.filter((i) => L.rowTone(i) === "out").length, L.computeFunnel(all).outgoing);
+});

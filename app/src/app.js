@@ -19,6 +19,7 @@ const {
   splitKeywordRun,
   isRateLimitError,
   computeFunnel,
+  rowTone,
   outgoingItems: outgoingOf,
   buildOutputText,
   eveningItemFromDto,
@@ -428,15 +429,17 @@ function cardHtml(item) {
         ${item.inews?.recheck ? `<span class="badge marker">複查補寫</span>` : ""}
         ${item.inews?.manual ? `<span class="badge manual-badge" title="從「搜尋 rundown」手動載入，換節次後清掉">手動載入</span>` : ""}`;
   const selected = id === selectedId;
+  const tone = rowTone(item);
 
   // 表格的一列（v0.3.49）：編輯欄不再展開在列下面，點一列就換右邊編輯欄的內容。
+  // v0.3.54：「輸出」兩個字由欄位標題代表；準備寫入的列在勾選框旁邊放一個向上的箭頭動畫。
   const row = `
-    <div class="card ${bucket} ${selected ? "selected" : ""} ${item.alreadyInDoc ? "done" : ""} ${item.inews?.manual ? "manual-loaded" : ""}" data-bucket="${bucket}" data-id="${id}">
+    <div class="card ${bucket} ${selected ? "selected" : ""} tone-${tone} ${item.inews?.manual ? "manual-loaded" : ""}" data-bucket="${bucket}" data-id="${id}">
       <div class="card-head">
         <span class="sel-mark" aria-hidden="true">${selected ? "▶" : ""}</span>
-        <label class="include-toggle">
+        <label class="include-toggle" title="輸出：勾了就會寫進協作文件">
           <input type="checkbox" class="include-cb" data-id="${id}" ${item.included ? "checked" : ""} />
-          輸出
+          ${tone === "out" ? `<span class="send-arrow" role="img" aria-label="準備寫入" title="準備寫入"></span>` : ""}
         </label>
         <span class="c-time mono">${escapeHtml(fields.time)}</span>
         <span class="slug mono" title="${escapeHtml(item.matchedLine ?? "")}">${escapeHtml(fields.slug)}</span>
@@ -644,6 +647,8 @@ function render() {
       ? `<div class="rundown-divider"><span class="mono">==== ${escapeHtml(r.divider.slice(0, 2))} ====</span><span>${escapeHtml(r.divider)} 節</span></div>`
       : cardHtml(r.item).row))
     .join("");
+  // 準備寫入的箭頭接著目前的節奏播（CSP 不准 HTML 裡的 style 屬性，所以從這裡設）。
+  el("listRows").style.setProperty("--phase", `${-(Date.now() % 1400) / 1000}s`);
   placeGlide();
   const sel = items.find((i) => i.id === selectedId);
   el("editor").innerHTML = sel

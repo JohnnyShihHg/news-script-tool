@@ -569,13 +569,11 @@ main { padding: 0 16px 60px; display: flex; flex-direction: column; }
 .card.unknown { border-left-color: var(--unknown); }
 .card.manual { border-left-color: var(--warn); }
 .card.filtered { border-left-color: var(--border); }
-.card.filtered .card-head { opacity: .7; }
+
 .card.failed { border-left-color: var(--danger); }
 .card.ev-hit { border-left-color: var(--ok); }
 .card.ev-miss { border-left-color: var(--border); }
 .card.ev-miss .card-head { opacity: .75; }
-.card.done .card-head { opacity: .55; }
-.card.done:hover .card-head { opacity: 1; }
 .card.manual-loaded { border-style: dashed; border-color: var(--accent); border-left: 4px solid var(--accent); }
 
 /* 狀態標籤、檔名等其餘欄位在最後一格裡排成一行 */
@@ -937,3 +935,43 @@ body.script-mode .editor-panel { scrollbar-width: none; }
 body.script-mode .editor-panel::-webkit-scrollbar { display: none; }
 .search-modal .modal-body { scrollbar-width: none; overscroll-behavior: contain; }
 .search-modal .modal-body::-webkit-scrollbar { display: none; }
+
+/* ---------- 列的四種樣子（v0.3.54，logic.js rowTone） ----------
+   準備寫入：白字＋勾選框旁的向上箭頭；已寫入（文件裡已有）：白字；已剔除：70%；其他：35%。
+   選中的那一列一律全亮，滑鼠移上去也會亮一點。 */
+#listRows .card.tone-removed .card-head { opacity: .7; }
+#listRows .card.tone-dim .card-head { opacity: .35; }
+#listRows .card.tone-removed:hover .card-head, #listRows .card.tone-dim:hover .card-head { opacity: .85; }
+#listRows .card.selected .card-head { opacity: 1; }
+
+.send-arrow {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 16px;
+  overflow: hidden;
+  vertical-align: middle;
+}
+.send-arrow::before, .send-arrow::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 6px;
+  height: 6px;
+  border-left: 2px solid var(--ok);
+  border-top: 2px solid var(--ok);
+  transform: rotate(45deg);
+  animation: send-up 1.4s cubic-bezier(.4, 0, .6, 1) var(--phase, 0s) infinite;
+}
+.send-arrow::after { animation-delay: calc(var(--phase, 0s) + .7s); }
+/* 表格每輪重畫時，用 --phase 接著目前的節奏播，箭頭不會每 10 秒跳回起點。 */
+@keyframes send-up {
+  0% { top: 14px; opacity: 0; }
+  35% { opacity: 1; }
+  100% { top: -4px; opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .send-arrow::before { animation: none; opacity: 1; }
+  .send-arrow::after { display: none; }
+}
