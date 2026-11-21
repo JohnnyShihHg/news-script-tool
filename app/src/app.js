@@ -453,8 +453,7 @@ function cardHtml(item) {
   const editor = `
       <div class="editor-head">
         <div class="editor-slug mono" title="${escapeHtml(item.matchedLine ?? "")}">${escapeHtml(fields.slug)}</div>
-        <div class="editor-meta"><span class="mono">${escapeHtml(fields.time)}</span><span>${escapeHtml(fields.style)}</span><span>${escapeHtml(fields.group)}</span></div>
-        <div class="editor-badges">${badges}</div>
+        <div class="editor-meta"><span class="mono">${escapeHtml(fields.time)}</span><span>${escapeHtml(fields.style)}</span><span>${escapeHtml(fields.group)}</span>${badges}</div>
         ${item.matchedLine ? `<div class="editor-line mono" title="協作文件裡找到的那一行">${escapeHtml(item.matchedLine)}</div>` : ""}
         <div class="editor-file"><span class="file-name">${escapeHtml(fields.file_name)}</span>
         ${hasDiff ? `<button class="diff-toggle" data-id="${id}">顯示轉換前後</button>` : ""}</div>
@@ -472,21 +471,21 @@ function cardHtml(item) {
       <div id="diff-title-${id}" class="diff-box hidden">${titleDiff ?? "（標點未變動）"}</div>
 
       <div class="field">
-        <label>內文</label>
+        <div class="field-label-row">
+          <label>內文</label>
+          <!-- v0.3.52：說明文字收進滑鼠提示，按鈕移到標籤旁，720 高的視窗也放得下整個編輯欄。 -->
+          <button class="normalize-btn" data-id="${id}" ${item.normalizing ? "disabled" : ""}
+            title="匯入時的標點正規化只跑一次；這裡手動打的或貼上的字要自己按這個才會套用同一套規則（標題＋內文）。">
+            ${item.normalizing ? "校正中…" : "校正標點"}
+          </button>
+        </div>
         <textarea class="edit-body" data-id="${id}">${escapeHtml(item.body)}</textarea>
-      </div>
-      <div id="diff-body-${id}" class="diff-box hidden">${bodyDiff ?? "（標點未變動）"}</div>
-
-      <div class="field">
-        <button class="normalize-btn" data-id="${id}" ${item.normalizing ? "disabled" : ""}>
-          ${item.normalizing ? "校正中…" : "校正標點（標題＋內文）"}
-        </button>
-        <span class="muted">匯入時的標點正規化只跑一次；這裡手動打的或貼上的字要自己按這個才會套用同一套規則。</span>
         ${item.normalizeWarnings && item.normalizeWarnings.length ? `
           <div class="warnings">
             ${item.normalizeWarnings.map((w) => `<div class="w">⚠ ${escapeHtml(w)}</div>`).join("")}
           </div>` : ""}
       </div>
+      <div id="diff-body-${id}" class="diff-box hidden">${bodyDiff ?? "（標點未變動）"}</div>
 
       <div class="field">
         <label>關鍵字（空格分隔）</label>

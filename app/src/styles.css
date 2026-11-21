@@ -920,3 +920,19 @@ body.script-mode .editor-body .field textarea { flex: 1 1 auto; min-height: 100p
   .tally.live, .tally.live::before { animation: none; }
   .sel-glide { transition: none; }
 }
+
+/* ---------- 編輯欄精簡（v0.3.52）：720 高的視窗也整欄放得下，不出現捲軸 ---------- */
+.editor-head { gap: 4px; padding: 10px 14px; }
+.editor-meta { flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.editor-body { padding: 10px 14px 2px; }
+.editor-body .field { margin-bottom: 8px; }
+.field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 3px; }
+.field-label-row label { margin-bottom: 0; }
+.field-label-row .normalize-btn { padding: 1px 8px; font-size: var(--fs-s); }
+body.script-mode .editor-body .field:has(textarea) { min-height: 110px; }
+body.script-mode .editor-body .field textarea { min-height: 70px; }
+/* 編輯欄、搜尋 rundown 的結果：跟表格一樣可以捲，但不顯示捲軸。 */
+body.script-mode .editor-panel { scrollbar-width: none; }
+body.script-mode .editor-panel::-webkit-scrollbar { display: none; }
+.search-modal .modal-body { scrollbar-width: none; overscroll-behavior: contain; }
+.search-modal .modal-body::-webkit-scrollbar { display: none; }
