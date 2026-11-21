@@ -1651,6 +1651,35 @@ test("a story released for rewrite is fresh again, so its show can close (11/21 
   assert.deepEqual(L.freshForWrite([old], new Set(), new Set(), appSlugOf), [old]);
 });
 
+test("the [驗證] line names what the slug|version guard dropped and whether the content print knew it (v0.3.46)", () => {
+  const rec = { writtenKeys: new Set(), writtenSlugs: new Set(), writtenStories: new Map(), writtenPrints: new Set() };
+  const mk = (slug, key) => {
+    const [c] = L.inewsItemsFromSummary(inewsSummary("0900", [{ slug, key, version: "v1" }]));
+    c.matchStatus = "to_cut";
+    c.keywords = "#x";
+    return c;
+  };
+  const a = mk("合成甲0900", "A:1");
+  const b = mk("合成乙0900", "B:1");
+  L.recordAutoWrite([a, b], rec, appSlugOf);
+  // iNEWS 換了 key、卡片重建：版本 key 不同，slug｜版本相同 → 被擋。
+  const a2 = mk("合成甲0900", "A:9");
+  const b2 = mk("合成乙0900", "B:9");
+  rec.writtenPrints.delete(L.contentPrint(b2)); // 假設乙的指紋沒記到
+  const c = mk("合成丙0900", "C:1");
+  const ready = [a2, b2, c];
+  const fresh = L.freshForWrite(ready, rec.writtenKeys, rec.writtenSlugs, appSlugOf);
+  assert.deepEqual(fresh, [c]);
+  assert.equal(
+    L.slugGuardReport(ready, fresh, rec.writtenPrints, appSlugOf),
+    "[驗證] slug｜版本擋下 2 則：合成甲0900（指紋也認得）、合成乙0900（指紋認不出）"
+  );
+  // 沒擋任何稿：不記。
+  assert.equal(L.slugGuardReport([c], [c], rec.writtenPrints, appSlugOf), "");
+  // 重開 App 之後：集合都空，什麼都不擋，也不記。
+  assert.equal(L.slugGuardReport(ready, L.freshForWrite(ready, new Set(), new Set(), appSlugOf), new Set(), appSlugOf), "");
+});
+
 test("prelist is marked done only after the write succeeds (v0.3.44)", () => {
   // 第一次寫入讀了預列清單，但寫入沒成（未就緒）：維持沒補過，下一輪還會再讀。
   let done = "";

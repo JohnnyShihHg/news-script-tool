@@ -746,6 +746,22 @@
   }
 
   /** 自動寫入前再擋一次：同一個版本（或這次 session 寫過的 slug｜版本）不重複寫。 */
+  /**
+   * [驗證] 紀錄（v0.3.46）：寫入前 freshForWrite 擋下的稿（ready 裡有、fresh 裡沒有），逐則註明
+   * 內容指紋認不認得。用來判斷 writtenSlugs 是不是多餘：如果每次都是「指紋也認得」，就可以拿掉
+   * writtenSlugs、只留指紋（11/21 換節卡住就是兩份記錄不一致造成的）。沒擋任何稿回空字串。
+   */
+  function slugGuardReport(ready, fresh, writtenPrints, slugOf) {
+    const kept = new Set(fresh ?? []);
+    const dropped = (ready ?? []).filter((i) => !kept.has(i));
+    if (!dropped.length) return "";
+    const known = (i) => {
+      const p = contentPrint(i);
+      return p && writtenPrints?.has(p) ? "指紋也認得" : "指紋認不出";
+    };
+    return `[驗證] slug｜版本擋下 ${dropped.length} 則：` + dropped.map((i) => `${slugOf(i)}（${known(i)}）`).join("、");
+  }
+
   function freshForWrite(ready, writtenKeys, writtenSlugs, slugOf) {
     return (ready ?? []).filter(
       (i) => isPendingWrite(i, writtenKeys) && !writtenSlugs.has(`${slugOf(i)}|${i.inews?.version ?? ""}`)
@@ -1250,6 +1266,7 @@
     recordAutoWrite,
     prelistDoneAfterWrite,
     releaseForRewrite,
+    slugGuardReport,
     writeLogNote,
     heldText,
     noteChange,

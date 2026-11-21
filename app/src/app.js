@@ -68,6 +68,7 @@ const {
   recordAutoWrite,
   prelistDoneAfterWrite,
   releaseForRewrite,
+  slugGuardReport,
   writeLogNote: writeLogNoteFor,
   heldText: heldTextFor,
   noteChange,
@@ -1427,6 +1428,8 @@ function hideInewsConfirm() {
 async function writeInewsItems(ready) {
   // 寫入前再擋一次：同一個版本（或這次 session 寫過的 slug）不重複寫入。
   const fresh = freshForWrite(ready, writtenKeys, writtenSlugs, slugOf);
+  // 只記不改（v0.3.46）：writtenSlugs 擋下哪幾則、指紋認不認得。內容沒變就不重複記。
+  noteOnce("slug-guard", slugGuardReport(ready, fresh, writtenPrints, slugOf));
   const { text, pieces, lastShow, written, held, dividers } = inewsWriteText(fresh);
   if (!text.trim()) {
     // 以前這裡什麼都不記：11/21 0800、1400 換節各卡十幾分鐘，紀錄一片空白（v0.3.45）。
